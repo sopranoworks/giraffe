@@ -359,11 +359,15 @@ func TestSearch_DeclarationRanksAboveFileEntry(t *testing.T) {
 	}
 }
 
-// TestSearch_TopLevelRanksAboveMemberInSameTier (§28 C-38): a type
-// named Cluster must not rank below a same-named field or method,
+// TestSearch_TopLevelRanksAboveMemberInSameTier (§28 C-38, §29 C-42): a
+// type named Cluster must not rank below a same-named field or method,
 // exported or not — the risk directive 010 named explicitly ("find
 // Cluster returning Cluster plus seven of its methods is worse than
-// today").
+// today"). Since §29, this is a tier separation (tier() itself puts a
+// member's exact match below a top-level exact match), not a tie-break
+// within one shared tier — memberRank, tried in 010, ordered within a
+// tier but could not decide which entries filled the response budget
+// once a tier held more than it.
 func TestSearch_TopLevelRanksAboveMemberInSameTier(t *testing.T) {
 	entries := []entry.Entry{
 		{Name: "Cluster", Kind: "field", Path: "config.go", Exported: true},
@@ -377,6 +381,48 @@ func TestSearch_TopLevelRanksAboveMemberInSameTier(t *testing.T) {
 	}
 	if got[0].Kind != "type" {
 		t.Errorf("expected the top-level type ranked first, got %s first", got[0].Kind)
+	}
+}
+
+// TestSearch_TopLevelSubstringOutranksMemberExactMatch (§29 C-42): this
+// is the case memberRank could not fix. Many unrelated types' fields
+// are all named exactly "cluster" (tier: member exact match); a
+// different top-level type merely contains "cluster" as a substring of
+// its own name (tier: top-level substring match). The top-level
+// substring match must still outrank the member exact matches, because
+// it is a real declaration answering the same search, not a tie-break
+// among entries already sharing a tier.
+func TestSearch_TopLevelSubstringOutranksMemberExactMatch(t *testing.T) {
+	entries := []entry.Entry{
+		{Name: "cluster", Kind: "field", Path: "deployment_config.go", Exported: true},
+		{Name: "cluster", Kind: "field", Path: "watcher_actor.go", Exported: true},
+		{Name: "ClusterBootstrap", Kind: "type", Path: "cluster/bootstrap.go", Exported: true},
+	}
+	got := Search(entries, "Cluster", nil, "")
+	if len(got) != 3 {
+		t.Fatalf("expected all three to match, got %d: %v", len(got), got)
+	}
+	if got[0].Name != "ClusterBootstrap" {
+		t.Errorf("expected ClusterBootstrap (top-level substring match) ranked first, got %s (%s) first", got[0].Name, got[0].Kind)
+	}
+}
+
+// TestSearch_MemberStillWinsWhenItIsTheOnlyMatch (§29 C-42): demoting
+// members below top-level declarations must not make a member
+// unreachable when it is genuinely the right — or only — answer. A
+// method whose name matches nothing else in the index must still be
+// returned as the top (and only) result.
+func TestSearch_MemberStillWinsWhenItIsTheOnlyMatch(t *testing.T) {
+	entries := []entry.Entry{
+		{Name: "GetMailboxLengths", Kind: "method", Path: "mailbox.go", Exported: true},
+		{Name: "Unrelated", Kind: "type", Path: "other.go", Exported: true},
+	}
+	got := Search(entries, "GetMailboxLengths", nil, "")
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one match, got %d: %v", len(got), got)
+	}
+	if got[0].Name != "GetMailboxLengths" {
+		t.Errorf("expected the method itself, got %s", got[0].Name)
 	}
 }
 

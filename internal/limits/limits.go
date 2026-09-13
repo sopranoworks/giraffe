@@ -67,10 +67,43 @@ type Config struct {
 // it is a scheduling pressure, not a hard cap: RLIMIT_AS above is what
 // actually protects the host if a heap runs away.
 //
-// 64 MiB sits at 2x the last ceiling that showed no slowdown (32 MiB),
-// which is real headroom without the ~250x-too-loose problem RLIMIT_AS
-// has for this program (see its own doc comment above).
-const defaultHeapLimit = 64 << 20 // 64 MiB
+// 64 MiB sat at 2x the last ceiling that showed no slowdown against
+// gekka (32 MiB) — real headroom without the ~250x-too-loose problem
+// RLIMIT_AS has for this program (see its own doc comment above), but
+// calibrated against exactly one corpus's footprint.
+//
+// §29 C-43: it stopped being enough the moment a second, larger corpus
+// was measured against it. Directive 010 added methods and fields,
+// growing kubernetes' live-entry heap from ~50 MB to ~76 MB — both
+// already at or past 64 MiB, but 76 MB has no room left for the
+// runtime to work with at all. GOMEMLIMIT does not fail in that
+// state; it GCs continuously trying to reach a goal already below the
+// heap's own live floor (`GODEBUG=gctrace=1` showed 383 collections
+// in 1.5s against 49 before, each spinning up GOMAXPROCS worker
+// goroutines — expensive in its own right, and severely so under host
+// contention). Directive 011's own no-match measurement had first
+// attributed kubernetes' 0.37s→1.4s regression to query.Suggest,
+// following directive 010's diagnosis; every isolated component
+// (index.Load, index.Refresh, query.Suggest, query.Search) in fact
+// scaled proportionately to kubernetes' 1.92x entry growth, and this
+// was the actual, disproportionate cause underneath all of them.
+//
+// Re-measured the same way §20 C-4 originally was — cold,
+// `GODEBUG=gctrace=1`, repeated trials — but against kubernetes,
+// the corpus that actually exercises this ceiling:
+//
+//	64-192 MiB : 1.51s → 0.65s → 0.43s (falling as the ceiling nears
+//	             the live floor)
+//	256 MiB    : 0.42s (first ceiling with no measurable slowdown —
+//	             matches the pre-item-2, no-methods-and-fields baseline)
+//	384-768 MiB: 0.41-0.44s (flat)
+//
+// 512 MiB sits at 2x 256 MiB, the same "2x the last ceiling that
+// showed no slowdown" rule the original 64 MiB used, applied to the
+// corpus that now needs it. gekka and llvm-project's own live floors
+// (§27, §29: well under 64 MiB and ~48-53 MB respectively) sit far
+// inside this ceiling too, so neither sees any behaviour change.
+const defaultHeapLimit = 512 << 20 // 512 MiB
 
 // HeapLimit (GOMEMLIMIT) is chosen separately — see its own doc comment
 // below the measurement that produced it.

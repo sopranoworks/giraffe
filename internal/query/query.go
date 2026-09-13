@@ -157,24 +157,50 @@ func matchesAny(name string, e entry.Entry, values []string) bool {
 	return false
 }
 
-// tier ranks how an entry matched word: 0 is an exact name match, 3 a
-// path-only match, 4 no match at all. Lower is better.
+// tier ranks how an entry matched word: 0 is an exact name match on a
+// top-level declaration, 5 a path-only match, 6 no match at all. Lower
+// is better.
+//
+// §29 C-42: a method or field's name match is split into its own pair
+// of tiers, below both of a top-level declaration's — not merely
+// tie-broken within a shared tier (memberRank, §28 C-38, did that and
+// it was not enough: it orders entries within a tier but cannot decide
+// which fill the response budget once a tier holds more than
+// maxResults entries on its own). This is evidential weight, not
+// capacity: that a type is named "Cluster" says a great deal; that an
+// unrelated type has a field named "cluster" says almost nothing, and
+// the two must not compete for the same slots as equals. A member's
+// exact match still outranks any doc or path match, top-level or not —
+// it remains the strongest evidence available once no top-level name
+// match exists, which is what keeps a query like "GetMailboxLengths",
+// answered only by a method, working exactly as before.
 func tier(e entry.Entry, lowerWord string) int {
+	member := isMember(e)
 	switch {
-	case strings.EqualFold(e.Name, lowerWord):
+	case strings.EqualFold(e.Name, lowerWord) && !member:
 		return 0
-	case strings.Contains(strings.ToLower(e.Name), lowerWord):
+	case strings.Contains(strings.ToLower(e.Name), lowerWord) && !member:
 		return 1
-	case strings.Contains(strings.ToLower(e.Doc), lowerWord):
+	case strings.EqualFold(e.Name, lowerWord) && member:
 		return 2
-	case strings.Contains(strings.ToLower(e.Path), lowerWord):
+	case strings.Contains(strings.ToLower(e.Name), lowerWord) && member:
 		return 3
-	default:
+	case strings.Contains(strings.ToLower(e.Doc), lowerWord):
 		return 4
+	case strings.Contains(strings.ToLower(e.Path), lowerWord):
+		return 5
+	default:
+		return 6
 	}
 }
 
-const noMatch = 4
+const noMatch = 6
+
+// isMember reports whether e is a method or field rather than a
+// top-level declaration or a file (§28 C-38's two new Kind values).
+func isMember(e entry.Entry) bool {
+	return e.Kind == "method" || e.Kind == "field"
+}
 
 // declFileRank orders a declaration above a file entry within the same
 // match tier (§24 C-20): a func or type named "retry" answering "does
@@ -183,19 +209,6 @@ const noMatch = 4
 // language it came from — lang is not read here, by design.
 func declFileRank(e entry.Entry) int {
 	if e.Kind == entry.KindFile {
-		return 1
-	}
-	return 0
-}
-
-// memberRank orders a top-level declaration above a method or field
-// within the same match tier (§28 C-38): a type named "Cluster" must
-// never rank below one of its own — or any other type's — same-named
-// method or field. Driven by Kind's two member values explicitly, the
-// same style declFileRank already uses for KindFile, not inferred from
-// anything else about the entry.
-func memberRank(e entry.Entry) int {
-	if e.Kind == "method" || e.Kind == "field" {
 		return 1
 	}
 	return 0
@@ -222,54 +235,82 @@ func visible(e entry.Entry, invocationProject string) bool {
 	return e.Exported || e.Project == invocationProject
 }
 
-// Search returns the entries matching word — in name, doc, or path — and
-// every attribute in filter, ranked symbol-name match first, then
-// declaration-before-file-entry, then top-level-before-member, then
-// exported-before-unexported, then doc first-line match, then path
-// match (the directive's fixed ranking for this version: "do not tune
-// further"; §21 C-6 added the scope tie-break, §24 C-20 the
-// declaration-versus-file one, §28 C-38 the top-level-versus-member
-// one). invocationProject is the project the caller is searching from;
+// Search returns the entries matching word and every attribute in
+// filter, ranked by tier first (§29 C-42: exact top-level name match,
+// then substring top-level name match, then exact member name match,
+// then substring member name match, then doc first-line match, then
+// path match — a member's name match now sits below both of a
+// top-level declaration's, not merely tied and tie-broken against it,
+// since it is weaker evidence of what the caller is looking for), then
+// within a tier declaration-before-file-entry, then
+// exported-before-unexported (§21 C-6 added the scope tie-break, §24
+// C-20 the declaration-versus-file one). §7's "do not tune further" was
+// written when the index held only top-level declarations; §29 treats
+// it as a calibration to recheck, not a permanent rule, now that
+// members have changed the population it was calibrated against.
+// invocationProject is the project the caller is searching from;
 // package-scope entries outside it are excluded before ranking, not
 // merely ranked low.
 func Search(entries []entry.Entry, word string, filter Filter, invocationProject string) []entry.Entry {
 	lw := strings.ToLower(word)
-	var matches []entry.Entry
+	var ranked []rankedEntry
 	for _, e := range entries {
 		if !visible(e, invocationProject) {
 			continue
 		}
-		if tier(e, lw) == noMatch {
+		t := tier(e, lw)
+		if t == noMatch {
 			continue
 		}
 		if !filter.Match(e) {
 			continue
 		}
-		matches = append(matches, e)
+		// §29 C-43: tier, declFileRank and scopeRank are computed once
+		// per matched entry here, not recomputed on every pairwise
+		// comparison below. A word matching thousands of entries (a
+		// common short name, now with members in the mix) drives
+		// sort.SliceStable's comparator into the tens of thousands of
+		// calls; tier() alone allocates via strings.ToLower on every
+		// call, so recomputing it per comparison rather than per entry
+		// turned an O(n) cost into an O(n log n) one for no reason —
+		// measured (report) to grow faster than entry count alone
+		// predicts, unlike every other stage of the miss and hit paths.
+		// The rank and the entry travel together in one slice so
+		// sort.SliceStable's swaps cannot desynchronise them, which a
+		// second, separately-swapped slice would risk.
+		ranked = append(ranked, rankedEntry{e: e, tier: t, declFile: declFileRank(e), scope: scopeRank(e)})
 	}
-	sort.SliceStable(matches, func(i, j int) bool {
-		ti, tj := tier(matches[i], lw), tier(matches[j], lw)
-		if ti != tj {
-			return ti < tj
+	sort.SliceStable(ranked, func(i, j int) bool {
+		ri, rj := ranked[i], ranked[j]
+		if ri.tier != rj.tier {
+			return ri.tier < rj.tier
 		}
-		di, dj := declFileRank(matches[i]), declFileRank(matches[j])
-		if di != dj {
-			return di < dj
+		if ri.declFile != rj.declFile {
+			return ri.declFile < rj.declFile
 		}
-		mi, mj := memberRank(matches[i]), memberRank(matches[j])
-		if mi != mj {
-			return mi < mj
+		if ri.scope != rj.scope {
+			return ri.scope < rj.scope
 		}
-		si, sj := scopeRank(matches[i]), scopeRank(matches[j])
-		if si != sj {
-			return si < sj
+		if ri.e.Name != rj.e.Name {
+			return ri.e.Name < rj.e.Name
 		}
-		if matches[i].Name != matches[j].Name {
-			return matches[i].Name < matches[j].Name
-		}
-		return matches[i].Path < matches[j].Path
+		return ri.e.Path < rj.e.Path
 	})
+	matches := make([]entry.Entry, len(ranked))
+	for i, r := range ranked {
+		matches[i] = r.e
+	}
 	return matches
+}
+
+// rankedEntry pairs a matched entry with its ranking, computed once
+// (see Search) rather than recomputed on every pairwise comparison
+// during sorting.
+type rankedEntry struct {
+	e        entry.Entry
+	tier     int
+	declFile int
+	scope    int
 }
 
 // Browse returns every entry matching filter and visible from
