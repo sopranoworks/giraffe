@@ -359,6 +359,27 @@ func TestSearch_DeclarationRanksAboveFileEntry(t *testing.T) {
 	}
 }
 
+// TestSearch_TopLevelRanksAboveMemberInSameTier (§28 C-38): a type
+// named Cluster must not rank below a same-named field or method,
+// exported or not — the risk directive 010 named explicitly ("find
+// Cluster returning Cluster plus seven of its methods is worse than
+// today").
+func TestSearch_TopLevelRanksAboveMemberInSameTier(t *testing.T) {
+	entries := []entry.Entry{
+		{Name: "Cluster", Kind: "field", Path: "config.go", Exported: true},
+		{Name: "cluster", Kind: "field", Path: "watcher.go", Exported: false},
+		{Name: "Cluster", Kind: "method", Path: "cluster.go", Exported: true},
+		{Name: "Cluster", Kind: "type", Path: "cluster.go", Exported: true},
+	}
+	got := Search(entries, "Cluster", nil, "")
+	if len(got) != 4 {
+		t.Fatalf("expected all four to match, got %d: %v", len(got), got)
+	}
+	if got[0].Kind != "type" {
+		t.Errorf("expected the top-level type ranked first, got %s first", got[0].Kind)
+	}
+}
+
 func TestSearch_NoMatchIsExcluded(t *testing.T) {
 	entries := []entry.Entry{{Name: "Unrelated", Doc: "nothing here", Path: "x.go"}}
 	if got := Search(entries, "retry", nil, ""); len(got) != 0 {

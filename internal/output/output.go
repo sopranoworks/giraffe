@@ -126,7 +126,14 @@ func Summarize(entries []entry.Entry, commit string, reparsed int, warnings, not
 				undocPackage++
 			}
 		}
-		for _, p := range e.Position {
+		// Packages counts distinct language positions, not distinct
+		// Position pairs: a method or field (§28 C-38) carries a second
+		// pair — its receiver or containing type — after the file's
+		// shared module/crate/namespace position, which is always
+		// first. Counting every pair here would let "Packages" grow
+		// with the number of distinct types, not packages.
+		if len(e.Position) > 0 {
+			p := e.Position[0]
 			positions[p.Name+"="+p.Value] = true
 		}
 	}

@@ -188,6 +188,19 @@ func declFileRank(e entry.Entry) int {
 	return 0
 }
 
+// memberRank orders a top-level declaration above a method or field
+// within the same match tier (§28 C-38): a type named "Cluster" must
+// never rank below one of its own — or any other type's — same-named
+// method or field. Driven by Kind's two member values explicitly, the
+// same style declFileRank already uses for KindFile, not inferred from
+// anything else about the entry.
+func memberRank(e entry.Entry) int {
+	if e.Kind == "method" || e.Kind == "field" {
+		return 1
+	}
+	return 0
+}
+
 // scopeRank orders exported above unexported within the same match tier
 // (§21 C-6: "exported ranks above unexported by default"). Driven by
 // Exported, not by comparing Scope's displayed value — §21 C-12: the
@@ -211,12 +224,14 @@ func visible(e entry.Entry, invocationProject string) bool {
 
 // Search returns the entries matching word — in name, doc, or path — and
 // every attribute in filter, ranked symbol-name match first, then
-// declaration-before-file-entry, then exported-before-unexported, then
-// doc first-line match, then path match (the directive's fixed ranking
-// for this version: "do not tune further"; §21 C-6 added the scope
-// tie-break, §24 C-20 the declaration-versus-file one). invocationProject
-// is the project the caller is searching from; package-scope entries
-// outside it are excluded before ranking, not merely ranked low.
+// declaration-before-file-entry, then top-level-before-member, then
+// exported-before-unexported, then doc first-line match, then path
+// match (the directive's fixed ranking for this version: "do not tune
+// further"; §21 C-6 added the scope tie-break, §24 C-20 the
+// declaration-versus-file one, §28 C-38 the top-level-versus-member
+// one). invocationProject is the project the caller is searching from;
+// package-scope entries outside it are excluded before ranking, not
+// merely ranked low.
 func Search(entries []entry.Entry, word string, filter Filter, invocationProject string) []entry.Entry {
 	lw := strings.ToLower(word)
 	var matches []entry.Entry
@@ -240,6 +255,10 @@ func Search(entries []entry.Entry, word string, filter Filter, invocationProject
 		di, dj := declFileRank(matches[i]), declFileRank(matches[j])
 		if di != dj {
 			return di < dj
+		}
+		mi, mj := memberRank(matches[i]), memberRank(matches[j])
+		if mi != mj {
+			return mi < mj
 		}
 		si, sj := scopeRank(matches[i]), scopeRank(matches[j])
 		if si != sj {

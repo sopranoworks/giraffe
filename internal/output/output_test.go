@@ -339,6 +339,26 @@ func TestResultLine_SizeAndDeclCount(t *testing.T) {
 	}
 }
 
+// TestSummarize_PackagesCountsOnlyThePrimaryPosition (§28 C-38): a
+// method or field carries a second Position pair (its receiver or
+// containing type) after the file's shared module position. Packages
+// must still count distinct modules, not grow with the number of
+// distinct types that happen to have methods or fields.
+func TestSummarize_PackagesCountsOnlyThePrimaryPosition(t *testing.T) {
+	entries := []entry.Entry{
+		{Name: "Cluster", Kind: "type", Exported: true,
+			Position: []entry.Position{{Name: "module", Value: "internal/cluster"}}},
+		{Name: "Snapshot", Kind: "method", Exported: true,
+			Position: []entry.Position{{Name: "module", Value: "internal/cluster"}, {Name: "receiver", Value: "Cluster"}}},
+		{Name: "actors", Kind: "field", Exported: false,
+			Position: []entry.Position{{Name: "module", Value: "internal/cluster"}, {Name: "type", Value: "Cluster"}}},
+	}
+	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	if s.Packages != 1 {
+		t.Errorf("Packages = %d, want 1 (one module, despite two secondary position pairs)", s.Packages)
+	}
+}
+
 func TestFormat_NoticesRenderWithoutTheUnparsedLabel(t *testing.T) {
 	// A notice (e.g. "the local cache is not git-ignored") is not a parse
 	// failure; labelling it "unparsed:" would be actively misleading.

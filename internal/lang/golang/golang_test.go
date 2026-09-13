@@ -10,16 +10,28 @@ import (
 const src = `// Package sample is a fixture for the extractor's own tests.
 package sample
 
+import "sync"
+
 // Retry retries with backoff.
 func Retry() error { return nil }
 
 func unexported() {}
 
 // Config holds retry settings.
-type Config struct{}
+type Config struct {
+	// Name is the config's own label.
+	Name string
+	max  int // unexported, no doc
 
-// Do is a method and is out of scope for this version.
+	sync.Mutex // embedded, named after its own type
+
+	_ int // blank: never addressable
+}
+
+// Do runs the configured retry.
 func (c Config) Do() {}
+
+func (c *Config) reset() {}
 
 const (
 	// Attempts is the retry ceiling.
@@ -89,8 +101,44 @@ func TestExtract(t *testing.T) {
 		}
 	}
 
-	if _, present := got["Do"]; present {
-		t.Error("Do should not have been extracted: methods are out of scope regardless of export")
+	// Methods and fields (§28 C-38) carry a second Position pair — their
+	// receiver or containing type — after the shared module position;
+	// their Name is their own bare name, never qualified by the type.
+	wantSecond := map[string]struct {
+		kind         string
+		doc          string
+		exported     bool
+		positionName string
+		positionVal  string
+	}{
+		"Do":    {"method", "Do runs the configured retry.", true, "receiver", "Config"},
+		"reset": {"method", "", false, "receiver", "Config"},
+		"Name":  {"field", "Name is the config's own label.", true, "type", "Config"},
+		"max":   {"field", "", false, "type", "Config"},
+		"Mutex": {"field", "", true, "type", "Config"}, // embedded, named after sync.Mutex
+	}
+	for name, w := range wantSecond {
+		e, ok := got[name]
+		if !ok {
+			t.Errorf("expected %s in extracted entries, got %v", name, names(entries))
+			continue
+		}
+		if e.Kind != w.kind {
+			t.Errorf("%s: kind = %q, want %q", name, e.Kind, w.kind)
+		}
+		if e.Doc != w.doc {
+			t.Errorf("%s: doc = %q, want %q", name, e.Doc, w.doc)
+		}
+		if e.Exported != w.exported {
+			t.Errorf("%s: exported = %v, want %v", name, e.Exported, w.exported)
+		}
+		if len(e.Position) != 2 || e.Position[0].Name != "module" || e.Position[1].Name != w.positionName || e.Position[1].Value != w.positionVal {
+			t.Errorf("%s: position = %v, want module:internal/retry then %s:%s", name, e.Position, w.positionName, w.positionVal)
+		}
+	}
+
+	if _, present := got["_"]; present {
+		t.Error("a blank field (_) should never be extracted: it is not addressable")
 	}
 }
 

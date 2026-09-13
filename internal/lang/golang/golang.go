@@ -1,7 +1,8 @@
 // Package golang extracts index entries from Go source using go/parser:
 // standard library, pure Go, no type checking (specifications/giraffe.md
-// §10). It reads only what a file's syntax gives it — exported top-level
-// declarations, their kind, and the first line of the preceding doc
+// §10). It reads only what a file's syntax gives it — top-level
+// declarations (exported and unexported), their methods and struct
+// fields, each one's kind, and the first line of its preceding doc
 // comment — and never touches the filesystem itself (§18); its input is a
 // scanner.File it is handed.
 package golang
@@ -32,11 +33,21 @@ const (
 )
 
 // Extract returns one entry per top-level declaration in f: func, type,
-// const, and var (§10), both exported and unexported (§21 C-6) — each
-// carries Scope and Exported accordingly. Grouped declarations — type
-// (...), const (...) — are expanded to one entry per spec, matching what
-// the sizing prototype in §11 undercounted. Methods are out of scope for
-// this version and are skipped, exported or not.
+// const, var, method, and field (§10, §28 C-38), both exported and
+// unexported (§21 C-6) — each carries Scope and Exported accordingly.
+// Grouped declarations — type (...), const (...) — are expanded to one
+// entry per spec, matching what the sizing prototype in §11 undercounted.
+//
+// A method's Name is its own bare name, never qualified with its
+// receiver's type ("Snapshot", not "Cluster.Snapshot"); the receiver
+// type is carried as a second Position pair instead. Likewise a field's
+// Name is its own bare name, with its containing type as a second
+// Position pair. Two attributes, not one, precisely to avoid the
+// ranking risk §28 C-38 named: a qualified name would make every method
+// or field of a type substring-match a search for the type's own name,
+// burying the type declaration itself under its own members. A plain
+// method or field name only collides with a search word the way any
+// other declaration's name already can.
 func Extract(f scanner.File, project string) ([]entry.Entry, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, f.Path, f.Content, parser.ParseComments|parser.SkipObjectResolution)
@@ -50,7 +61,10 @@ func Extract(f scanner.File, project string) ([]entry.Entry, error) {
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			if d.Recv != nil { // methods are out of scope
+			if d.Recv != nil {
+				if e, ok := methodEntry(f.Path, project, d, position); ok {
+					entries = append(entries, e)
+				}
 				continue
 			}
 			exported := d.Name.IsExported()
@@ -86,10 +100,113 @@ func Extract(f scanner.File, project string) ([]entry.Entry, error) {
 					Doc:      doc,
 					Position: position,
 				})
+				if kind == "type" {
+					if ts, ok := spec.(*ast.TypeSpec); ok {
+						entries = append(entries, fieldEntries(f.Path, project, ts, position)...)
+					}
+				}
 			}
 		}
 	}
 	return entries, nil
+}
+
+// methodEntry returns the index entry for a method declaration, or
+// ok=false if its receiver's type cannot be determined (a shape the Go
+// spec does not actually allow, but the extractor skips rather than
+// guesses — the same defensiveness specNameAndDoc already applies to a
+// spec it does not recognise).
+func methodEntry(path, project string, d *ast.FuncDecl, base []entry.Position) (entry.Entry, bool) {
+	recv := bareTypeName(d.Recv.List[0].Type)
+	if recv == "" {
+		return entry.Entry{}, false
+	}
+	exported := d.Name.IsExported()
+	return entry.Entry{
+		Path:     path,
+		Name:     d.Name.Name,
+		Kind:     "method",
+		Project:  project,
+		Scope:    scopeOf(exported),
+		Exported: exported,
+		Doc:      firstLine(d.Doc),
+		Position: withPosition(base, "receiver", recv),
+	}, true
+}
+
+// fieldEntries returns one entry per field declared directly on ts, when
+// ts is a struct type — nil otherwise. An embedded field (no name of its
+// own) is addressed, and named here, by its embedded type's own name,
+// the same identifier Go resolves it by; a blank identifier field is
+// skipped, since "_" is never addressable.
+func fieldEntries(path, project string, ts *ast.TypeSpec, base []entry.Position) []entry.Entry {
+	st, ok := ts.Type.(*ast.StructType)
+	if !ok || st.Fields == nil {
+		return nil
+	}
+	position := withPosition(base, "type", ts.Name.Name)
+
+	var entries []entry.Entry
+	for _, field := range st.Fields.List {
+		names := field.Names
+		if len(names) == 0 { // embedded: named after the embedded type
+			if n := bareTypeName(field.Type); n != "" {
+				names = []*ast.Ident{{Name: n}}
+			}
+		}
+		for _, n := range names {
+			if n.Name == "_" {
+				continue
+			}
+			exported := ast.IsExported(n.Name)
+			entries = append(entries, entry.Entry{
+				Path:     path,
+				Name:     n.Name,
+				Kind:     "field",
+				Project:  project,
+				Scope:    scopeOf(exported),
+				Exported: exported,
+				Doc:      firstLine(field.Doc),
+				Position: position,
+			})
+		}
+	}
+	return entries
+}
+
+// withPosition copies base and appends one more pair — never mutates
+// base's backing array, since base (the file's shared module position)
+// is reused across every declaration in the file.
+func withPosition(base []entry.Position, name, value string) []entry.Position {
+	out := make([]entry.Position, len(base), len(base)+1)
+	copy(out, base)
+	return append(out, entry.Position{Name: name, Value: value})
+}
+
+// bareTypeName renders a type expression's own local name: a pointer
+// star, one level of generic type-argument instantiation, and a package
+// qualifier are all stripped, leaving the identifier a caller writes to
+// name the type itself — "*Cluster", "Cluster[T]", and "pkg.Cluster" all
+// resolve to "Cluster". Returns "" for a shape neither a receiver nor an
+// embedded field can actually have (an anonymous struct or interface,
+// or a raw literal); callers treat that as "skip", not "guess".
+func bareTypeName(expr ast.Expr) string {
+	for {
+		switch t := expr.(type) {
+		case *ast.StarExpr:
+			expr = t.X
+		case *ast.IndexExpr:
+			expr = t.X
+		case *ast.IndexListExpr:
+			expr = t.X
+		case *ast.SelectorExpr:
+			return t.Sel.Name
+		case *ast.Ident:
+			return t.Name
+		default:
+			return ""
+		}
+	}
 }
 
 func scopeOf(exported bool) string {
