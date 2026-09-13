@@ -1,0 +1,353 @@
+package output
+
+import (
+	"strings"
+	"testing"
+
+	"giraffe/internal/entry"
+)
+
+func TestFormat_IndexLineAlwaysPresent_EmptySectionsOmitted(t *testing.T) {
+	s := Summarize(nil, "abc1234", 0, nil, nil, nil, nil)
+	out := Format(s, nil)
+	if !strings.Contains(out, "## index") {
+		t.Fatalf("missing ## index in:\n%s", out)
+	}
+	if strings.Contains(out, "## results") {
+		t.Errorf("expected ## results to be omitted when there are no matches:\n%s", out)
+	}
+	if strings.Contains(out, "## truncated") {
+		t.Errorf("expected ## truncated to be omitted:\n%s", out)
+	}
+	if strings.Contains(out, "## warnings") {
+		t.Errorf("expected ## warnings to be omitted:\n%s", out)
+	}
+}
+
+func TestFormat_ResultsSection_PasteReadyAttributes(t *testing.T) {
+	entries := []entry.Entry{
+		{Path: "internal/retry/retry.go", Name: "Retry", Kind: "func", Doc: "retries with backoff", Exported: true,
+			Position: []entry.Position{{Name: "module", Value: "internal/retry"}}},
+	}
+	s := Summarize(entries, "abc1234", 1, nil, nil, nil, nil)
+	out := Format(s, entries)
+	if !strings.Contains(out, "name:Retry kind:func path:internal/retry/retry.go module:internal/retry") {
+		t.Fatalf("result line not paste-ready:\n%s", out)
+	}
+	if !strings.Contains(out, "  retries with backoff") {
+		t.Fatalf("doc line missing or not indented:\n%s", out)
+	}
+}
+
+func TestFormat_TruncatesAtEightResults(t *testing.T) {
+	var entries []entry.Entry
+	for i := 0; i < 12; i++ {
+		entries = append(entries, entry.Entry{Path: "a/b.go", Name: "X", Kind: "func"})
+	}
+	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	out := Format(s, entries)
+	if got := strings.Count(out, "name:X"); got != maxResults {
+		t.Fatalf("expected exactly %d result lines, got %d:\n%s", maxResults, got, out)
+	}
+	if !strings.Contains(out, "## truncated") {
+		t.Fatalf("expected ## truncated for 12 matches:\n%s", out)
+	}
+	if !strings.Contains(out, "4 more.") {
+		t.Fatalf("expected 4 more (12-8) in truncated section:\n%s", out)
+	}
+}
+
+func TestFormat_QuotesValuesWithWhitespace(t *testing.T) {
+	entries := []entry.Entry{{Path: "a b.go", Name: "X", Kind: "func"}}
+	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	out := Format(s, entries)
+	if !strings.Contains(out, "path:'a b.go'") {
+		t.Fatalf("expected a whitespace-containing value to be single-quoted:\n%s", out)
+	}
+}
+
+func TestFormat_ScopePackageIsLabelled_ExportedIsImplicit(t *testing.T) {
+	entries := []entry.Entry{
+		{Path: "a.go", Name: "Exported", Kind: "func", Scope: "exported", Exported: true},
+		{Path: "b.go", Name: "unexported", Kind: "func", Scope: "package", Exported: false},
+	}
+	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	out := Format(s, entries)
+	if !strings.Contains(out, "name:unexported kind:func path:b.go scope:package") {
+		t.Fatalf("expected scope:package on the unexported entry's line:\n%s", out)
+	}
+	if strings.Contains(out, "name:Exported kind:func path:a.go scope:") {
+		t.Fatalf("expected no scope: attribute on the exported entry's line (exported is implicit):\n%s", out)
+	}
+}
+
+func TestFormat_UndocumentedReportedByScope(t *testing.T) {
+	entries := []entry.Entry{
+		{Path: "a.go", Name: "A", Kind: "func", Exported: true, Doc: "documented"},
+		{Path: "b.go", Name: "B", Kind: "func", Exported: true}, // undocumented, exported
+		{Path: "c.go", Name: "c", Kind: "func", Exported: false},
+		{Path: "d.go", Name: "d", Kind: "func", Exported: false},
+	}
+	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	out := Format(s, nil)
+	// §22 C-11: one mixed count reads as a regression that did not
+	// happen once package-scope entries (documented far less often)
+	// join the index. Report both, without adding separate labels.
+	if !strings.Contains(out, "undocumented 1 exported, 2 package") {
+		t.Fatalf("expected undocumented counts split by scope:\n%s", out)
+	}
+}
+
+func TestFormat_TryNextOnlyRendersWhenEmptyAndPopulated(t *testing.T) {
+	s := Summarize(nil, "abc1234", 0, nil, nil, nil, nil)
+	s.TryNext = []string{"names in the index starting the same way: Retry"}
+	out := Format(s, nil)
+	if !strings.Contains(out, "## try next\nnames in the index starting the same way: Retry\n") {
+		t.Fatalf("expected a ## try next section for a zero-result answer:\n%s", out)
+	}
+
+	entries := []entry.Entry{{Path: "a.go", Name: "X", Kind: "func", Exported: true}}
+	s2 := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	s2.TryNext = []string{"should not appear"}
+	out2 := Format(s2, entries)
+	if strings.Contains(out2, "## try next") {
+		t.Fatalf("expected no ## try next section when there are matches:\n%s", out2)
+	}
+
+	s3 := Summarize(nil, "abc1234", 0, nil, nil, nil, nil)
+	out3 := Format(s3, nil)
+	if strings.Contains(out3, "## try next") {
+		t.Fatalf("expected no ## try next section when nothing was found to offer:\n%s", out3)
+	}
+}
+
+// TestFormat_FileEntriesDoNotCountAsUndocumented (§22 item 4): a file
+// entry always carries Doc "" and Exported true, but it is not a
+// declaration M11 governs — counting it would inflate "undocumented
+// exported" with something that was never meant to carry documentation.
+func TestFormat_FileEntriesDoNotCountAsUndocumented(t *testing.T) {
+	entries := []entry.Entry{
+		{Path: "a.go", Name: "a", Kind: entry.KindFile, Exported: true},
+		{Path: "a.go", Name: "A", Kind: "func", Exported: true, Doc: "documented"},
+	}
+	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	out := Format(s, nil)
+	if !strings.Contains(out, "undocumented 0 exported, 0 package") {
+		t.Fatalf("expected the file entry to be excluded from the undocumented count:\n%s", out)
+	}
+}
+
+// TestFormat_LanguageBreakdownAndLangAttribute (§25 C-24): ## index
+// reports a per-language breakdown with an "unknown" bucket for
+// entries with no known language, and a result line only carries
+// lang: when more than one *known* language is actually present — the
+// same treatment project already gets.
+func TestFormat_LanguageBreakdownAndLangAttribute(t *testing.T) {
+	entries := []entry.Entry{
+		{Path: "a.go", Name: "A", Kind: "func", Exported: true, Ext: "go", Lang: "go"},
+		{Path: "b.c", Name: "b", Kind: "func", Exported: true, Ext: "c", Lang: "c"},
+		{Path: "README.md", Name: "README", Kind: entry.KindFile, Exported: true, Ext: "md", Lang: ""},
+	}
+	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	out := Format(s, entries)
+	if !strings.Contains(out, "languages: c 1 | go 1 | unknown 1") {
+		t.Fatalf("expected a per-language breakdown line with an unknown bucket:\n%s", out)
+	}
+	if !strings.Contains(out, "lang:go") || !strings.Contains(out, "lang:c") {
+		t.Fatalf("expected lang: on result lines once more than one known language is present:\n%s", out)
+	}
+}
+
+func TestFormat_LangOmittedForASingleKnownLanguageIndex(t *testing.T) {
+	entries := []entry.Entry{
+		{Path: "a.go", Name: "A", Kind: "func", Exported: true, Ext: "go", Lang: "go"},
+		{Path: "README.md", Name: "README", Kind: entry.KindFile, Exported: true, Ext: "md", Lang: ""},
+	}
+	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	out := Format(s, entries)
+	if strings.Contains(out, "lang:go") {
+		t.Fatalf("expected no lang: attribute when only one known language is present:\n%s", out)
+	}
+	if !strings.Contains(out, "languages: go 1 | unknown 1") {
+		t.Fatalf("expected the index breakdown to still name the one known language and the unknown bucket:\n%s", out)
+	}
+}
+
+// TestFormat_ExtOmittedWhenRecoverableFromLang_PrintedWhenItVaries
+// (§25 C-25): ext is dropped when a language declares (in this index)
+// exactly one extension — recoverable from lang alone — and printed
+// when the same lang was observed with more than one, or when lang is
+// unknown and ext is all there is.
+func TestFormat_ExtOmittedWhenRecoverableFromLang_PrintedWhenItVaries(t *testing.T) {
+	entries := []entry.Entry{
+		{Path: "a.go", Name: "A", Kind: "func", Exported: true, Ext: "go", Lang: "go"},
+		{Path: "b.h", Name: "B", Kind: "func", Exported: true, Ext: "h", Lang: "c"},
+		{Path: "c.c", Name: "C", Kind: "func", Exported: true, Ext: "c", Lang: "c"},
+		{Path: "README", Name: "README", Kind: entry.KindFile, Exported: true, Ext: "", Lang: ""},
+	}
+	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	out := Format(s, entries)
+	if strings.Contains(out, "ext:go") {
+		t.Fatalf("expected ext:go to be omitted (go has one observed extension, recoverable from lang):\n%s", out)
+	}
+	if !strings.Contains(out, "ext:h") || !strings.Contains(out, "ext:c") {
+		t.Fatalf("expected ext:h and ext:c (c was observed with two extensions):\n%s", out)
+	}
+	if !strings.Contains(out, "by ext:    (none) 1 | c 1 | go 1 | h 1") {
+		t.Fatalf("expected a by-ext breakdown line including the extensionless file:\n%s", out)
+	}
+}
+
+// TestFormat_ExtPrintsAloneWhenLangUnknown (§25 C-25): an unknown-lang
+// file has nothing else to identify it by, so ext prints even in an
+// index where every other file's extension happens to be unique to its
+// (unknown) bucket too — the "lang unknown" case is unconditional, not
+// gated on whether ext varies.
+func TestFormat_ExtPrintsAloneWhenLangUnknown(t *testing.T) {
+	entries := []entry.Entry{{Path: "notes.md", Name: "notes", Kind: entry.KindFile, Exported: true, Ext: "md", Lang: ""}}
+	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	out := Format(s, entries)
+	if !strings.Contains(out, "ext:md") {
+		t.Fatalf("expected ext:md to print when lang is unknown:\n%s", out)
+	}
+}
+
+// TestFit_PreambleLenCountsTowardBudget (§26 C-30): fit's caller is
+// responsible for passing every byte already printed ahead of the
+// first result line, not indexLine's length alone. A larger preamble
+// must leave room for fewer results before the byte backstop bites —
+// the mechanism Format now relies on to count the ## index header, the
+// languages: line, and the by ext: line, none of which used to count.
+func TestFit_PreambleLenCountsTowardBudget(t *testing.T) {
+	var matches []entry.Entry
+	for i := 0; i < 20; i++ {
+		matches = append(matches, entry.Entry{Path: strings.Repeat("a", 200), Name: "X", Kind: "func", Exported: true})
+	}
+	shownSmallPreamble, _ := fit(matches, false, false, nil, 10)
+	shownBigPreamble, _ := fit(matches, false, false, nil, 1200)
+	if len(shownBigPreamble) >= len(shownSmallPreamble) {
+		t.Fatalf("expected a larger preamble to leave room for fewer results before the byte backstop: small=%d big=%d",
+			len(shownSmallPreamble), len(shownBigPreamble))
+	}
+}
+
+// TestFormat_PreambleIncludesIndexHeaderAndBreakdownLines (§26 C-30):
+// the exact bug named in the report — indexLine's own length was
+// counted, but the "## index\n" header text and the languages:/by ext:
+// lines that print ahead of ## results were counted by nothing. Format
+// must now pass fit a preamble length that actually reflects everything
+// already written to the builder.
+func TestFormat_PreambleIncludesIndexHeaderAndBreakdownLines(t *testing.T) {
+	s := Summary{
+		Commit:    "abc1234",
+		Languages: "go 1 | unknown 1",
+		ByExt:     "go 1 | md 1",
+	}
+	var matches []entry.Entry
+	for i := 0; i < 20; i++ {
+		matches = append(matches, entry.Entry{Path: strings.Repeat("a", 210), Name: "X", Kind: "func", Exported: true})
+	}
+	withBreakdown := Format(s, matches)
+
+	s2 := s
+	s2.Languages, s2.ByExt = "", ""
+	withoutBreakdown := Format(s2, matches)
+
+	if strings.Count(withBreakdown, "name:X") >= strings.Count(withoutBreakdown, "name:X") {
+		t.Fatalf("expected the languages:/by ext: lines' bytes to reduce how many results fit near budget: with=%d without=%d",
+			strings.Count(withBreakdown, "name:X"), strings.Count(withoutBreakdown, "name:X"))
+	}
+}
+
+func TestFormat_WarningsAndExclusions(t *testing.T) {
+	s := Summarize(nil, "abc1234", 0, []string{"x.go: syntax error"}, nil, []string{"vendor/"}, nil)
+	out := Format(s, nil)
+	if !strings.Contains(out, "## warnings") {
+		t.Fatalf("expected ## warnings section:\n%s", out)
+	}
+	if !strings.Contains(out, "unparsed: x.go: syntax error") {
+		t.Fatalf("missing warning detail:\n%s", out)
+	}
+	if !strings.Contains(out, "active exclusions: vendor/") {
+		t.Fatalf("missing active exclusions:\n%s", out)
+	}
+}
+
+// TestFormat_KnownLanguageWithZeroMatchesStillNamed (§25 C-24): "go 0,
+// unknown 181099" is the directive's own worked example for
+// llvm-project — a registered language giraffe genuinely checked for
+// and found nothing must still be named, distinct from a language it
+// has no extractor for at all.
+func TestFormat_KnownLanguageWithZeroMatchesStillNamed(t *testing.T) {
+	entries := []entry.Entry{
+		{Path: "README.md", Name: "README", Kind: entry.KindFile, Exported: true, Ext: "md", Lang: ""},
+	}
+	s := Summarize(entries, "abc1234", 0, nil, nil, nil, []string{"go"})
+	out := Format(s, entries)
+	if !strings.Contains(out, "languages: unknown 1 | go 0") {
+		t.Fatalf("expected go to be named at 0 rather than omitted:\n%s", out)
+	}
+}
+
+// TestResultLine_SizeAndDeclCount (directive 009 item 3): a file result
+// prints declarations: when it holds enough of them to be worth
+// browsing with `show`, size: when it is large but does not (or has no
+// extractor), and neither when both stay below threshold — §25 C-25's
+// "only when it discriminates" applied to a new attribute.
+func TestResultLine_SizeAndDeclCount(t *testing.T) {
+	tests := []struct {
+		name string
+		e    entry.Entry
+		want string
+		none []string
+	}{
+		{
+			name: "many declarations",
+			e:    entry.Entry{Path: "big.go", Name: "big", Kind: entry.KindFile, Exported: true, DeclCount: 678, Size: 5000},
+			want: "declarations:678",
+			none: []string{"size:"},
+		},
+		{
+			name: "large file, no extractor",
+			e:    entry.Entry{Path: "big.td", Name: "big", Kind: entry.KindFile, Exported: true, DeclCount: 0, Size: 391229},
+			want: "size:391229",
+		},
+		{
+			name: "small file, few declarations: neither prints",
+			e:    entry.Entry{Path: "small.go", Name: "small", Kind: entry.KindFile, Exported: true, DeclCount: 3, Size: 1200},
+			none: []string{"size:", "declarations:"},
+		},
+		{
+			name: "a declaration entry (not a file) never carries either, even if the fields are set",
+			e:    entry.Entry{Path: "big.go", Name: "Big", Kind: "func", Exported: true, DeclCount: 678, Size: 391229},
+			none: []string{"size:", "declarations:"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := Summarize([]entry.Entry{tt.e}, "abc1234", 0, nil, nil, nil, nil)
+			out := Format(s, []entry.Entry{tt.e})
+			if tt.want != "" && !strings.Contains(out, tt.want) {
+				t.Errorf("expected %q in:\n%s", tt.want, out)
+			}
+			for _, n := range tt.none {
+				if strings.Contains(out, n) {
+					t.Errorf("expected no %q in:\n%s", n, out)
+				}
+			}
+		})
+	}
+}
+
+func TestFormat_NoticesRenderWithoutTheUnparsedLabel(t *testing.T) {
+	// A notice (e.g. "the local cache is not git-ignored") is not a parse
+	// failure; labelling it "unparsed:" would be actively misleading.
+	s := Summarize(nil, "abc1234", 0, nil, []string{".giraffe/local is not ignored by git"}, nil, nil)
+	out := Format(s, nil)
+	if !strings.Contains(out, "\n.giraffe/local is not ignored by git\n") {
+		t.Fatalf("expected the notice verbatim, without an unparsed: prefix:\n%s", out)
+	}
+	if strings.Contains(out, "unparsed: .giraffe/local") {
+		t.Fatalf("a notice must not be labelled as a parse failure:\n%s", out)
+	}
+}
