@@ -4,12 +4,87 @@ package query
 
 import (
 	"fmt"
+	"iter"
 	"sort"
 	"strings"
 	"unicode"
 
 	"giraffe/internal/entry"
 )
+
+// Entries is what Search, Suggest, Browse, and ValidAttributes need from
+// a corpus (specifications/giraffe.md §30 C-46, C-47): the full set, via
+// All, and — for Search's name-based tiers — a narrowed set of entries
+// whose Name could satisfy word, via Candidates, from whatever posting
+// list the source keeps. This package declares the interface it needs
+// rather than importing internal/index directly (Go's implicit
+// interface satisfaction: *index.Store already has both methods), so
+// neither package depends on the other and query stays free of any
+// storage-format dependency, including bbolt's. A source with no
+// narrowing structure at all can simply have Candidates return All,
+// unfiltered — Search's own exact tier check is unaffected either way,
+// only how much work it does to reach it.
+type Entries interface {
+	All() iter.Seq[entry.Entry]
+	Candidates(word string) iter.Seq[entry.Entry]
+}
+
+// Slice wraps a plain []entry.Entry as an Entries source with no
+// narrowing structure of its own — Candidates simply returns All,
+// unfiltered. Used by tests that construct a literal entry set directly,
+// and by any caller with no store to back Search/Suggest/Browse.
+func Slice(entries []entry.Entry) Entries {
+	return sliceEntries(entries)
+}
+
+type sliceEntries []entry.Entry
+
+func (s sliceEntries) All() iter.Seq[entry.Entry] {
+	return func(yield func(entry.Entry) bool) {
+		for _, e := range s {
+			if !yield(e) {
+				return
+			}
+		}
+	}
+}
+
+func (s sliceEntries) Candidates(word string) iter.Seq[entry.Entry] {
+	return s.All()
+}
+
+// Concat presents several Entries sources as one — the shape a multi-
+// root search needs (specifications/giraffe.md §20 §2: one store per
+// root, merged only after each is independently refreshed).
+func Concat(sources ...Entries) Entries {
+	return concatEntries(sources)
+}
+
+type concatEntries []Entries
+
+func (c concatEntries) All() iter.Seq[entry.Entry] {
+	return func(yield func(entry.Entry) bool) {
+		for _, src := range c {
+			for e := range src.All() {
+				if !yield(e) {
+					return
+				}
+			}
+		}
+	}
+}
+
+func (c concatEntries) Candidates(word string) iter.Seq[entry.Entry] {
+	return func(yield func(entry.Entry) bool) {
+		for _, src := range c {
+			for e := range src.Candidates(word) {
+				if !yield(e) {
+					return
+				}
+			}
+		}
+	}
+}
 
 // Filter is a parsed --query value: attribute name -> the OR'd values
 // accepted for it. Different attribute names are AND'd together (§5).
@@ -40,9 +115,9 @@ var filterable = map[string]bool{"path": true, "project": true, "kind": true, "s
 // attribute names is derived from index contents, not maintained
 // separately" (§18). scope joined the common set in §21 C-6; lang in
 // §24 C-20; ext in §25 C-24.
-func ValidAttributes(entries []entry.Entry) map[string]bool {
+func ValidAttributes(src Entries) map[string]bool {
 	valid := map[string]bool{"path": true, "name": true, "kind": true, "project": true, "scope": true, "lang": true, "ext": true}
-	for _, e := range entries {
+	for e := range src.All() {
 		for _, p := range e.Position {
 			valid[p.Name] = true
 		}
@@ -175,26 +250,50 @@ func matchesAny(name string, e entry.Entry, values []string) bool {
 // match exists, which is what keeps a query like "GetMailboxLengths",
 // answered only by a method, working exactly as before.
 func tier(e entry.Entry, lowerWord string) int {
-	member := isMember(e)
-	switch {
-	case strings.EqualFold(e.Name, lowerWord) && !member:
-		return 0
-	case strings.Contains(strings.ToLower(e.Name), lowerWord) && !member:
-		return 1
-	case strings.EqualFold(e.Name, lowerWord) && member:
-		return 2
-	case strings.Contains(strings.ToLower(e.Name), lowerWord) && member:
-		return 3
-	case strings.Contains(strings.ToLower(e.Doc), lowerWord):
-		return 4
-	case strings.Contains(strings.ToLower(e.Path), lowerWord):
-		return 5
-	default:
-		return 6
+	if t, ok := nameTier(e, lowerWord); ok {
+		return t
 	}
+	if t, ok := docPathTier(e, lowerWord); ok {
+		return t
+	}
+	return noMatch
 }
 
 const noMatch = 6
+
+// nameTier is tier's name-based half (tiers 0-3): an exact or substring
+// match on Name, split by member-vs-top-level (§29 C-42). Factored out
+// from tier so Search can run it only against the candidate set a
+// posting list narrows to (§30 C-47), rather than every entry — the
+// check itself is unchanged, only when it runs.
+func nameTier(e entry.Entry, lowerWord string) (int, bool) {
+	member := isMember(e)
+	switch {
+	case strings.EqualFold(e.Name, lowerWord) && !member:
+		return 0, true
+	case strings.Contains(strings.ToLower(e.Name), lowerWord) && !member:
+		return 1, true
+	case strings.EqualFold(e.Name, lowerWord) && member:
+		return 2, true
+	case strings.Contains(strings.ToLower(e.Name), lowerWord) && member:
+		return 3, true
+	}
+	return 0, false
+}
+
+// docPathTier is tier's remaining half (tiers 4-5): a substring match on
+// Doc or Path, checked only for an entry nameTier already ruled out —
+// tier's original switch never reaches these cases once a name match is
+// found, and Search preserves that by construction (see Search).
+func docPathTier(e entry.Entry, lowerWord string) (int, bool) {
+	switch {
+	case strings.Contains(strings.ToLower(e.Doc), lowerWord):
+		return 4, true
+	case strings.Contains(strings.ToLower(e.Path), lowerWord):
+		return 5, true
+	}
+	return 0, false
+}
 
 // isMember reports whether e is a method or field rather than a
 // top-level declaration or a file (§28 C-38's two new Kind values).
@@ -251,15 +350,53 @@ func visible(e entry.Entry, invocationProject string) bool {
 // invocationProject is the project the caller is searching from;
 // package-scope entries outside it are excluded before ranking, not
 // merely ranked low.
-func Search(entries []entry.Entry, word string, filter Filter, invocationProject string) []entry.Entry {
+//
+// §30 C-46, C-47: src supplies two views rather than one materialized
+// slice — All, and Candidates(word), narrowed by whatever posting list
+// the source keeps (a name-trigram index, for the store this ships
+// with). Name-based tiers (0-3) are found via Candidates; Doc/Path
+// tiers (4-5) still visit every entry via All, since neither is
+// posting-indexed (a scope decision recorded in the report, not an
+// oversight) — but every entry visited there is decoded lazily from the
+// store's mmap, not out of a slice already fully materialized in
+// memory, so nothing not actually returned as a match is ever GC-owned.
+func Search(src Entries, word string, filter Filter, invocationProject string) []entry.Entry {
 	lw := strings.ToLower(word)
 	var ranked []rankedEntry
-	for _, e := range entries {
+	// nameMatched records every entry nameTier already accounted for
+	// (matched or not visible/filtered), keyed by identity, so the
+	// second loop below — which checks Doc/Path — never re-examines an
+	// entry the name-based pass already resolved. tier's original
+	// switch never falls through to a Doc/Path check once a name match
+	// is found; this preserves that without re-running nameTier over
+	// every entry a second time (§30 C-47: Candidates narrows the first
+	// loop to a small set via the name-trigram posting list, so this
+	// map stays small too — it is not the full-corpus structure it
+	// would be if built from src.All()).
+	nameMatched := make(map[string]bool)
+	for e := range src.Candidates(word) {
 		if !visible(e, invocationProject) {
 			continue
 		}
-		t := tier(e, lw)
-		if t == noMatch {
+		t, ok := nameTier(e, lw)
+		if !ok {
+			continue
+		}
+		nameMatched[dedupKey(e)] = true
+		if !filter.Match(e) {
+			continue
+		}
+		ranked = append(ranked, rankedEntry{e: e, tier: t, declFile: declFileRank(e), scope: scopeRank(e)})
+	}
+	for e := range src.All() {
+		if nameMatched[dedupKey(e)] {
+			continue
+		}
+		if !visible(e, invocationProject) {
+			continue
+		}
+		t, ok := docPathTier(e, lw)
+		if !ok {
 			continue
 		}
 		if !filter.Match(e) {
@@ -313,6 +450,16 @@ type rankedEntry struct {
 	scope    int
 }
 
+// dedupKey identifies an entry for Search's nameMatched set. Path+Name+
+// Kind is unique in practice: two declarations at the same path with
+// the same name and kind would already be a compile error in any
+// extractable language, so no language module can produce two entries
+// this key does not distinguish. entry.Entry itself is not comparable
+// (Position is a slice), so a string key stands in for identity here.
+func dedupKey(e entry.Entry) string {
+	return e.Path + "\x00" + e.Name + "\x00" + e.Kind
+}
+
 // Browse returns every entry matching filter and visible from
 // invocationProject, ordered by path then name (§22 item 5: `show`
 // lists what is in a place — there is no search word to rank matches
@@ -320,9 +467,9 @@ type rankedEntry struct {
 // must be non-empty; the caller (main.runShow) rejects an empty one,
 // since "show" always names a place rather than browsing the whole
 // index.
-func Browse(entries []entry.Entry, filter Filter, invocationProject string) []entry.Entry {
+func Browse(src Entries, filter Filter, invocationProject string) []entry.Entry {
 	var out []entry.Entry
-	for _, e := range entries {
+	for e := range src.All() {
 		if !visible(e, invocationProject) {
 			continue
 		}
@@ -460,7 +607,7 @@ func sharesToken(name string, wordTokens map[string]bool) bool {
 // produces a false negative, only an occasional false positive
 // (TestCouldShareToken_NecessaryButNotSufficient) that the real,
 // boundary-aware check below still filters out correctly.
-func Suggest(entries []entry.Entry, word, invocationProject string) []string {
+func Suggest(src Entries, word, invocationProject string) []string {
 	lw := strings.ToLower(word)
 	pl := prefixLen(lw)
 	wordTokenList := identifierTokens(word)
@@ -472,7 +619,13 @@ func Suggest(entries []entry.Entry, word, invocationProject string) []string {
 	hiddenIn := make(map[string]int) // project -> count of matches hidden there
 	nearPrefix := make(map[string]bool)
 	nearToken := make(map[string]bool)
-	for _, e := range entries {
+	// Suggest only runs once Search has already found nothing (§22), so
+	// every entry is visited here regardless — there is no candidate set
+	// to narrow to when the answer is already "no name match anywhere."
+	// §30's posting list speeds up confirming that (Search's own
+	// Candidates lookup), not this pass, which is unaffected — directive
+	// 011 already measured Suggest was never the miss-path bottleneck.
+	for e := range src.All() {
 		if tier(e, lw) != noMatch {
 			if !visible(e, invocationProject) {
 				hiddenIn[e.Project]++

@@ -3,169 +3,195 @@ package index
 import (
 	"os"
 	"path/filepath"
-	"reflect"
-	"sort"
 	"testing"
+
+	bolt "go.etcd.io/bbolt"
 
 	"giraffe/internal/entry"
 )
 
-func readCacheFile(root string) (string, error) {
-	b, err := os.ReadFile(filepath.Join(root, Dir, cacheDir, cacheFilename))
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
-}
-
-func TestSaveLoad_RoundTrip(t *testing.T) {
+func TestStore_BuildAndQuery_RoundTrip(t *testing.T) {
 	root := t.TempDir()
-	records := map[string]Record{
-		"internal/retry/retry.go": {
-			ModTime: 111, Size: 222,
-			Entries: []entry.Entry{
-				{
-					Path: "internal/retry/retry.go", Name: "Retry", Kind: "func",
-					Project: "giraffe", Scope: "exported", Exported: true, Doc: "Retry retries with backoff.",
-					Position: []entry.Position{{Name: "module", Value: "internal/retry"}},
-				},
-				{
-					Path: "internal/retry/retry.go", Name: "policyImpl", Kind: "type",
-					Project: "giraffe", Scope: "package", Exported: false, Doc: "", // undocumented
-					Position: []entry.Position{{Name: "module", Value: "internal/retry"}},
-				},
-			},
-		},
-		"main.go": {
-			ModTime: 333, Size: 444,
-			Entries: []entry.Entry{
-				{Path: "main.go", Name: "main", Kind: "func", Project: "giraffe"},
-			},
-		},
-	}
-
-	if err := Save(root, records); err != nil {
-		t.Fatal(err)
-	}
-	got, err := Load(root)
+	s, err := createStore(root)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer closeStore(t, s)
 
-	for path, want := range records {
-		rec, ok := got[path]
-		if !ok {
-			t.Fatalf("missing record for %s", path)
-		}
-		if rec.ModTime != want.ModTime || rec.Size != want.Size {
-			t.Errorf("%s: freshness = %+v, want ModTime=%d Size=%d", path, rec, want.ModTime, want.Size)
-		}
-		sortByName(rec.Entries)
-		sortByName(want.Entries)
-		if !reflect.DeepEqual(rec.Entries, want.Entries) {
-			t.Errorf("%s: entries = %#v, want %#v", path, rec.Entries, want.Entries)
-		}
+	files := map[string]Record{
+		"internal/retry/retry.go": {ModTime: 111, Size: 222},
+		"main.go":                 {ModTime: 333, Size: 444},
 	}
-}
-
-func TestSaveLoad_ZeroEntryFileStillAnchorsFreshness(t *testing.T) {
-	// A tracked file with zero top-level declarations at all (since §21
-	// C-6, that is the only remaining zero-entry case — unexported ones
-	// are indexed too) produces no entries. It must still round-trip a
-	// presence line carrying its freshness fingerprint — otherwise
-	// Refresh has nothing to compare against next run and re-reads it
-	// every single time (found against gekka).
-	root := t.TempDir()
-	records := map[string]Record{
-		"internal/priv/priv.go": {ModTime: 555, Size: 0, Entries: nil},
+	all := []entry.Entry{
+		{
+			Path: "internal/retry/retry.go", Name: "Retry", Kind: "func",
+			Project: "giraffe", Scope: "exported", Exported: true, Doc: "Retry retries with backoff.",
+			Position: []entry.Position{{Name: "module", Value: "internal/retry"}},
+		},
+		{
+			Path: "internal/retry/retry.go", Name: "policyImpl", Kind: "type",
+			Project: "giraffe", Scope: "package", Exported: false,
+			Position: []entry.Position{{Name: "module", Value: "internal/retry"}},
+		},
+		{Path: "main.go", Name: "main", Kind: "func", Project: "giraffe"},
 	}
-	if err := Save(root, records); err != nil {
+	if err := s.build(files, all, nil); err != nil {
 		t.Fatal(err)
 	}
-	got, err := Load(root)
-	if err != nil {
-		t.Fatal(err)
+
+	got := allEntries(s)
+	if len(got) != len(all) {
+		t.Fatalf("All() returned %d entries, want %d", len(got), len(all))
 	}
-	rec, ok := got["internal/priv/priv.go"]
+	byName := make(map[string]entry.Entry, len(got))
+	for _, e := range got {
+		byName[e.Name] = e
+	}
+	if byName["Retry"].Doc != "Retry retries with backoff." {
+		t.Errorf("Retry.Doc = %q", byName["Retry"].Doc)
+	}
+	if len(byName["Retry"].Position) != 1 || byName["Retry"].Position[0].Value != "internal/retry" {
+		t.Errorf("Retry.Position = %#v", byName["Retry"].Position)
+	}
+	if byName["policyImpl"].Exported {
+		t.Error("policyImpl should not be Exported")
+	}
+
+	rec, ok := s.fileRecord("internal/retry/retry.go")
 	if !ok {
-		t.Fatal("expected a stored record for a zero-entry file")
+		t.Fatal("expected a files record for internal/retry/retry.go")
 	}
-	if rec.ModTime != 555 {
-		t.Errorf("ModTime = %d, want 555", rec.ModTime)
+	if rec.ModTime != 111 || rec.Size != 222 {
+		t.Errorf("fileRecord = %+v, want ModTime=111 Size=222", rec)
 	}
-	if len(rec.Entries) != 0 {
-		t.Errorf("expected zero entries, got %v", rec.Entries)
+	if len(rec.EntryIDs) != 2 {
+		t.Errorf("expected 2 entry ids for internal/retry/retry.go, got %d", len(rec.EntryIDs))
+	}
+
+	// Candidates narrows to entries whose Name could contain the word —
+	// the trigram posting list, not a scan (§30 C-47).
+	var candidateNames []string
+	for e := range s.Candidates("retry") {
+		candidateNames = append(candidateNames, e.Name)
+	}
+	if len(candidateNames) != 1 || candidateNames[0] != "Retry" {
+		t.Errorf("Candidates(retry) = %v, want [Retry]", candidateNames)
+	}
+	var noCandidates int
+	for range s.Candidates("zzznomatch") {
+		noCandidates++
+	}
+	if noCandidates != 0 {
+		t.Errorf("Candidates(zzznomatch) returned %d entries, want 0", noCandidates)
 	}
 }
 
-// TestLoad_UnreadableShapeDiscardsWholeCache (§23 C-14): before this
-// directive, an undecodable line (a previous format version, or
-// corruption) was skipped and its one file re-extracted — self-healing
-// made sense because the index was shared and a format bump could not
-// hard-break every clone's committed copy. Nothing depends on this
-// cache but the invocation that wrote it, so the cheaper and simpler
-// rule is: anything that does not parse discards the whole cache, not
-// just its one line.
-func TestLoad_UnreadableShapeDiscardsWholeCache(t *testing.T) {
+// TestOpenStore_MissingStoreIsNotAnError mirrors the old cache's "nothing
+// generated yet" case (§9): a store that has never been built is not an
+// error, readOnly or not.
+func TestOpenStore_MissingStoreIsNotAnError(t *testing.T) {
+	root := t.TempDir()
+	if _, ok, err := openStore(root, true); err != nil || ok {
+		t.Fatalf("openStore(readOnly) on a missing store = ok=%v err=%v, want ok=false err=nil", ok, err)
+	}
+}
+
+// TestOpenStore_NotABoltFileIsDiscarded (§23 C-14, carried over to the
+// binary store per §30 C-47): a file that does not even open as a bbolt
+// database — a previous giraffe version's text cache sitting at the
+// same path, or on-disk corruption — is discarded and rebuilt from
+// scratch, never partially recovered.
+func TestOpenStore_NotABoltFileIsDiscarded(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, Dir, cacheDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// One line in a shape this build does not recognise (9 fields — the
-	// pre-005 committed-index shape, missing this version's mtime/size
-	// columns), one otherwise-valid current-format line.
-	stale := "old.go\th1\tfunc\tOld\tgiraffe\texported\t1\t\tdoc\n"
-	current := encodeLine(entry.Entry{Path: "new.go", Name: "New", Kind: "func", Project: "giraffe", Exported: true}, 1, 2) + "\n"
-	if err := os.WriteFile(filepath.Join(dir, cacheFilename), []byte(stale+current), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, storeFilename), []byte("not a bolt file\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := Load(root)
+	if _, ok, err := openStore(root, true); err != nil || ok {
+		t.Fatalf("openStore(readOnly) on a garbage file = ok=%v err=%v, want ok=false err=nil", ok, err)
+	}
+	s, err := createStore(root)
 	if err != nil {
-		t.Fatalf("an unreadable cache shape is discarded, not a command failure: %v", err)
+		t.Fatalf("createStore after a garbage file should succeed by discarding it: %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("expected the whole cache discarded once one line fails to decode, got %v", got)
-	}
+	closeStore(t, s)
 }
 
-func TestLoad_MissingCacheIsNotAnError(t *testing.T) {
+// TestOpenStore_SchemaMismatchIsDiscarded: a store written under a
+// different schema version is treated exactly like an unreadable one —
+// discarded, never migrated (§23 C-14).
+func TestOpenStore_SchemaMismatchIsDiscarded(t *testing.T) {
 	root := t.TempDir()
-	got, err := Load(root)
+	s, err := createStore(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("expected empty map for a missing cache, got %v", got)
+	if err := s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketMeta).Put(keySchemaVersion, []byte("stale-version"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	closeStore(t, s)
+
+	if _, ok, err := openStore(root, true); err != nil || ok {
+		t.Fatalf("openStore(readOnly) on a stale schema = ok=%v err=%v, want ok=false err=nil", ok, err)
+	}
+	fresh, ok, err := openStore(root, false)
+	if err != nil || !ok {
+		t.Fatalf("openStore(readWrite) after a stale schema = ok=%v err=%v, want ok=true err=nil (rebuilt)", ok, err)
+	}
+	defer closeStore(t, fresh)
+	if len(allEntries(fresh)) != 0 {
+		t.Error("expected the rebuilt store to be empty — nothing was written to it yet")
 	}
 }
 
-func TestSave_IsDeterministic(t *testing.T) {
-	root1, root2 := t.TempDir(), t.TempDir()
-	records := map[string]Record{
-		"b.go": {ModTime: 2, Size: 20, Entries: []entry.Entry{{Path: "b.go", Name: "B", Kind: "func"}}},
-		"a.go": {ModTime: 1, Size: 10, Entries: []entry.Entry{{Path: "a.go", Name: "A", Kind: "func"}}},
+// TestStore_DeterministicOutput (§3 C5, restated for a bbolt file by
+// §23 C-14: not for merging, but so the same tree provably produces the
+// same result): building the same logical content twice, in the same
+// process or a fresh one, must not depend on Go's randomised map
+// iteration order — checked here by feeding build the same maps twice
+// (constructed fresh each time, so any accidental reliance on a
+// particular map's internal iteration order would show up as flakiness
+// across repeated runs of this test, not just a single comparison).
+func TestStore_DeterministicOutput(t *testing.T) {
+	build := func(root string) []byte {
+		s, err := createStore(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files := map[string]Record{
+			"b.go": {ModTime: 2, Size: 20},
+			"a.go": {ModTime: 1, Size: 10},
+			"c.go": {ModTime: 3, Size: 30},
+		}
+		all := []entry.Entry{
+			{Path: "b.go", Name: "B", Kind: "func"},
+			{Path: "a.go", Name: "A", Kind: "func"},
+			{Path: "c.go", Name: "Cluster", Kind: "type"},
+		}
+		if err := s.build(files, all, []byte("enum-blob")); err != nil {
+			t.Fatal(err)
+		}
+		closeStore(t, s)
+		b, err := os.ReadFile(filepath.Join(root, Dir, cacheDir, storeFilename))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
 	}
-	if err := Save(root1, records); err != nil {
-		t.Fatal(err)
+	b1 := build(t.TempDir())
+	b2 := build(t.TempDir())
+	if len(b1) != len(b2) {
+		t.Fatalf("store files differ in size: %d vs %d bytes", len(b1), len(b2))
 	}
-	if err := Save(root2, records); err != nil {
-		t.Fatal(err)
+	for i := range b1 {
+		if b1[i] != b2[i] {
+			t.Fatalf("store files differ at byte %d", i)
+		}
 	}
-	b1, err := readCacheFile(root1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b2, err := readCacheFile(root2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b1 != b2 {
-		t.Fatalf("Save is not deterministic:\n%s\n---\n%s", b1, b2)
-	}
-}
-
-func sortByName(entries []entry.Entry) {
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 }

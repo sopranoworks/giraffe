@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"giraffe/internal/entry"
@@ -23,48 +24,64 @@ type Stats struct {
 	RootProject string   // this root's own project name — the marker at its own top, or its basename
 }
 
-// Refresh brings the local cache up to date with the current working
-// tree, then returns the full current entry set.
+// Refresh brings root's store up to date with the current working tree
+// and returns it, open, ready to query (§30 C-46: entries are read
+// through it lazily — All/Candidates — never materialized into a
+// process-resident slice here). Caller closes it when done querying.
 //
 // Freshness is decided by stat — mtime and size — over the candidate set
-// scanner.List already resolved (§20 C-2), not by git blob hash, so a
-// stat-based check does not need git's tracked/staged/unstaged
-// distinctions at all: an edit is an edit, whether or not it has been
-// `git add`ed. Only the extraction subset of that candidate set (§24
-// C-18: files whose extension has a registered extractor) is ever
-// stat'd or cached — the rest get a file entry and nothing else, since
-// there is no read to spare a cache hit against.
-//
-// Tracked and untracked files are cached identically (§23 C-14). Before
-// this directive, an untracked file was always re-extracted and never
-// persisted, because §8 committed the index and "not yet shared with
-// anyone" was a real distinction for something about to be committed.
-// The cache is local now — nothing it holds is ever shared with anyone,
-// tracked or not — so that distinction has nothing left to protect, and
-// §19's original framing already anticipated this: an untracked file's
-// "freshness is decided by content or mtime instead" of a blob hash, not
-// that it goes uncached. A work-in-progress file, untracked by
-// definition, is exactly the case this session's caching should speed up.
-func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments map[string]string) ([]entry.Entry, Stats, error) {
-	cached, err := Load(root)
+// scanner.List already resolved (§20 C-2), exactly as before §30; only
+// where that comparison is read from, and what a hit or miss does next,
+// changed. When nothing at all needs to change — every extractable
+// file's stat matches its store record, and the enumeration cache is
+// still fresh — Refresh opens the existing store read-only and returns
+// it untouched: no entry is decoded, no write transaction happens (the
+// fast path §30 C-46 exists for). Any other outcome — a first run, a
+// stale or unreadable store, a changed file, or a stale enumeration
+// cache — rebuilds the whole store in one write transaction, the same
+// full-rewrite shape Save always had; carried-over files' entries are
+// looked up by id from the old store rather than re-extracted, but every
+// bucket in the new store (entries, files, name_trigrams) is written
+// fresh (§23 C-14's "discard and rebuild" ethos, applied to why a
+// partial update is not attempted: convergence, not incrementality, is
+// the property this cache needs).
+func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments map[string]string) (*Store, Stats, error) {
+	ro, roOK, err := openStore(root, true)
 	if err != nil {
 		return nil, Stats{}, err
+	}
+	if roOK {
+		defer func() {
+			if ro != nil {
+				_ = ro.Close()
+			}
+		}()
+	}
+	var roForDiscover *Store
+	if roOK {
+		roForDiscover = ro
 	}
 
-	// One enumeration serves both the scope-filtered candidate set and
-	// marker discovery (scanner.Discover) — measured to matter at scale
-	// (§23 Step 1): fetching each independently paid for `git ls-files`
-	// twice, at roughly the cost of everything else Refresh does
-	// combined. discoverCached (§26 C-28/item 5) additionally skips the
-	// tracked half's own cost — enumeration and the filtering built on
-	// top of it — when scanner.GitIndexFingerprint proves nothing that
-	// could change the tracked set has changed; the untracked half is
-	// always re-run fresh, since it has no comparably cheap freshness
-	// signal.
-	metas, markerPaths, err := discoverCached(ctx, root, scope)
+	metas, markerPaths, enumBlob, err := discover(ctx, root, scope, roForDiscover)
 	if err != nil {
 		return nil, Stats{}, err
 	}
+	// A changed enum blob means the tracked file set (or the exclude
+	// fingerprint it was filtered against) was actually re-enumerated,
+	// which can move marker directories and therefore project
+	// assignments even when every already-known extractable file's own
+	// stat is untouched — e.g. a project marker's content changing
+	// without any file being added or removed. Persisted file entries
+	// (fileEntry, cached in the store's entries bucket like anything
+	// else now) would otherwise carry a stale Project forward on the
+	// fast path below, since that path never recomputes them. Forcing a
+	// rebuild here is conservative — most enum-cache misses already
+	// force one via a changed or new extractable file too — but this is
+	// the one case that would not otherwise be caught.
+	enumChanged := roOK && func() bool {
+		old, _ := ro.enumBlob()
+		return string(old) != string(enumBlob)
+	}()
 
 	markerDirs := scanner.MarkerDirs(markerPaths)
 	fallbackProject := filepath.Base(root)
@@ -77,31 +94,15 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	}
 	rootProject := scanner.ProjectFor(".", markerDirs, projectNames, fallbackProject)
 
-	newCache := make(map[string]Record, len(metas))
 	var all []entry.Entry
 	var extractable []scanner.FileMeta
 	var toRead []scanner.FileMeta
-	var toReadFingerprint []Record // ModTime/Size only, aligned with toRead — avoids a second stat per file below
+	var toReadFingerprint []Record // ModTime/Size only, aligned with toRead
 
 	// §22 item 4 / §24 C-18: one file entry per scanned file, so a file
-	// can be found by name even when it has no declarations of its own —
-	// every top-level declaration unexported (§21 C-6), or no registered
-	// extractor at all (§24 C-18: file-name indexing does not need one).
-	// Computed fresh every call from the same metas list Refresh already
-	// has for freshness; never cached — see fileEntry's own comment for
-	// why. Extraction is a narrower set: only files whose extension has a
-	// registered extractor go on to the stat/cache/read/parse pipeline
-	// below — everything else already got its file entry and needs
-	// nothing more, so it is never stat'd, cached, or read.
-	// m.Size (directive 009 item 3) already comes from discoverCached:
-	// stat'd once when a tracked file first entered the enum cache and
-	// reused on every hit thereafter, or stat'd fresh here for the
-	// always-uncached untracked half (scanner.FilterTracked/
-	// FilterUntracked). Stat'ing it again per call, for every file
-	// regardless of cache state, was tried first and measured a ~1s
-	// regression on llvm-project's warm path alone — undoing most of
-	// directive 008 item 5's win — so fileEntry only ever reads it here,
-	// never stats on its own.
+	// can be found by name even when it has no declarations of its own.
+	// Computed fresh every call, never cached — see fileEntry's own
+	// comment for why.
 	for _, m := range metas {
 		fe := fileEntry(m, markerDirs, projectNames, fallbackProject, assignments)
 		fe.Size = m.Size
@@ -111,6 +112,8 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 		}
 	}
 
+	files := make(map[string]Record, len(extractable))
+	changed := !roOK || enumChanged
 	for _, m := range extractable {
 		info, statErr := os.Stat(filepath.Join(root, m.Path))
 		if statErr != nil {
@@ -121,51 +124,95 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 		}
 		cur := Record{ModTime: info.ModTime().UnixNano(), Size: info.Size()}
 
-		if prev, ok := cached[m.Path]; ok && prev.ModTime == cur.ModTime && prev.Size == cur.Size {
-			newCache[m.Path] = prev
-			all = append(all, prev.Entries...)
-			continue
+		if roOK {
+			if prev, ok := ro.fileRecord(m.Path); ok && prev.ModTime == cur.ModTime && prev.Size == cur.Size {
+				files[m.Path] = prev
+				continue
+			}
 		}
+		changed = true
 		toRead = append(toRead, m)
 		toReadFingerprint = append(toReadFingerprint, cur)
+	}
+	// A file present in the old store but no longer in the current
+	// candidate set (deleted, or newly excluded) must not survive into
+	// the rebuilt store — files only ever holds this run's own set, so a
+	// removal is simply "not added here," never something to delete. A
+	// length mismatch is the same conservative signal the old text
+	// cache's Save shortcut used (§23 Step 1: len(newCache) ==
+	// len(cached)), not a full set comparison.
+	if roOK && len(files) != ro.fileCount() {
+		changed = true
 	}
 
 	paths := make([]string, len(toRead))
 	for i, m := range toRead {
 		paths[i] = m.Path
 	}
-	files, err := scanner.Read(ctx, root, paths)
+	readFiles, err := scanner.Read(ctx, root, paths)
 	if err != nil {
 		return nil, Stats{}, err
 	}
 
 	var stats Stats
 	stats.RootProject = rootProject
-	for i, f := range files {
+	var freshlyParsed []entry.Entry
+	for i, f := range readFiles {
 		m := toRead[i]
 		project := scanner.ProjectFor(f.Path, markerDirs, projectNames, fallbackProject)
 		entries, err := extract(f, project, assignments)
 		if err != nil {
 			// A file that fails to parse degrades the answer, not the
-			// command: the rest of the index still builds (§2, "a stale
-			// index degrades gracefully"). Reported in ## warnings by the
-			// output layer.
+			// command: the rest of the store still builds (§2, "a stale
+			// index degrades gracefully"). Reported in ## warnings by
+			// the output layer.
 			stats.Warnings = append(stats.Warnings, fmt.Sprintf("%s: %v", f.Path, err))
 			continue
 		}
-		all = append(all, entries...)
+		freshlyParsed = append(freshlyParsed, entries...)
 		fp := toReadFingerprint[i]
-		newCache[m.Path] = Record{ModTime: fp.ModTime, Size: fp.Size, Entries: entries}
+		files[m.Path] = Record{ModTime: fp.ModTime, Size: fp.Size}
 		stats.Reparsed++
 	}
 	stats.Reused = len(extractable) - stats.Reparsed - len(stats.Warnings)
 
+	// The zero-decode fast path: nothing about the extraction cache or
+	// the enumeration cache needs to change, so the existing store is
+	// returned exactly as it was opened — no entry, in this store or the
+	// old one, was ever decoded to reach this point.
+	if !changed && roOK {
+		result := ro
+		ro = nil // ownership transferred to the caller; the deferred Close above must not also close it
+		return result, stats, nil
+	}
+
+	// Something changed: rebuild. Carried-over files' entries are looked
+	// up by id from the old store (a targeted read, not a scan);
+	// declarations for reparsed files are already in freshlyParsed;
+	// every scanned file's own fileEntry is already in all.
+	if roOK {
+		// §3 C5: sorted rather than ranged over directly, so the order
+		// carried-over entries join all in does not depend on Go's
+		// randomised map iteration.
+		paths := make([]string, 0, len(files))
+		for path := range files {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		for _, path := range paths {
+			rec := files[path]
+			if len(rec.EntryIDs) == 0 {
+				continue // reparsed this run, or a file with zero declarations
+			}
+			all = append(all, ro.entriesByID(rec.EntryIDs)...)
+		}
+	}
+	all = append(all, freshlyParsed...)
+
 	// A file's declaration count is only knowable once every declaration
-	// entry is in all — extraction above runs after fileEntry already
-	// built this file's own KindFile entry, so it is patched here in one
-	// pass rather than threaded through the extraction loop (directive
-	// 009 item 3; same signal as Size, for the corpora that do have an
-	// extractor).
+	// entry is assembled — fileEntry already built this file's own
+	// KindFile entry above, so DeclCount is patched here in one pass
+	// (directive 009 item 3).
 	declCounts := make(map[string]int, len(extractable))
 	for _, e := range all {
 		if e.Kind != entry.KindFile {
@@ -178,22 +225,15 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 		}
 	}
 
-	// Every entry newCache holds when nothing was reparsed came from a
-	// cache hit (copied from cached verbatim, never mutated) — so
-	// newCache is then a subset of cached, and equal length means it is
-	// the same set of records already on disk. Skipping the rewrite in
-	// that case matters at scale (§23 Step 1): serialising and writing
-	// the whole cache back unchanged, on every single invocation, was
-	// measured at close to a third of total wall time on a Go corpus two
-	// orders of magnitude past gekka — pure waste on the "nothing
-	// changed" run C-15 calls the case caching exists for.
-	if stats.Reparsed == 0 && len(newCache) == len(cached) {
-		return all, stats, nil
-	}
-	if err := Save(root, newCache); err != nil {
+	fresh, err := createStore(root)
+	if err != nil {
 		return nil, Stats{}, err
 	}
-	return all, stats, nil
+	if err := fresh.build(files, all, enumBlob); err != nil {
+		_ = fresh.Close()
+		return nil, Stats{}, err
+	}
+	return fresh, stats, nil
 }
 
 // fileEntry represents m itself as a search target, addressed by its own
@@ -203,15 +243,6 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 // already being walked, with no file I/O of its own to save by caching
 // it — unlike a declaration entry, there is nothing here a cache hit
 // would spare.
-//
-// Name drops the extension so an exact query for "retry" hits the
-// file retry.go at the same top rank an exact symbol-name match gets
-// (tier 0) — the strongest signal, matching the observation that a file
-// name resists naming drift better than a symbol name does. Exported is
-// always true: a file's existence is not a language-visibility concept,
-// so it gets the same "always visible" default an exported declaration
-// gets, rather than being hidden cross-project the way an unexported
-// declaration is.
 func fileEntry(m scanner.FileMeta, markerDirs []string, projectNames map[string]string, fallbackProject string, assignments map[string]string) entry.Entry {
 	base := path.Base(m.Path)
 	ext := path.Ext(base)
@@ -299,13 +330,7 @@ func readLines(root, name string) (lines []string, lineNos []int, err error) {
 // or "lang:" but does not parse as a well-formed assignment, which is a
 // hard error (§26 C-29): no real path starts that way, so a line
 // shaped like a typoed assignment is never a plausible exclusion
-// pattern either. Before this directive such a line silently fell
-// through and excluded nothing — the exact class of failure §5 already
-// forbids for --query, now closed here too.
-//
-// This file format is not specified by the directive (§19 open item 10);
-// chosen here as the smallest thing that works, reusing the same pattern
-// syntax scanner.Pattern already implements.
+// pattern either.
 //
 // Hand-written, unlike everything under cacheDir: authored by the
 // operator, and theirs to commit or not — and now, per §25 C-27,

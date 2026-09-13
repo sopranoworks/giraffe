@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strings"
 
-	"giraffe/internal/entry"
 	"giraffe/internal/index"
 	"giraffe/internal/lang"
 	"giraffe/internal/limits"
@@ -53,7 +52,7 @@ func main() {
 // committed either).
 type rootResult struct {
 	root      string
-	entries   []entry.Entry
+	store     *index.Store
 	stats     index.Stats
 	commit    string
 	exclusion []scanner.Pattern
@@ -65,8 +64,9 @@ type rootResult struct {
 // branching afterward keeps their shared setup in one place rather than
 // two copies that would drift (code-manners M1).
 type searchState struct {
-	entries           []entry.Entry
-	invocationProject string // §21 C-6: home root's own project; unexported entries elsewhere are hidden unless a search runs from within them
+	entries           query.Entries  // §30 C-46: every root's store, merged; nothing decoded until Search/Suggest/Browse/Summarize actually range over it
+	stores            []*index.Store // closed once this invocation is done querying — see run
+	invocationProject string         // §21 C-6: home root's own project; unexported entries elsewhere are hidden unless a search runs from within them
 	commitLine        string
 	reparsed          int
 	warnings          []string
@@ -91,6 +91,11 @@ func run(ctx context.Context, args []string) int {
 	sub, rest := args[0], args[1:]
 
 	st, code := buildSearchState(ctx)
+	defer func() {
+		for _, s := range st.stores {
+			_ = s.Close()
+		}
+	}()
 	if code != 0 {
 		return code
 	}
@@ -126,6 +131,16 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 	}
 
 	var results []rootResult
+	// closeAll releases every store opened so far — called on any error
+	// return below, since a root failing partway through must not leak
+	// the stores already opened for earlier roots. On success, ownership
+	// of every store passes to the returned searchState instead (see
+	// run's own defer), and closeAll is never called.
+	closeAll := func() {
+		for _, r := range results {
+			_ = r.store.Close()
+		}
+	}
 	var ignoreWarnings []string
 	knownLanguageSet := make(map[string]bool)
 	for _, l := range lang.RegisteredNames() {
@@ -135,6 +150,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 		exclude, assignments, err := index.LoadExclude(r)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "giraffe:", err)
+			closeAll()
 			return searchState{}, 1
 		}
 		for _, name := range assignments {
@@ -142,9 +158,10 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 		}
 		scope := scanner.Scope{Exclude: exclude}
 
-		entries, stats, err := index.Refresh(ctx, r, scope, assignments)
+		store, stats, err := index.Refresh(ctx, r, scope, assignments)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "giraffe:", err)
+			closeAll()
 			// §21 C-8: a name collision is a configuration problem with
 			// one clear fix, exit 2 — same treatment as the cross-root
 			// collision below, whichever of the two catches it first.
@@ -158,7 +175,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 		if err != nil {
 			commit = "none"
 		}
-		results = append(results, rootResult{root: r, entries: entries, stats: stats, commit: commit, exclusion: scope.Exclude})
+		results = append(results, rootResult{root: r, store: store, stats: stats, commit: commit, exclusion: scope.Exclude})
 
 		// §23 C-14: the cache directory must never be committed — unlike
 		// roots/exclude, which are hand-written and the operator's own
@@ -174,6 +191,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 
 	if err := checkNameCollisions(results); err != nil {
 		fmt.Fprintln(os.Stderr, "giraffe:", err)
+		closeAll()
 		return searchState{}, 2
 	}
 
@@ -182,13 +200,15 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 	// since resolveRoots always puts it first.
 	invocationProject := results[0].stats.RootProject
 
-	var allEntries []entry.Entry
 	var totalReparsed int
 	var warnings []string
 	var commitParts []string
 	exclusionSet := make(map[string]bool)
-	for _, r := range results {
-		allEntries = append(allEntries, r.entries...)
+	sources := make([]query.Entries, len(results))
+	stores := make([]*index.Store, len(results))
+	for i, r := range results {
+		sources[i] = r.store
+		stores[i] = r.store
 		totalReparsed += r.stats.Reparsed
 		warnings = append(warnings, r.stats.Warnings...)
 		commitParts = append(commitParts, fmt.Sprintf("%s@%s", filepath.Base(r.root), r.commit))
@@ -216,7 +236,8 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 	sort.Strings(knownLanguages)
 
 	return searchState{
-		entries:           allEntries,
+		entries:           query.Concat(sources...),
+		stores:            stores,
 		invocationProject: invocationProject,
 		commitLine:        commitLine,
 		reparsed:          totalReparsed,
@@ -248,7 +269,7 @@ func runFind(args []string, st searchState) int {
 	}
 	matches := query.Search(st.entries, word, filter, st.invocationProject)
 
-	summary := output.Summarize(st.entries, st.commitLine, st.reparsed, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
+	summary := output.Summarize(st.entries.All(), st.commitLine, st.reparsed, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
 	if len(matches) == 0 {
 		summary.TryNext = query.Suggest(st.entries, word, st.invocationProject)
 	}
@@ -283,7 +304,7 @@ func runShow(args []string, st searchState) int {
 
 	matches := query.Browse(st.entries, filter, st.invocationProject)
 
-	summary := output.Summarize(st.entries, st.commitLine, st.reparsed, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
+	summary := output.Summarize(st.entries.All(), st.commitLine, st.reparsed, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
 	fmt.Print(output.Format(summary, matches))
 	return 0
 }
@@ -302,7 +323,7 @@ func runPrepare(args []string, st searchState) int {
 		fmt.Fprintln(os.Stderr, "usage: giraffe prepare")
 		return 2
 	}
-	summary := output.Summarize(st.entries, st.commitLine, st.reparsed, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
+	summary := output.Summarize(st.entries.All(), st.commitLine, st.reparsed, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
 	fmt.Print(output.Format(summary, nil))
 	return 0
 }

@@ -4,6 +4,7 @@ package output
 
 import (
 	"fmt"
+	"iter"
 	"path"
 	"sort"
 	"strings"
@@ -100,14 +101,37 @@ type Summary struct {
 // and genuinely absent). A plain list of opaque names, the same
 // treatment Kind and Scope values already get (§21 C-12) — this
 // package still never imports the lang package itself.
-func Summarize(entries []entry.Entry, commit string, reparsed int, warnings, notices, exclusions, knownLanguages []string) Summary {
+func Summarize(entries iter.Seq[entry.Entry], commit string, reparsed int, warnings, notices, exclusions, knownLanguages []string) Summary {
 	projects := make(map[string]bool)
 	positions := make(map[string]bool)
 	languages := make(map[string]bool) // known langs only — see ShowLang
 	extsByLang := make(map[string]map[string]bool)
-	var undocExported, undocPackage int
-	for _, e := range entries {
+	var undocExported, undocPackage, symbols int
+	langCounts := make(map[string]int, len(knownLanguages)+1)
+	for _, l := range knownLanguages {
+		langCounts[l] = 0 // seeded so a known language with no matches still reads as "0", not absent
+	}
+	extCounts := make(map[string]int)
+	// One pass over the whole entry set computes every whole-index total
+	// §7/§11 wants on the ## index line (§30 C-46: entries stream lazily
+	// from the store here — this still visits every entry, since these
+	// are whole-index totals regardless of any query, but nothing beyond
+	// the entry currently being summed is ever resident at once, unlike
+	// the materialized slice this used to range over three times — once
+	// here, once in languageBreakdown, once in extBreakdown).
+	for e := range entries {
+		symbols++
 		projects[e.Project] = true
+		langLabel := e.Lang
+		if langLabel == "" {
+			langLabel = unknownLang
+		}
+		langCounts[langLabel]++
+		extLabel := e.Ext
+		if extLabel == "" {
+			extLabel = noExt
+		}
+		extCounts[extLabel]++
 		if e.Lang != "" {
 			languages[e.Lang] = true
 			if extsByLang[e.Lang] == nil {
@@ -141,9 +165,14 @@ func Summarize(entries []entry.Entry, commit string, reparsed int, warnings, not
 	for l, exts := range extsByLang {
 		extVaries[l] = len(exts) > 1
 	}
+	var languagesLine, byExtLine string
+	if symbols > 0 {
+		languagesLine = breakdownLine(langCounts)
+		byExtLine = breakdownLine(extCounts)
+	}
 	return Summary{
 		Commit:               commit,
-		Symbols:              len(entries),
+		Symbols:              symbols,
 		Packages:             len(positions),
 		UndocumentedExported: undocExported,
 		UndocumentedPackage:  undocPackage,
@@ -151,8 +180,8 @@ func Summarize(entries []entry.Entry, commit string, reparsed int, warnings, not
 		ShowProject:          len(projects) > 1,
 		ShowLang:             len(languages) > 1,
 		ExtVaries:            extVaries,
-		Languages:            languageBreakdown(entries, knownLanguages),
-		ByExt:                extBreakdown(entries),
+		Languages:            languagesLine,
+		ByExt:                byExtLine,
 		Warnings:             warnings,
 		Notices:              notices,
 		Exclusions:           exclusions,
@@ -180,48 +209,11 @@ const unknownLang = "unknown"
 // attribute value, the same way unknownLang is not.
 const noExt = "(none)"
 
-// languageBreakdown reports symbol counts grouped by Lang, most common
-// first — the same narrow-by-distribution style ## truncated already
-// uses (§7), applied to the index line ## index reports (§24 C-20,
-// §25 C-24). Unknown (Lang == "") is its own bucket, labelled
-// unknownLang, not folded into or hidden from the count: "go 0,
-// unknown 181099" is an accurate statement about a repository with no
-// registered extractor at all.
-func languageBreakdown(entries []entry.Entry, knownLanguages []string) string {
-	if len(entries) == 0 {
-		return ""
-	}
-	counts := make(map[string]int, len(knownLanguages)+1)
-	for _, l := range knownLanguages {
-		counts[l] = 0 // seeded so a known language with no matches still reads as "0", not absent
-	}
-	for _, e := range entries {
-		label := e.Lang
-		if label == "" {
-			label = unknownLang
-		}
-		counts[label]++
-	}
-	return breakdownLine(counts)
-}
-
-// extBreakdown reports file counts grouped by Ext, the same shape as
-// languageBreakdown (§25 C-24): a fact about every file, present
-// whether or not its language is known.
-func extBreakdown(entries []entry.Entry) string {
-	if len(entries) == 0 {
-		return ""
-	}
-	counts := make(map[string]int)
-	for _, e := range entries {
-		label := e.Ext
-		if label == "" {
-			label = noExt
-		}
-		counts[label]++
-	}
-	return breakdownLine(counts)
-}
+// unknownLang and noExt labels are applied, and the "go 0, unknown
+// 181099" style breakdown lines built, inline in Summarize's single
+// pass over entries now (§30 C-46: avoiding two further full scans of
+// the same iterator) rather than in their own functions ranging over a
+// materialized slice a second and third time — see Summarize.
 
 // breakdownLine renders a counts map as "key N | key N | ... | +M more"
 // (§25: pipe-separated, matching the directive's own worked example),

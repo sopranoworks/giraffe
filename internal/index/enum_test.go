@@ -2,24 +2,44 @@ package index
 
 import (
 	"context"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"testing"
 
 	"giraffe/internal/scanner"
 )
 
-func TestEnumCache_SaveLoadRoundTrip(t *testing.T) {
-	root := t.TempDir()
-	metas := []scanner.FileMeta{{Path: "a.go", BlobHash: "hash-a"}, {Path: "b/c.go", BlobHash: "hash-c"}}
-	markers := []string{"go.mod"}
-	if err := saveEnumCache(root, 123, 456, "vendor/", metas, markers); err != nil {
+// loadEnumCacheForTest opens root's store read-only and decodes its enum
+// blob — the test-side equivalent of what discover does internally,
+// used here to inspect enum-cache state directly rather than only
+// through Refresh's externally-visible effects.
+func loadEnumCacheForTest(t *testing.T, root string) (enumCache, bool) {
+	t.Helper()
+	s, ok, err := openStore(root, true)
+	if err != nil {
 		t.Fatal(err)
 	}
-	got, ok := loadEnumCache(root)
 	if !ok {
-		t.Fatal("expected loadEnumCache to succeed after saveEnumCache")
+		return enumCache{}, false
+	}
+	defer s.Close()
+	blob, err := s.enumBlob()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blob == nil {
+		return enumCache{}, false
+	}
+	return decodeEnumCache(blob)
+}
+
+func TestEnumCache_EncodeDecodeRoundTrip(t *testing.T) {
+	metas := []scanner.FileMeta{{Path: "a.go", BlobHash: "hash-a"}, {Path: "b/c.go", BlobHash: "hash-c"}}
+	markers := []string{"go.mod"}
+	blob := encodeEnumCache(123, 456, "vendor/", metas, markers)
+
+	got, ok := decodeEnumCache(blob)
+	if !ok {
+		t.Fatal("expected decodeEnumCache to succeed after encodeEnumCache")
 	}
 	if got.IndexModTime != 123 || got.IndexSize != 456 {
 		t.Errorf("fingerprint = %d/%d, want 123/456", got.IndexModTime, got.IndexSize)
@@ -35,33 +55,26 @@ func TestEnumCache_SaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
-func TestEnumCache_MissingFileIsNotAnError(t *testing.T) {
+func TestEnumCache_MissingStoreIsNotAnError(t *testing.T) {
 	root := t.TempDir()
-	if _, ok := loadEnumCache(root); ok {
-		t.Fatal("expected ok=false for a cache that was never written")
+	if _, ok := loadEnumCacheForTest(t, root); ok {
+		t.Fatal("expected ok=false for a store that was never written")
 	}
 }
 
 func TestEnumCache_MalformedShapeIsDiscarded(t *testing.T) {
-	root := t.TempDir()
-	dir := filepath.Join(root, Dir, cacheDir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	// A previous format's shape, or on-disk corruption — not this
-	// version's "modtime\tsize\n" then "path\thash" lines shape.
-	if err := os.WriteFile(filepath.Join(dir, enumCacheFilename), []byte("garbage\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := loadEnumCache(root); ok {
-		t.Fatal("expected ok=false for a cache whose header does not parse")
+	// version's "modtime\tsize\texclude\n" then "F\t.../M\t..." lines
+	// shape.
+	if _, ok := decodeEnumCache([]byte("garbage\n")); ok {
+		t.Fatal("expected ok=false for a blob whose header does not parse")
 	}
 }
 
 // TestRefresh_NewUntrackedFileAppearsAfterEnumCacheIsWarm (§26 C-28/item
 // 5): the correctness case the directive names outright. A cache keyed
 // on the git index (or on HEAD) alone would miss this — an untracked
-// file's appearance changes neither. discoverCached always re-runs the
+// file's appearance changes neither. discover always re-runs the
 // untracked half of enumeration fresh specifically so this cannot
 // regress into C-2's "freshly written code reads as absent" failure.
 func TestRefresh_NewUntrackedFileAppearsAfterEnumCacheIsWarm(t *testing.T) {
@@ -71,10 +84,8 @@ func TestRefresh_NewUntrackedFileAppearsAfterEnumCacheIsWarm(t *testing.T) {
 
 	// First call: warms the enum cache (the git index has a fingerprint
 	// the moment a commit exists).
-	if _, _, err := Refresh(context.Background(), root, scope(), nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := loadEnumCache(root); !ok {
+	closeStore(t, mustRefresh(t, root))
+	if _, ok := loadEnumCacheForTest(t, root); !ok {
 		t.Fatal("expected the enum cache to be warm after the first Refresh")
 	}
 
@@ -82,18 +93,16 @@ func TestRefresh_NewUntrackedFileAppearsAfterEnumCacheIsWarm(t *testing.T) {
 	// HEAD or the git index moving at all.
 	writeFile(t, root, "wip.go", "package p\n\nfunc WorkInProgress() {}\n")
 
-	entries, _, err := Refresh(context.Background(), root, scope(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
 	found := false
-	for _, e := range entries {
+	for e := range s.All() {
 		if e.Name == "WorkInProgress" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected the new untracked file's declaration to appear even though the enum cache was warm, got %#v", declarations(entries))
+		t.Fatal("expected the new untracked file's declaration to appear even though the enum cache was warm")
 	}
 }
 
@@ -109,10 +118,8 @@ func TestRefresh_StagedAddIsPickedUpAfterEnumCacheIsWarm(t *testing.T) {
 	writeFile(t, root, "tracked.go", "package p\n\nfunc Tracked() {}\n")
 	gitCommit(t, root, "tracked.go")
 
-	if _, _, err := Refresh(context.Background(), root, scope(), nil); err != nil {
-		t.Fatal(err)
-	}
-	before, ok := loadEnumCache(root)
+	closeStore(t, mustRefresh(t, root))
+	before, ok := loadEnumCacheForTest(t, root)
 	if !ok {
 		t.Fatal("expected the enum cache to be warm after the first Refresh")
 	}
@@ -124,21 +131,19 @@ func TestRefresh_StagedAddIsPickedUpAfterEnumCacheIsWarm(t *testing.T) {
 		t.Fatalf("git add: %v\n%s", err, out)
 	}
 
-	entries, _, err := Refresh(context.Background(), root, scope(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustRefresh(t, root)
 	found := false
-	for _, e := range entries {
+	for e := range s.All() {
 		if e.Name == "Staged" {
 			found = true
 		}
 	}
+	closeStore(t, s)
 	if !found {
-		t.Fatalf("expected the staged-but-uncommitted file's declaration to appear, got %#v", declarations(entries))
+		t.Fatal("expected the staged-but-uncommitted file's declaration to appear")
 	}
 
-	afterCache, ok := loadEnumCache(root)
+	afterCache, ok := loadEnumCacheForTest(t, root)
 	if !ok {
 		t.Fatal("expected the enum cache to be rewritten after the staged add")
 	}
@@ -155,18 +160,14 @@ func TestRefresh_EnumCacheReusedWhenNothingChanges(t *testing.T) {
 	writeFile(t, root, "a.go", "package p\n\nfunc A() {}\n")
 	gitCommit(t, root, "a.go")
 
-	if _, _, err := Refresh(context.Background(), root, scope(), nil); err != nil {
-		t.Fatal(err)
-	}
-	first, ok := loadEnumCache(root)
+	closeStore(t, mustRefresh(t, root))
+	first, ok := loadEnumCacheForTest(t, root)
 	if !ok {
 		t.Fatal("expected the enum cache to be warm")
 	}
 
-	if _, _, err := Refresh(context.Background(), root, scope(), nil); err != nil {
-		t.Fatal(err)
-	}
-	second, ok := loadEnumCache(root)
+	closeStore(t, mustRefresh(t, root))
+	second, ok := loadEnumCacheForTest(t, root)
 	if !ok {
 		t.Fatal("expected the enum cache to still be present")
 	}

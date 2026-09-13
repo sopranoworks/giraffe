@@ -164,7 +164,7 @@ func TestBrowse_FiltersAndOrdersByPathThenName(t *testing.T) {
 		{Name: "A", Path: "a.go", Project: "giraffe", Exported: true},
 		{Name: "Elsewhere", Path: "elsewhere.go", Project: "other", Exported: true},
 	}
-	got := Browse(entries, Filter{"project": {"giraffe"}}, "giraffe")
+	got := Browse(Slice(entries), Filter{"project": {"giraffe"}}, "giraffe")
 	if len(got) != 3 {
 		t.Fatalf("expected 3 entries in project giraffe, got %d: %v", len(got), got)
 	}
@@ -181,10 +181,10 @@ func TestBrowse_HidesUnexportedOutsideItsOwnProject(t *testing.T) {
 	entries := []entry.Entry{
 		{Name: "helper", Path: "internal/x/x.go", Project: "giraffe", Exported: false},
 	}
-	if got := Browse(entries, Filter{"path": {"internal/x"}}, "giraffe"); len(got) != 1 {
+	if got := Browse(Slice(entries), Filter{"path": {"internal/x"}}, "giraffe"); len(got) != 1 {
 		t.Fatalf("expected the package-scope entry visible from its own project, got %d", len(got))
 	}
-	if got := Browse(entries, Filter{"path": {"internal/x"}}, "gekka"); len(got) != 0 {
+	if got := Browse(Slice(entries), Filter{"path": {"internal/x"}}, "gekka"); len(got) != 0 {
 		t.Fatalf("expected the package-scope entry hidden from another project, got %d", len(got))
 	}
 }
@@ -193,7 +193,7 @@ func TestSuggest_ReportsMatchesHiddenByProjectVisibility(t *testing.T) {
 	entries := []entry.Entry{
 		{Name: "readLines", Project: "giraffe", Exported: false},
 	}
-	got := Suggest(entries, "readLines", "gekka")
+	got := Suggest(Slice(entries), "readLines", "gekka")
 	if len(got) != 1 {
 		t.Fatalf("expected one hint, got %v", got)
 	}
@@ -207,7 +207,7 @@ func TestSuggest_OffersNearNamesWhenNothingMatchedAtAll(t *testing.T) {
 		{Name: "Retry", Project: "giraffe", Exported: true},
 		{Name: "RetryPolicy", Project: "giraffe", Exported: true},
 	}
-	got := Suggest(entries, "Retri", "giraffe") // typo: not a substring of either name, so tier() misses both
+	got := Suggest(Slice(entries), "Retri", "giraffe") // typo: not a substring of either name, so tier() misses both
 	if len(got) == 0 {
 		t.Fatalf("expected a near-name hint for a shared prefix")
 	}
@@ -224,7 +224,7 @@ func TestSuggest_OffersNearNamesWhenNothingMatchedAtAll(t *testing.T) {
 // shared token "show" is the fix.
 func TestSuggest_TokenOverlapCatchesRestructuredCompoundName(t *testing.T) {
 	entries := []entry.Entry{{Name: "runShow", Project: "giraffe", Exported: true}}
-	got := Suggest(entries, "showCommand", "giraffe")
+	got := Suggest(Slice(entries), "showCommand", "giraffe")
 	if len(got) == 0 {
 		t.Fatalf("expected a token-overlap hint for showCommand/runShow (shared token %q)", "show")
 	}
@@ -239,7 +239,7 @@ func TestSuggest_TokenOverlapCatchesRestructuredCompoundName(t *testing.T) {
 // splitting must not have replaced or broken that path.
 func TestSuggest_PrefixStillCatchesWhatItAlreadyCaught(t *testing.T) {
 	entries := []entry.Entry{{Name: "Browse", Project: "giraffe", Exported: true}}
-	got := Suggest(entries, "browseEntries", "giraffe")
+	got := Suggest(Slice(entries), "browseEntries", "giraffe")
 	if len(got) == 0 {
 		t.Fatalf("expected a near-name hint for browseEntries/Browse (shared leading characters)")
 	}
@@ -276,7 +276,7 @@ func TestSuggest_PreFilterDoesNotChangeResults(t *testing.T) {
 		{Name: "runShow", Project: "giraffe", Exported: true},
 		{Name: "recluster", Project: "giraffe", Exported: true}, // substring overlap, no real token match
 	}
-	got := Suggest(entries, "showCommand", "giraffe")
+	got := Suggest(Slice(entries), "showCommand", "giraffe")
 	if len(got) == 0 || !strings.Contains(got[0], "runShow") {
 		t.Fatalf("expected the real token-overlap hint to survive the pre-filter, got %v", got)
 	}
@@ -284,7 +284,7 @@ func TestSuggest_PreFilterDoesNotChangeResults(t *testing.T) {
 	// contains "cluster" as a raw substring (satisfying the pre-filter)
 	// but tokenizes to the single token "recluster" (no case boundary),
 	// so it must not be offered as a near-token hint.
-	got2 := Suggest(entries, "showCluster", "giraffe")
+	got2 := Suggest(Slice(entries), "showCluster", "giraffe")
 	for _, hint := range got2 {
 		if strings.Contains(hint, "recluster") {
 			t.Errorf("expected \"recluster\" to be excluded (substring-only overlap, no shared token), got %v", got2)
@@ -294,7 +294,7 @@ func TestSuggest_PreFilterDoesNotChangeResults(t *testing.T) {
 
 func TestSuggest_NilWhenNothingToOffer(t *testing.T) {
 	entries := []entry.Entry{{Name: "Unrelated", Project: "giraffe", Exported: true}}
-	if got := Suggest(entries, "zzz", "giraffe"); len(got) != 0 {
+	if got := Suggest(Slice(entries), "zzz", "giraffe"); len(got) != 0 {
 		t.Fatalf("expected no fabricated hint, got %v", got)
 	}
 }
@@ -327,7 +327,7 @@ func TestSearch_RanksNameOverDocOverPath(t *testing.T) {
 		{Name: "Retry", Doc: "retries with backoff", Path: "internal/retry/retry.go"},
 		{Name: "Other", Doc: "unrelated", Path: "internal/retry/x.go"},
 	}
-	got := Search(entries, "retry", nil, "")
+	got := Search(Slice(entries), "retry", nil, "")
 	if len(got) != 3 {
 		t.Fatalf("expected all 3 to match (name, doc, path), got %d: %v", len(got), got)
 	}
@@ -350,7 +350,7 @@ func TestSearch_DeclarationRanksAboveFileEntry(t *testing.T) {
 		{Name: "retry", Kind: entry.KindFile, Path: "retry.go", Exported: true, Lang: "go"},
 		{Name: "retry", Kind: "func", Path: "retry.go", Exported: true, Lang: "go"},
 	}
-	got := Search(entries, "retry", nil, "")
+	got := Search(Slice(entries), "retry", nil, "")
 	if len(got) != 2 {
 		t.Fatalf("expected both to match, got %d: %v", len(got), got)
 	}
@@ -375,7 +375,7 @@ func TestSearch_TopLevelRanksAboveMemberInSameTier(t *testing.T) {
 		{Name: "Cluster", Kind: "method", Path: "cluster.go", Exported: true},
 		{Name: "Cluster", Kind: "type", Path: "cluster.go", Exported: true},
 	}
-	got := Search(entries, "Cluster", nil, "")
+	got := Search(Slice(entries), "Cluster", nil, "")
 	if len(got) != 4 {
 		t.Fatalf("expected all four to match, got %d: %v", len(got), got)
 	}
@@ -398,7 +398,7 @@ func TestSearch_TopLevelSubstringOutranksMemberExactMatch(t *testing.T) {
 		{Name: "cluster", Kind: "field", Path: "watcher_actor.go", Exported: true},
 		{Name: "ClusterBootstrap", Kind: "type", Path: "cluster/bootstrap.go", Exported: true},
 	}
-	got := Search(entries, "Cluster", nil, "")
+	got := Search(Slice(entries), "Cluster", nil, "")
 	if len(got) != 3 {
 		t.Fatalf("expected all three to match, got %d: %v", len(got), got)
 	}
@@ -417,7 +417,7 @@ func TestSearch_MemberStillWinsWhenItIsTheOnlyMatch(t *testing.T) {
 		{Name: "GetMailboxLengths", Kind: "method", Path: "mailbox.go", Exported: true},
 		{Name: "Unrelated", Kind: "type", Path: "other.go", Exported: true},
 	}
-	got := Search(entries, "GetMailboxLengths", nil, "")
+	got := Search(Slice(entries), "GetMailboxLengths", nil, "")
 	if len(got) != 1 {
 		t.Fatalf("expected exactly one match, got %d: %v", len(got), got)
 	}
@@ -428,7 +428,7 @@ func TestSearch_MemberStillWinsWhenItIsTheOnlyMatch(t *testing.T) {
 
 func TestSearch_NoMatchIsExcluded(t *testing.T) {
 	entries := []entry.Entry{{Name: "Unrelated", Doc: "nothing here", Path: "x.go"}}
-	if got := Search(entries, "retry", nil, ""); len(got) != 0 {
+	if got := Search(Slice(entries), "retry", nil, ""); len(got) != 0 {
 		t.Fatalf("expected no matches, got %v", got)
 	}
 }
@@ -438,7 +438,7 @@ func TestSearch_ExportedRanksAboveUnexportedInSameTier(t *testing.T) {
 		{Name: "retry", Scope: "package", Exported: false, Project: "giraffe", Path: "x.go"},
 		{Name: "Retry", Scope: "exported", Exported: true, Project: "giraffe", Path: "y.go"},
 	}
-	got := Search(entries, "retry", nil, "giraffe")
+	got := Search(Slice(entries), "retry", nil, "giraffe")
 	if len(got) != 2 {
 		t.Fatalf("expected both to match by name (case-insensitive), got %d: %v", len(got), got)
 	}
@@ -451,10 +451,10 @@ func TestSearch_PackageScopeHiddenOutsideItsOwnProject(t *testing.T) {
 	entries := []entry.Entry{
 		{Name: "readLines", Scope: "package", Exported: false, Project: "giraffe", Path: "internal/index/refresh.go"},
 	}
-	if got := Search(entries, "readLines", nil, "giraffe"); len(got) != 1 {
+	if got := Search(Slice(entries), "readLines", nil, "giraffe"); len(got) != 1 {
 		t.Fatalf("expected the package-scope entry visible from its own project, got %d: %v", len(got), got)
 	}
-	if got := Search(entries, "readLines", nil, "gekka"); len(got) != 0 {
+	if got := Search(Slice(entries), "readLines", nil, "gekka"); len(got) != 0 {
 		t.Fatalf("expected the package-scope entry hidden from a different project, got %d: %v", len(got), got)
 	}
 }
@@ -463,7 +463,7 @@ func TestSearch_ExportedVisibleFromEveryProject(t *testing.T) {
 	entries := []entry.Entry{
 		{Name: "Retry", Scope: "exported", Exported: true, Project: "giraffe", Path: "internal/retry/retry.go"},
 	}
-	if got := Search(entries, "Retry", nil, "gekka"); len(got) != 1 {
+	if got := Search(Slice(entries), "Retry", nil, "gekka"); len(got) != 1 {
 		t.Fatalf("expected the exported entry visible from a different project, got %d: %v", len(got), got)
 	}
 }

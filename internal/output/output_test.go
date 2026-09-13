@@ -1,6 +1,7 @@
 package output
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -8,7 +9,7 @@ import (
 )
 
 func TestFormat_IndexLineAlwaysPresent_EmptySectionsOmitted(t *testing.T) {
-	s := Summarize(nil, "abc1234", 0, nil, nil, nil, nil)
+	s := Summarize(slices.Values[[]entry.Entry](nil), "abc1234", 0, nil, nil, nil, nil)
 	out := Format(s, nil)
 	if !strings.Contains(out, "## index") {
 		t.Fatalf("missing ## index in:\n%s", out)
@@ -29,7 +30,7 @@ func TestFormat_ResultsSection_PasteReadyAttributes(t *testing.T) {
 		{Path: "internal/retry/retry.go", Name: "Retry", Kind: "func", Doc: "retries with backoff", Exported: true,
 			Position: []entry.Position{{Name: "module", Value: "internal/retry"}}},
 	}
-	s := Summarize(entries, "abc1234", 1, nil, nil, nil, nil)
+	s := Summarize(slices.Values(entries), "abc1234", 1, nil, nil, nil, nil)
 	out := Format(s, entries)
 	if !strings.Contains(out, "name:Retry kind:func path:internal/retry/retry.go module:internal/retry") {
 		t.Fatalf("result line not paste-ready:\n%s", out)
@@ -44,7 +45,7 @@ func TestFormat_TruncatesAtEightResults(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		entries = append(entries, entry.Entry{Path: "a/b.go", Name: "X", Kind: "func"})
 	}
-	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
 	out := Format(s, entries)
 	if got := strings.Count(out, "name:X"); got != maxResults {
 		t.Fatalf("expected exactly %d result lines, got %d:\n%s", maxResults, got, out)
@@ -59,7 +60,7 @@ func TestFormat_TruncatesAtEightResults(t *testing.T) {
 
 func TestFormat_QuotesValuesWithWhitespace(t *testing.T) {
 	entries := []entry.Entry{{Path: "a b.go", Name: "X", Kind: "func"}}
-	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
 	out := Format(s, entries)
 	if !strings.Contains(out, "path:'a b.go'") {
 		t.Fatalf("expected a whitespace-containing value to be single-quoted:\n%s", out)
@@ -71,7 +72,7 @@ func TestFormat_ScopePackageIsLabelled_ExportedIsImplicit(t *testing.T) {
 		{Path: "a.go", Name: "Exported", Kind: "func", Scope: "exported", Exported: true},
 		{Path: "b.go", Name: "unexported", Kind: "func", Scope: "package", Exported: false},
 	}
-	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
 	out := Format(s, entries)
 	if !strings.Contains(out, "name:unexported kind:func path:b.go scope:package") {
 		t.Fatalf("expected scope:package on the unexported entry's line:\n%s", out)
@@ -88,7 +89,7 @@ func TestFormat_UndocumentedReportedByScope(t *testing.T) {
 		{Path: "c.go", Name: "c", Kind: "func", Exported: false},
 		{Path: "d.go", Name: "d", Kind: "func", Exported: false},
 	}
-	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
 	out := Format(s, nil)
 	// §22 C-11: one mixed count reads as a regression that did not
 	// happen once package-scope entries (documented far less often)
@@ -99,7 +100,7 @@ func TestFormat_UndocumentedReportedByScope(t *testing.T) {
 }
 
 func TestFormat_TryNextOnlyRendersWhenEmptyAndPopulated(t *testing.T) {
-	s := Summarize(nil, "abc1234", 0, nil, nil, nil, nil)
+	s := Summarize(slices.Values[[]entry.Entry](nil), "abc1234", 0, nil, nil, nil, nil)
 	s.TryNext = []string{"names in the index starting the same way: Retry"}
 	out := Format(s, nil)
 	if !strings.Contains(out, "## try next\nnames in the index starting the same way: Retry\n") {
@@ -107,14 +108,14 @@ func TestFormat_TryNextOnlyRendersWhenEmptyAndPopulated(t *testing.T) {
 	}
 
 	entries := []entry.Entry{{Path: "a.go", Name: "X", Kind: "func", Exported: true}}
-	s2 := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	s2 := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
 	s2.TryNext = []string{"should not appear"}
 	out2 := Format(s2, entries)
 	if strings.Contains(out2, "## try next") {
 		t.Fatalf("expected no ## try next section when there are matches:\n%s", out2)
 	}
 
-	s3 := Summarize(nil, "abc1234", 0, nil, nil, nil, nil)
+	s3 := Summarize(slices.Values[[]entry.Entry](nil), "abc1234", 0, nil, nil, nil, nil)
 	out3 := Format(s3, nil)
 	if strings.Contains(out3, "## try next") {
 		t.Fatalf("expected no ## try next section when nothing was found to offer:\n%s", out3)
@@ -130,7 +131,7 @@ func TestFormat_FileEntriesDoNotCountAsUndocumented(t *testing.T) {
 		{Path: "a.go", Name: "a", Kind: entry.KindFile, Exported: true},
 		{Path: "a.go", Name: "A", Kind: "func", Exported: true, Doc: "documented"},
 	}
-	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
 	out := Format(s, nil)
 	if !strings.Contains(out, "undocumented 0 exported, 0 package") {
 		t.Fatalf("expected the file entry to be excluded from the undocumented count:\n%s", out)
@@ -148,7 +149,7 @@ func TestFormat_LanguageBreakdownAndLangAttribute(t *testing.T) {
 		{Path: "b.c", Name: "b", Kind: "func", Exported: true, Ext: "c", Lang: "c"},
 		{Path: "README.md", Name: "README", Kind: entry.KindFile, Exported: true, Ext: "md", Lang: ""},
 	}
-	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
 	out := Format(s, entries)
 	if !strings.Contains(out, "languages: c 1 | go 1 | unknown 1") {
 		t.Fatalf("expected a per-language breakdown line with an unknown bucket:\n%s", out)
@@ -163,7 +164,7 @@ func TestFormat_LangOmittedForASingleKnownLanguageIndex(t *testing.T) {
 		{Path: "a.go", Name: "A", Kind: "func", Exported: true, Ext: "go", Lang: "go"},
 		{Path: "README.md", Name: "README", Kind: entry.KindFile, Exported: true, Ext: "md", Lang: ""},
 	}
-	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
 	out := Format(s, entries)
 	if strings.Contains(out, "lang:go") {
 		t.Fatalf("expected no lang: attribute when only one known language is present:\n%s", out)
@@ -185,7 +186,7 @@ func TestFormat_ExtOmittedWhenRecoverableFromLang_PrintedWhenItVaries(t *testing
 		{Path: "c.c", Name: "C", Kind: "func", Exported: true, Ext: "c", Lang: "c"},
 		{Path: "README", Name: "README", Kind: entry.KindFile, Exported: true, Ext: "", Lang: ""},
 	}
-	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
 	out := Format(s, entries)
 	if strings.Contains(out, "ext:go") {
 		t.Fatalf("expected ext:go to be omitted (go has one observed extension, recoverable from lang):\n%s", out)
@@ -205,7 +206,7 @@ func TestFormat_ExtOmittedWhenRecoverableFromLang_PrintedWhenItVaries(t *testing
 // gated on whether ext varies.
 func TestFormat_ExtPrintsAloneWhenLangUnknown(t *testing.T) {
 	entries := []entry.Entry{{Path: "notes.md", Name: "notes", Kind: entry.KindFile, Exported: true, Ext: "md", Lang: ""}}
-	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
 	out := Format(s, entries)
 	if !strings.Contains(out, "ext:md") {
 		t.Fatalf("expected ext:md to print when lang is unknown:\n%s", out)
@@ -260,7 +261,7 @@ func TestFormat_PreambleIncludesIndexHeaderAndBreakdownLines(t *testing.T) {
 }
 
 func TestFormat_WarningsAndExclusions(t *testing.T) {
-	s := Summarize(nil, "abc1234", 0, []string{"x.go: syntax error"}, nil, []string{"vendor/"}, nil)
+	s := Summarize(slices.Values[[]entry.Entry](nil), "abc1234", 0, []string{"x.go: syntax error"}, nil, []string{"vendor/"}, nil)
 	out := Format(s, nil)
 	if !strings.Contains(out, "## warnings") {
 		t.Fatalf("expected ## warnings section:\n%s", out)
@@ -282,7 +283,7 @@ func TestFormat_KnownLanguageWithZeroMatchesStillNamed(t *testing.T) {
 	entries := []entry.Entry{
 		{Path: "README.md", Name: "README", Kind: entry.KindFile, Exported: true, Ext: "md", Lang: ""},
 	}
-	s := Summarize(entries, "abc1234", 0, nil, nil, nil, []string{"go"})
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, []string{"go"})
 	out := Format(s, entries)
 	if !strings.Contains(out, "languages: unknown 1 | go 0") {
 		t.Fatalf("expected go to be named at 0 rather than omitted:\n%s", out)
@@ -325,7 +326,7 @@ func TestResultLine_SizeAndDeclCount(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := Summarize([]entry.Entry{tt.e}, "abc1234", 0, nil, nil, nil, nil)
+			s := Summarize(slices.Values([]entry.Entry{tt.e}), "abc1234", 0, nil, nil, nil, nil)
 			out := Format(s, []entry.Entry{tt.e})
 			if tt.want != "" && !strings.Contains(out, tt.want) {
 				t.Errorf("expected %q in:\n%s", tt.want, out)
@@ -353,7 +354,7 @@ func TestSummarize_PackagesCountsOnlyThePrimaryPosition(t *testing.T) {
 		{Name: "actors", Kind: "field", Exported: false,
 			Position: []entry.Position{{Name: "module", Value: "internal/cluster"}, {Name: "type", Value: "Cluster"}}},
 	}
-	s := Summarize(entries, "abc1234", 0, nil, nil, nil, nil)
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
 	if s.Packages != 1 {
 		t.Errorf("Packages = %d, want 1 (one module, despite two secondary position pairs)", s.Packages)
 	}
@@ -362,7 +363,7 @@ func TestSummarize_PackagesCountsOnlyThePrimaryPosition(t *testing.T) {
 func TestFormat_NoticesRenderWithoutTheUnparsedLabel(t *testing.T) {
 	// A notice (e.g. "the local cache is not git-ignored") is not a parse
 	// failure; labelling it "unparsed:" would be actively misleading.
-	s := Summarize(nil, "abc1234", 0, nil, []string{".giraffe/local is not ignored by git"}, nil, nil)
+	s := Summarize(slices.Values[[]entry.Entry](nil), "abc1234", 0, nil, []string{".giraffe/local is not ignored by git"}, nil, nil)
 	out := Format(s, nil)
 	if !strings.Contains(out, "\n.giraffe/local is not ignored by git\n") {
 		t.Fatalf("expected the notice verbatim, without an unparsed: prefix:\n%s", out)

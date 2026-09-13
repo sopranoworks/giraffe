@@ -98,12 +98,45 @@ type Config struct {
 //	             matches the pre-item-2, no-methods-and-fields baseline)
 //	384-768 MiB: 0.41-0.44s (flat)
 //
-// 512 MiB sits at 2x 256 MiB, the same "2x the last ceiling that
+// 512 MiB sat at 2x 256 MiB, the same "2x the last ceiling that
 // showed no slowdown" rule the original 64 MiB used, applied to the
-// corpus that now needs it. gekka and llvm-project's own live floors
-// (§27, §29: well under 64 MiB and ~48-53 MB respectively) sit far
-// inside this ceiling too, so neither sees any behaviour change.
-const defaultHeapLimit = 512 << 20 // 512 MiB
+// corpus that then needed it.
+//
+// §30 C-46, C-47: directive 012 replaced the decoded-into-a-slice cache
+// with a store read through mmap, specifically so entries stop being
+// GC-owned. Re-measured (same method, cold, `GODEBUG=gctrace=1`,
+// repeated trials) whether that lets this ceiling come back down — the
+// answer is genuinely mixed, not a clean yes, which is itself the
+// finding:
+//
+//   - A warm query's own footprint dropped sharply: kubernetes'
+//     `find Pod`, warm, needs only ~24-32 MiB before GC thrashing
+//     appears at all (16 MiB: 692 collections; 32 MiB: 37, flat from
+//     there) — entries genuinely stopped being the pressure.
+//
+//   - The one-time cold build did not drop nearly as far, because it is
+//     not just decode any more: go/parser still builds and discards a
+//     full AST per file (unchanged from before), and the store's own
+//     build now writes roughly 200,000 keys (every entry, every file
+//     record, every trigram posting) in one bbolt write transaction,
+//     which is its own real, GC-owned, transient allocation. Cold,
+//     against kubernetes:
+//
+//     128 MiB    : 6.4-6.6s (repeated trials agree)
+//     192 MiB    : 2.2-2.4s (first ceiling with no measurable slowdown)
+//     256-384 MiB: 2.2s (flat)
+//
+// 384 MiB sits at 2x 192 MiB, the same rule again — a real but modest
+// reduction from 512 MiB, bound by the rarer, heavier cold-build path
+// rather than the common warm-query one. Lowering further would help
+// nothing warm and cost the first run (or the run after a large pull,
+// exactly what `prepare` exists to absorb) real time. gekka and
+// llvm-project's own floor sits well inside this ceiling: its warm
+// queries measured flat across the entire 16-512 MiB range regardless,
+// since giraffe has no extractor for its C/C++ content (§18) — every
+// entry is a synthesized file entry, never GC-owned cache data to begin
+// with.
+const defaultHeapLimit = 384 << 20 // 384 MiB
 
 // HeapLimit (GOMEMLIMIT) is chosen separately — see its own doc comment
 // below the measurement that produced it.

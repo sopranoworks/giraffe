@@ -69,6 +69,39 @@ func scope() scanner.Scope {
 	return scanner.Scope{}
 }
 
+// mustRefresh calls Refresh and fails the test on error — most tests in
+// this file only care about the returned store's contents, not error
+// handling, which has its own dedicated tests where needed.
+func mustRefresh(t *testing.T, root string) *Store {
+	t.Helper()
+	s, _, err := Refresh(context.Background(), root, scope(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// closeStore closes s and fails the test if that errors — tests always
+// want a clean close, since a leaked store handle would otherwise mask
+// a real bug (e.g. a build that failed to commit).
+func closeStore(t *testing.T, s *Store) {
+	t.Helper()
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// allEntries materializes every entry in s — acceptable in tests, which
+// care about correctness, not about avoiding exactly the materialization
+// §30 exists to avoid in the real command.
+func allEntries(s *Store) []entry.Entry {
+	var out []entry.Entry
+	for e := range s.All() {
+		out = append(out, e)
+	}
+	return out
+}
+
 // declarations filters out the file entries §22 item 4 adds — one per
 // scanned file, Kind "file" — so tests written against declaration
 // counts before that item landed keep checking what they always checked.
@@ -87,11 +120,12 @@ func TestRefresh_FirstRun_BuildsFromScratch(t *testing.T) {
 	writeFile(t, root, "retry.go", "package retry\n\n// Retry retries.\nfunc Retry() {}\n")
 	gitCommit(t, root, "retry.go")
 
-	entries, stats, err := Refresh(context.Background(), root, scope(), nil)
+	s, stats, err := Refresh(context.Background(), root, scope(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decls := declarations(entries)
+	defer closeStore(t, s)
+	decls := declarations(allEntries(s))
 	if len(decls) != 1 || decls[0].Name != "Retry" {
 		t.Fatalf("declarations = %#v", decls)
 	}
@@ -105,14 +139,14 @@ func TestRefresh_SecondRun_UnchangedFileIsReused(t *testing.T) {
 	writeFile(t, root, "retry.go", "package retry\n\nfunc Retry() {}\n")
 	gitCommit(t, root, "retry.go")
 
-	if _, _, err := Refresh(context.Background(), root, scope(), nil); err != nil {
-		t.Fatal(err)
-	}
+	closeStore(t, mustRefresh(t, root))
 
-	entries, stats, err := Refresh(context.Background(), root, scope(), nil)
+	s, stats, err := Refresh(context.Background(), root, scope(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer closeStore(t, s)
+	entries := allEntries(s)
 	if len(declarations(entries)) != 1 {
 		t.Fatalf("declarations = %#v", declarations(entries))
 	}
@@ -125,17 +159,17 @@ func TestRefresh_StagedEditIsReparsed(t *testing.T) {
 	root := gitRepo(t)
 	writeFile(t, root, "retry.go", "package retry\n\nfunc Retry() {}\n")
 	gitCommit(t, root, "retry.go")
-	if _, _, err := Refresh(context.Background(), root, scope(), nil); err != nil {
-		t.Fatal(err)
-	}
+	closeStore(t, mustRefresh(t, root))
 
 	writeFile(t, root, "retry.go", "package retry\n\nfunc Retry() {}\n\nfunc Backoff() {}\n")
 	gitCommit(t, root, "retry.go") // staged, so its blob hash changes
 
-	entries, stats, err := Refresh(context.Background(), root, scope(), nil)
+	s, stats, err := Refresh(context.Background(), root, scope(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer closeStore(t, s)
+	entries := allEntries(s)
 	if len(declarations(entries)) != 2 {
 		t.Fatalf("declarations = %#v, want Retry and Backoff", declarations(entries))
 	}
@@ -154,10 +188,9 @@ func TestRefresh_FileItselfIsASearchTarget(t *testing.T) {
 	writeFile(t, root, "internal/retry/retry.go", "package retry\n\nfunc unexported() {}\n")
 	gitCommit(t, root, "internal/retry/retry.go")
 
-	entries, _, err := Refresh(context.Background(), root, scope(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
+	entries := allEntries(s)
 	var found *entry.Entry
 	for i := range entries {
 		if entries[i].Kind == entry.KindFile {
@@ -178,19 +211,18 @@ func TestRefresh_FileItselfIsASearchTarget(t *testing.T) {
 		t.Error("expected a file entry to always be Exported (not a language-visibility concept)")
 	}
 
-	// Not cached: a file entry exists only in what Refresh returns for
-	// this call, never written to the cache (encodeLine/decodeLine carry
-	// only declaration and presence lines) — see fileEntry's own comment
-	// for why: there is no read it would spare.
-	stored, err := Load(root)
-	if err != nil {
-		t.Fatal(err)
+	// Not carried forward by the extraction cache: a file entry is
+	// recomputed fresh from the scan on every call (Refresh's own top
+	// loop) and never part of what a file's EntryIDs names — see
+	// Store.build's own comment for why: carrying it forward would
+	// double it up with the freshly recomputed one on the next rebuild.
+	rec, ok := s.fileRecord("internal/retry/retry.go")
+	if !ok {
+		t.Fatal("expected a files-bucket record for internal/retry/retry.go")
 	}
-	for _, rec := range stored {
-		for _, e := range rec.Entries {
-			if e.Kind == entry.KindFile {
-				t.Fatalf("a file entry must never be written to the cache, found %#v", e)
-			}
+	for _, e := range s.entriesByID(rec.EntryIDs) {
+		if e.Kind == entry.KindFile {
+			t.Fatalf("a file entry must never be part of the extraction cache's carried-forward set, found %#v", e)
 		}
 	}
 }
@@ -209,10 +241,12 @@ func TestRefresh_NoExtractorFileGetsANameOnlyEntry(t *testing.T) {
 	writeFile(t, root, "README.md", "# giraffe\n")
 	gitCommit(t, root, "retry.go", "README.md")
 
-	entries, stats, err := Refresh(context.Background(), root, scope(), nil)
+	s, stats, err := Refresh(context.Background(), root, scope(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer closeStore(t, s)
+	entries := allEntries(s)
 	if stats.Reparsed != 1 {
 		t.Fatalf("stats = %#v, want Reparsed=1 (only retry.go has an extractor)", stats)
 	}
@@ -239,12 +273,8 @@ func TestRefresh_NoExtractorFileGetsANameOnlyEntry(t *testing.T) {
 		t.Errorf("expected a no-language entry to carry no doc or scope, got %#v", found)
 	}
 
-	stored, err := Load(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, cached := stored["README.md"]; cached {
-		t.Fatal("a no-language file must never be written to the cache — it is never read or extracted")
+	if _, cached := s.fileRecord("README.md"); cached {
+		t.Fatal("a no-language file must never be stat'd or cached by the extraction cache — it is never read or extracted")
 	}
 }
 
@@ -258,10 +288,12 @@ func TestRefresh_OperatorAssignmentFillsLangWithoutAddingAnExtractor(t *testing.
 	gitCommit(t, root, "widget.inc")
 
 	assignments := map[string]string{".inc": "c"}
-	entries, stats, err := Refresh(context.Background(), root, scope(), assignments)
+	s, stats, err := Refresh(context.Background(), root, scope(), assignments)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer closeStore(t, s)
+	entries := allEntries(s)
 	if stats.Reparsed != 0 {
 		t.Fatalf("stats = %#v, want Reparsed=0 — an assignment does not add an extractor", stats)
 	}
@@ -282,12 +314,8 @@ func TestRefresh_OperatorAssignmentFillsLangWithoutAddingAnExtractor(t *testing.
 		t.Errorf("widget.inc entry Ext = %q, want %q", found.Ext, "inc")
 	}
 
-	stored, err := Load(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, cached := stored["widget.inc"]; cached {
-		t.Fatal("an assigned-but-unextractable file must never be written to the cache")
+	if _, cached := s.fileRecord("widget.inc"); cached {
+		t.Fatal("an assigned-but-unextractable file must never be stat'd or cached by the extraction cache")
 	}
 }
 
@@ -312,20 +340,19 @@ func TestRefresh_ExtractedEntriesCarryTheirLanguage(t *testing.T) {
 			}
 		}
 	}
-	entries, _, err := Refresh(context.Background(), root, scope(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	check(entries) // freshly extracted
+	s1 := mustRefresh(t, root)
+	check(allEntries(s1)) // freshly extracted
+	closeStore(t, s1)
 
-	entries2, stats2, err := Refresh(context.Background(), root, scope(), nil)
+	s2, stats2, err := Refresh(context.Background(), root, scope(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer closeStore(t, s2)
 	if stats2.Reparsed != 0 {
 		t.Fatalf("expected the second run to reuse the cache, got %#v", stats2)
 	}
-	check(entries2) // served from cache
+	check(allEntries(s2)) // served from cache
 }
 
 func TestRefresh_ZeroEntryFileIsReusedNotReparsed(t *testing.T) {
@@ -336,16 +363,20 @@ func TestRefresh_ZeroEntryFileIsReusedNotReparsed(t *testing.T) {
 	writeFile(t, root, "priv.go", "package p\n") // no declarations at all
 	gitCommit(t, root, "priv.go")
 
-	if _, stats, err := Refresh(context.Background(), root, scope(), nil); err != nil {
-		t.Fatal(err)
-	} else if stats.Reparsed != 1 {
-		t.Fatalf("first run: stats = %#v, want Reparsed=1", stats)
-	}
-
-	_, stats, err := Refresh(context.Background(), root, scope(), nil)
+	s1, stats1, err := Refresh(context.Background(), root, scope(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	closeStore(t, s1)
+	if stats1.Reparsed != 1 {
+		t.Fatalf("first run: stats = %#v, want Reparsed=1", stats1)
+	}
+
+	s2, stats, err := Refresh(context.Background(), root, scope(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeStore(t, s2)
 	if stats.Reparsed != 0 || stats.Reused != 1 {
 		t.Fatalf("second run: stats = %#v, want Reused=1 Reparsed=0 — a file with no "+
 			"declarations must still be recognised as unchanged, not re-read every run", stats)
@@ -365,10 +396,11 @@ func TestRefresh_UntrackedFileIsCachedLikeAnyOther(t *testing.T) {
 	gitCommit(t, root, "tracked.go")
 	writeFile(t, root, "wip.go", "package p\n\nfunc WorkInProgress() {}\n") // never git add'ed
 
-	entries, stats, err := Refresh(context.Background(), root, scope(), nil)
+	s, stats, err := Refresh(context.Background(), root, scope(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	entries := allEntries(s)
 	if len(declarations(entries)) != 2 {
 		t.Fatalf("declarations = %#v, want both Tracked and WorkInProgress", declarations(entries))
 	}
@@ -376,23 +408,21 @@ func TestRefresh_UntrackedFileIsCachedLikeAnyOther(t *testing.T) {
 		t.Fatalf("stats = %#v, want Reparsed=2 on the first run", stats)
 	}
 
-	stored, err := Load(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, cached := stored["wip.go"]; !cached {
+	if _, cached := s.fileRecord("wip.go"); !cached {
 		t.Fatal("expected the untracked file to be cached like any other")
 	}
-	if _, cached := stored["tracked.go"]; !cached {
+	if _, cached := s.fileRecord("tracked.go"); !cached {
 		t.Fatal("tracked file's entries should be cached")
 	}
+	closeStore(t, s)
 
 	// Second run, nothing changed: the untracked file must be reused
 	// from cache, not re-read every time simply for being untracked.
-	_, stats2, err := Refresh(context.Background(), root, scope(), nil)
+	s2, stats2, err := Refresh(context.Background(), root, scope(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	closeStore(t, s2)
 	if stats2.Reparsed != 0 || stats2.Reused != 2 {
 		t.Fatalf("stats = %#v, want Reused=2 Reparsed=0 — an unchanged untracked file must be reused too", stats2)
 	}
@@ -402,21 +432,20 @@ func TestRefresh_UnstagedEditIsReparsed(t *testing.T) {
 	root := gitRepo(t)
 	writeFile(t, root, "retry.go", "package retry\n\nfunc Retry() {}\n")
 	gitCommit(t, root, "retry.go")
-	if _, _, err := Refresh(context.Background(), root, scope(), nil); err != nil {
-		t.Fatal(err)
-	}
+	closeStore(t, mustRefresh(t, root))
 
 	// Edited but never `git add`ed. Under git-blob-hash freshness (001)
 	// this file's stale hash meant the edit was invisible (§20 C-2, the
 	// defect stat-based freshness exists to fix).
 	writeFile(t, root, "retry.go", "package retry\n\nfunc Retry() {}\n\nfunc Backoff() {}\n")
 
-	entries, stats, err := Refresh(context.Background(), root, scope(), nil)
+	s, stats, err := Refresh(context.Background(), root, scope(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(declarations(entries)) != 2 {
-		t.Fatalf("declarations = %#v, want Retry and Backoff even though the edit was never staged", declarations(entries))
+	defer closeStore(t, s)
+	if len(declarations(allEntries(s))) != 2 {
+		t.Fatalf("declarations = %#v, want Retry and Backoff even though the edit was never staged", declarations(allEntries(s)))
 	}
 	if stats.Reparsed != 1 {
 		t.Fatalf("stats = %#v, want Reparsed=1 for the unstaged edit", stats)
@@ -431,12 +460,10 @@ func TestRefresh_NestedMarkerAssignsDistinctProjects(t *testing.T) {
 	writeFile(t, root, "services/api/handler.go", "package api\n\nfunc Handle() {}\n")
 	gitCommit(t, root, "go.mod", "main.go", "services/api/go.mod", "services/api/handler.go")
 
-	entries, _, err := Refresh(context.Background(), root, scope(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
 	projects := make(map[string]string)
-	for _, e := range entries {
+	for e := range s.All() {
 		projects[e.Name] = e.Project
 	}
 	rootBase := filepath.Base(root)
@@ -480,9 +507,7 @@ func TestRefresh_DeletedFileDropsItsEntries(t *testing.T) {
 	writeFile(t, root, "a.go", "package p\n\nfunc A() {}\n")
 	writeFile(t, root, "b.go", "package p\n\nfunc B() {}\n")
 	gitCommit(t, root, "a.go", "b.go")
-	if _, _, err := Refresh(context.Background(), root, scope(), nil); err != nil {
-		t.Fatal(err)
-	}
+	closeStore(t, mustRefresh(t, root))
 
 	cmd := exec.Command("git", "rm", "-q", "b.go")
 	cmd.Dir = root
@@ -491,13 +516,11 @@ func TestRefresh_DeletedFileDropsItsEntries(t *testing.T) {
 	}
 	gitCommit(t, root)
 
-	entries, _, err := Refresh(context.Background(), root, scope(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
+	for e := range s.All() {
 		if e.Name == "B" {
-			t.Fatalf("expected B's entry to be dropped after b.go was deleted, got %#v", entries)
+			t.Fatal("expected B's entry to be dropped after b.go was deleted")
 		}
 	}
 }
@@ -630,10 +653,9 @@ func TestRefresh_FileEntryCarriesSizeAndDeclCount(t *testing.T) {
 	writeFile(t, root, "README.md", "# hello\n")
 	gitCommit(t, root, "two.go", "README.md")
 
-	entries, _, err := Refresh(context.Background(), root, scope(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
+	entries := allEntries(s)
 
 	var goFile, mdFile *entry.Entry
 	for i, e := range entries {
