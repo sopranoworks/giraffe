@@ -278,21 +278,29 @@ func runFind(args []string, st searchState) int {
 	return 0
 }
 
-// runShow implements `giraffe show <attr>:<value>` (§22 item 5):
-// browsing, not vocabulary search — everything at a place, addressed by
-// attributes copied from a find result line, in the same result-line
-// shape find already uses (reusing output.Format rather than a second
-// rendering path, code-manners D5).
+// runShow implements `giraffe show <attr>:<value>` (§4, §22 item 5): two
+// readings, both in the specification, distinguished by whether name is
+// among the given attributes.
 //
-// The argument is parsed with query.Parse — the same tokenizer --query
-// already uses — rather than a second, purpose-built parser for what is
-// structurally the same syntax (one shell word, name:value pairs).
+//   - name given: §4's "the declaration itself, addressed by attributes
+//     copied from a find result line" — a result line always carries
+//     name, so its presence is exactly the signal that the attributes
+//     pin one specific declaration rather than a place. Anything but
+//     exactly one match is an error: "the declaration" is singular.
+//   - name absent: §22's later reframing — browsing a place, everything
+//     at it, file entries included. Unchanged.
+//
+// Both render in the same result-line shape find already uses (reusing
+// output.Format rather than a second rendering path, code-manners D5).
+// query.ParseAddress is query.Parse's own tokenizer with name allowed —
+// the one attribute --query itself excludes, since find's positional
+// word already matches it a different way (see query.go).
 func runShow(args []string, st searchState) int {
 	if len(args) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: giraffe show <attr>:<value> [<attr>:<value> ...]")
 		return 2
 	}
-	filter, err := query.Parse(args[0], query.ValidAttributes(st.entries))
+	filter, err := query.ParseAddress(args[0], query.ValidAttributes(st.entries))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "giraffe:", err)
 		return 2
@@ -303,6 +311,19 @@ func runShow(args []string, st searchState) int {
 	}
 
 	matches := query.Browse(st.entries, filter, st.invocationProject)
+
+	if _, byName := filter["name"]; byName {
+		switch len(matches) {
+		case 0:
+			fmt.Fprintln(os.Stderr, "giraffe: no declaration matches those attributes")
+			return 2
+		case 1:
+			// exactly one — "the declaration itself" (§4)
+		default:
+			fmt.Fprintf(os.Stderr, "giraffe: %d declarations match those attributes; narrow further (e.g. add path:)\n", len(matches))
+			return 2
+		}
+	}
 
 	summary := output.Summarize(st.entries.All(), st.commitLine, st.reparsed, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
 	fmt.Print(output.Format(summary, matches))

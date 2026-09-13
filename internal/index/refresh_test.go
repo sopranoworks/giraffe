@@ -674,6 +674,90 @@ func TestRefresh_MarkerChangeUpdatesProjectWithoutReparsing(t *testing.T) {
 	}
 }
 
+// TestRefresh_UnstagedMarkerDeletionUpdatesProject (directive 015 item
+// 4): `git ls-files -s` reports the index, not the working tree, so a
+// tracked marker removed from disk without `git rm` changes neither
+// GitIndexFingerprint nor a fresh enumeration's own output — the same
+// blind spot C-2 fixed for declarations, left open for markers until
+// now (013's own diagnosis, quoted by the directive). Markers are a
+// handful of files, so freshness is decided by stat instead, the same
+// way C-2 already decided it for everything else — no git mechanism to
+// tell staged from unstaged.
+func TestRefresh_UnstagedMarkerDeletionUpdatesProject(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, "go.mod", "module outer\n")
+	writeFile(t, root, "services/api/go.mod", "module inner\n")
+	writeFile(t, root, "services/api/handler.go", "package api\n\nfunc Handle() {}\n")
+	gitCommit(t, root, "go.mod", "services/api/go.mod", "services/api/handler.go")
+	closeStore(t, mustRefresh(t, root))
+
+	// Removed from the working tree, never `git rm`ed: .git/index still
+	// lists services/api/go.mod as tracked.
+	if err := os.Remove(filepath.Join(root, "services/api/go.mod")); err != nil {
+		t.Fatal(err)
+	}
+
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
+	rootBase := filepath.Base(root)
+	sawHandle, sawHandlerFile := false, false
+	for e := range s.All() {
+		switch {
+		case e.Name == "Handle" && e.Kind != entry.KindFile:
+			sawHandle = true
+			if e.Project != rootBase {
+				t.Errorf("Handle's project = %q, want %q — services/api/go.mod is gone, so it is no longer its own root", e.Project, rootBase)
+			}
+		case e.Path == "services/api/handler.go" && e.Kind == entry.KindFile:
+			sawHandlerFile = true
+			if e.Project != rootBase {
+				t.Errorf("handler.go's own project = %q, want %q", e.Project, rootBase)
+			}
+		}
+	}
+	if !sawHandle || !sawHandlerFile {
+		t.Fatalf("expected both Handle and handler.go's file entry to survive, sawHandle=%v sawHandlerFile=%v", sawHandle, sawHandlerFile)
+	}
+}
+
+// TestRefresh_NonExtractableFileContentChangeUpdatesSize (directive 015
+// item 5): §20 C-2 puts stat freshness over the whole candidate set,
+// with no exception for a file with no extractor — 013 wrote one
+// anyway ("never re-verified" for these files' own Record), so a
+// content edit to a file like README.md silently left its Size
+// attribute stale forever.
+func TestRefresh_NonExtractableFileContentChangeUpdatesSize(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, "README.md", "# short\n")
+	gitCommit(t, root, "README.md")
+	closeStore(t, mustRefresh(t, root))
+
+	longer := "# a substantially longer README than it was before\n"
+	writeFile(t, root, "README.md", longer)
+
+	s, stats, err := Refresh(context.Background(), root, scope(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(t, s)
+	if stats.Reparsed != 0 {
+		t.Fatalf("stats = %#v, want Reparsed=0 — README.md has no extractor", stats)
+	}
+	entries := allEntries(s)
+	var found *entry.Entry
+	for i, e := range entries {
+		if e.Path == "README.md" {
+			found = &entries[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("expected README.md's entry to still be present")
+	}
+	if found.Size != int64(len(longer)) {
+		t.Errorf("README.md Size = %d, want %d (the edited content's length, re-verified)", found.Size, len(longer))
+	}
+}
+
 func writeExclude(t *testing.T, root, content string) {
 	t.Helper()
 	full := filepath.Join(root, Dir, "exclude")

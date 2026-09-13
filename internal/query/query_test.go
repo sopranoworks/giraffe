@@ -157,6 +157,91 @@ func TestFilter_MatchesKindAndScope(t *testing.T) {
 	}
 }
 
+// TestParse_PositionAttributeIsFilterable (directive 015 item 2): module,
+// receiver, type — any language position, present or future — are
+// filterable the moment ValidAttributes reports them, with no second
+// list to update. Reproduces the exact gap the audit found live:
+// `giraffe show module:...` erroring on an attribute printed on every
+// result line.
+func TestParse_PositionAttributeIsFilterable(t *testing.T) {
+	valid := map[string]bool{"module": true, "receiver": true, "type": true}
+	f, err := Parse("module:internal/limits", valid)
+	if err != nil {
+		t.Fatalf("expected a language position to be filterable, got: %v", err)
+	}
+	if f["module"][0] != "internal/limits" {
+		t.Fatalf("got %v", f)
+	}
+	if _, err := Parse("receiver:Store", valid); err != nil {
+		t.Errorf("expected receiver to be filterable, got: %v", err)
+	}
+	if _, err := Parse("type:Store", valid); err != nil {
+		t.Errorf("expected type to be filterable, got: %v", err)
+	}
+}
+
+func TestFilter_MatchesPositionAttribute(t *testing.T) {
+	f := Filter{"module": {"internal/limits"}}
+	match := entry.Entry{Position: []entry.Position{{Name: "module", Value: "internal/limits"}}}
+	other := entry.Entry{Position: []entry.Position{{Name: "module", Value: "internal/query"}}}
+	noPosition := entry.Entry{}
+	if !f.Match(match) {
+		t.Error("expected module:internal/limits to match an entry with that position")
+	}
+	if f.Match(other) {
+		t.Error("expected module:internal/limits to exclude a different module")
+	}
+	if f.Match(noPosition) {
+		t.Error("expected module:internal/limits to exclude an entry with no language position")
+	}
+
+	// A second position pair (receiver, type) matches on its own name,
+	// independent of the first (module) — golang.go always emits module
+	// first, then receiver or type for a method or field.
+	member := Filter{"receiver": {"Store"}}
+	m := entry.Entry{Position: []entry.Position{{Name: "module", Value: "internal/index"}, {Name: "receiver", Value: "Store"}}}
+	if !member.Match(m) {
+		t.Error("expected receiver:Store to match a method entry's second position pair")
+	}
+}
+
+// TestParse_NameStaysExcludedFromQuery: unchanged by directive 015 —
+// find's positional word already substring-matches name, so --query
+// itself continues to reject it (§23's "accepted as reported"). Only
+// ParseAddress (show) accepts it.
+func TestParse_NameStaysExcludedFromQuery(t *testing.T) {
+	valid := map[string]bool{"name": true}
+	if _, err := Parse("name:Retry", valid); err == nil {
+		t.Fatal("expected --query to still reject name")
+	}
+}
+
+// TestParseAddress_AllowsName (§4): show addresses a declaration by
+// attributes copied verbatim from a find result line, which always
+// includes name — the one attribute Parse (--query) excludes.
+func TestParseAddress_AllowsName(t *testing.T) {
+	valid := map[string]bool{"name": true, "kind": true, "path": true}
+	f, err := ParseAddress("name:Retry kind:func path:internal/retry/retry.go", valid)
+	if err != nil {
+		t.Fatalf("expected ParseAddress to accept name, got: %v", err)
+	}
+	if f["name"][0] != "Retry" {
+		t.Fatalf("got %v", f)
+	}
+}
+
+// TestParseAddress_StillRejectsUnknownAndMalformed: ParseAddress relaxes
+// only the name exclusion, not §5's other error rules.
+func TestParseAddress_StillRejectsUnknownAndMalformed(t *testing.T) {
+	valid := map[string]bool{"name": true, "path": true}
+	if _, err := ParseAddress("bogus:x", valid); err == nil {
+		t.Fatal("expected an error for an unknown attribute")
+	}
+	if _, err := ParseAddress("malformed", valid); err == nil {
+		t.Fatal("expected an error for a malformed attribute")
+	}
+}
+
 func TestBrowse_FiltersAndOrdersByPathThenName(t *testing.T) {
 	entries := []entry.Entry{
 		{Name: "B", Path: "b.go", Project: "giraffe", Exported: true},

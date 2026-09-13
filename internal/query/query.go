@@ -90,25 +90,27 @@ func (c concatEntries) Candidates(word string) iter.Seq[entry.Entry] {
 // accepted for it. Different attribute names are AND'd together (§5).
 type Filter map[string][]string
 
-// filterable is the set of attributes --query may narrow by.
-//
-// §22 C-10: before this directive, kind and scope were valid but not
-// filterable — rejected with an explicit "not supported" error (see
-// Parse), never silently ignored, so §5's rule against a silently
-// ignored filter was not violated. But §6's stronger promise ("every
-// attribute printed can be pasted into --query and work") was false as
-// written, since 001 restricted filtering to path and project as a
-// minimal-version convenience, not a design decision. kind and scope
-// join here to restore it.
+// excludedFromQuery names attributes that are valid (they appear in
+// output, so an unknown-attribute error would be wrong for them) but
+// are not accepted by find's --query specifically. Every other valid
+// attribute is filterable by construction (§6: "attribute names
+// appearing in output are exactly the names --query accepts") — there
+// is deliberately no second, separately-maintained list of filterable
+// names: a language module that adds a position attribute (module,
+// receiver, type, or a future language's own) becomes filterable the
+// moment it is valid, via matchesAny's default case, with nothing else
+// to register (directive 015 — the split between ValidAttributes and a
+// hand-maintained filterable set is what left this false for fourteen
+// directives).
 //
 // name stays out, deliberately, not by oversight: find's positional
 // word argument already does a case-insensitive substring match against
 // name (see tier), so --query 'name:...' would either duplicate that or
 // silently mean something different (exact match) for the same
 // attribute depending on how it was spelled — worse than the gap it
-// would close. Revisit if a caller ever needs to narrow by name
-// alongside a *different* search word than the one being matched on.
-var filterable = map[string]bool{"path": true, "project": true, "kind": true, "scope": true, "lang": true, "ext": true}
+// would close. show has no positional word and addresses a declaration
+// by name instead (§4) — see ParseAddress, which accepts it.
+var excludedFromQuery = map[string]bool{"name": true}
 
 // ValidAttributes returns the common attribute names plus every
 // language-position name actually present in entries: "the set of valid
@@ -130,6 +132,18 @@ func ValidAttributes(src Entries) map[string]bool {
 // are whitespace-separated, each is name:value with no space after the
 // colon, and a value containing whitespace is wrapped in single quotes.
 func Parse(raw string, validAttributes map[string]bool) (Filter, error) {
+	return parseFilter(raw, validAttributes, excludedFromQuery)
+}
+
+// ParseAddress tokenizes a show argument (§4): "the declaration itself,
+// addressed by attributes copied from a find result line" — and a
+// result line always carries name, the one attribute Parse excludes.
+// Same tokenizer, same validity check, nothing excluded.
+func ParseAddress(raw string, validAttributes map[string]bool) (Filter, error) {
+	return parseFilter(raw, validAttributes, nil)
+}
+
+func parseFilter(raw string, validAttributes, excluded map[string]bool) (Filter, error) {
 	tokens, err := tokenize(raw)
 	if err != nil {
 		return nil, err
@@ -144,8 +158,8 @@ func Parse(raw string, validAttributes map[string]bool) (Filter, error) {
 		if !validAttributes[name] {
 			return nil, fmt.Errorf("unknown attribute %q; valid attributes for this repository: %s", name, strings.Join(sortedKeys(validAttributes), ", "))
 		}
-		if !filterable[name] {
-			return nil, fmt.Errorf("attribute %q is valid but not supported by --query in this version (filtering is limited to: path, project, kind, scope, lang, ext)", name)
+		if excluded[name] {
+			return nil, fmt.Errorf("attribute %q is valid but not supported by --query (name is matched via find's own search word instead)", name)
 		}
 		f[name] = append(f[name], value)
 	}
@@ -226,6 +240,25 @@ func matchesAny(name string, e entry.Entry, values []string) bool {
 		case "ext":
 			if e.Ext == v {
 				return true
+			}
+		case "name":
+			if e.Name == v {
+				return true
+			}
+		default:
+			// A language position (module, receiver, type, or a future
+			// language module's own) — not a fixed case here, since
+			// entry.Entry holds these as named pairs precisely so a
+			// module adds one without changing this type (§18). Any
+			// name ValidAttributes reports as present is reachable
+			// here by construction: it came from some entry's own
+			// Position slice, so matching against Position is always
+			// the right fallback, never a name this switch needs its
+			// own case for.
+			for _, p := range e.Position {
+				if p.Name == name && p.Value == v {
+					return true
+				}
 			}
 		}
 	}

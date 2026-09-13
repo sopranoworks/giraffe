@@ -3,6 +3,8 @@ package index
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,14 +42,25 @@ func discover(ctx context.Context, root string, scope scanner.Scope, ro *Store) 
 	if fpOK && oldBlob != nil {
 		if cached, ok := decodeEnumCache(oldBlob); ok &&
 			cached.IndexModTime == modTime && cached.IndexSize == size && cached.Exclude == excludeFP {
-			untracked, err := scanner.EnumerateUntracked(ctx, root)
-			if err != nil {
-				return nil, nil, nil, err
+			verifiedMarkers := existingMarkers(root, cached.TrackedMarkers)
+			if len(verifiedMarkers) == len(cached.TrackedMarkers) {
+				untracked, err := scanner.EnumerateUntracked(ctx, root)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				untrackedMetas, untrackedMarkers := scanner.FilterUntracked(root, untracked, scope)
+				metas = scanner.MergeSortedMetas(cached.TrackedMetas, untrackedMetas)
+				markerPaths = append(append([]string{}, verifiedMarkers...), untrackedMarkers...)
+				return metas, markerPaths, oldBlob, nil
 			}
-			untrackedMetas, untrackedMarkers := scanner.FilterUntracked(root, untracked, scope)
-			metas = scanner.MergeSortedMetas(cached.TrackedMetas, untrackedMetas)
-			markerPaths = append(append([]string{}, cached.TrackedMarkers...), untrackedMarkers...)
-			return metas, markerPaths, oldBlob, nil
+			// A cached tracked marker no longer exists on disk. `git
+			// ls-files -s` reports the index, not the working tree, so
+			// a marker removed without `git rm` changes neither
+			// GitIndexFingerprint nor a fresh `git ls-files -s` output
+			// (§20 C-2's own blind spot for content, still open for a
+			// marker's presence until directive 015). Fall through to a
+			// full re-enumeration so the corrected marker set is both
+			// returned and persisted below.
 		}
 	}
 
@@ -60,6 +73,13 @@ func discover(ctx context.Context, root string, scope scanner.Scope, ro *Store) 
 		return nil, nil, nil, err
 	}
 	trackedMetas, trackedMarkers := scanner.FilterTracked(root, tracked, scope)
+	// trackedMarkers comes from `git ls-files -s`, which — like the
+	// cached half above — reports the index, not the working tree.
+	// Verifying by stat is what makes marker freshness independent of
+	// staged-vs-unstaged, the same way C-2 removed that distinction for
+	// everything else: markers are a handful of files, so stat is cheap
+	// regardless of corpus size.
+	trackedMarkers = existingMarkers(root, trackedMarkers)
 	untrackedMetas, untrackedMarkers := scanner.FilterUntracked(root, untracked, scope)
 	var newBlob []byte
 	if fpOK {
@@ -71,6 +91,19 @@ func discover(ctx context.Context, root string, scope scanner.Scope, ro *Store) 
 	metas = scanner.MergeSortedMetas(trackedMetas, untrackedMetas)
 	markerPaths = append(append([]string{}, trackedMarkers...), untrackedMarkers...)
 	return metas, markerPaths, newBlob, nil
+}
+
+// existingMarkers filters markers to the paths that still exist on
+// disk (see discover's own comments for why git's enumeration alone is
+// not enough to decide this).
+func existingMarkers(root string, markers []string) []string {
+	var kept []string
+	for _, m := range markers {
+		if _, err := os.Stat(filepath.Join(root, m)); err == nil {
+			kept = append(kept, m)
+		}
+	}
+	return kept
 }
 
 // fingerprintExclude renders scope's exclude patterns as one comparable

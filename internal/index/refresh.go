@@ -130,26 +130,14 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 		if roOK {
 			oldRec, known = ro.fileRecord(m.Path)
 		}
-		_, extractable := lang.For(path.Ext(m.Path))
-		if !extractable {
-			// A non-extractable file's own entry carries nothing that a
-			// content edit changes except Size, an informational field
-			// — Name, Project, Ext and Lang all come from the path
-			// alone, and it has no declarations to re-extract at all.
-			// Re-verifying every such file's stat on every call (all of
-			// llvm-project, for instance, which has no extractor at
-			// all) would mean paying an O(files) freshness check for a
-			// rare, low-stakes staleness. It is rewritten only when new,
-			// or when enumChanged means its Project may have moved —
-			// what must not go stale either way is whether it is
-			// present at all, decided below from currentPaths against
-			// the store's own paths, not from a stat here.
-			currentPaths[m.Path] = true
-			if !known || enumChanged {
-				changed = append(changed, changedFile{meta: m, size: m.Size})
-			}
-			continue
-		}
+		// §20 C-2 puts freshness on stat over the whole candidate set,
+		// with no exception for a file with no extractor (directive
+		// 015): every file, extractable or not, is stat'd and compared
+		// against its own last-known fingerprint the same way. A
+		// non-extractable file simply never sets reExtract, since it
+		// has nothing to extract — its own entry still needs a fresh
+		// Size the moment its content changes, the same as any other
+		// informational field would.
 		info, statErr := os.Stat(filepath.Join(root, m.Path))
 		if statErr != nil {
 			// Gone between List and Stat (e.g. a race with an editor's
@@ -159,11 +147,12 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 			continue
 		}
 		currentPaths[m.Path] = true
+		_, extractable := lang.For(path.Ext(m.Path))
 		cur := changedFile{meta: m, modTime: info.ModTime().UnixNano(), size: info.Size()}
 		contentSame := known && oldRec.ModTime == cur.modTime && oldRec.Size == cur.size
 		switch {
 		case !contentSame:
-			cur.reExtract = true
+			cur.reExtract = extractable
 			changed = append(changed, cur)
 		case enumChanged:
 			// Content itself is unchanged — its declarations do not
@@ -249,14 +238,30 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	fileChanges := make([]fileChange, 0, len(changed))
 	for _, c := range changed {
 		fe := fileEntry(c.meta, markerDirs, projectNames, fallbackProject, assignments)
-		fe.Size = c.meta.Size
+		// c.size, not c.meta.Size: the latter can be the enum cache's
+		// own stat, taken whenever the cache was last written, not this
+		// call (scanner.FileMeta.Size's own doc comment says so
+		// directly) — exactly the staleness this whole loop exists to
+		// prevent. c.size is always this call's own fresh stat (see the
+		// freshness loop above), for every file in changed regardless
+		// of extractor.
+		fe.Size = c.size
 		var decls []entry.Entry
 		switch {
 		case c.reExtract:
 			decls = declByPath[c.meta.Path]
 		case len(c.oldIDs) > 0:
+			// Carried forward, not re-parsed — but this branch only
+			// runs because enumChanged means Project may have moved
+			// (see above), so each declaration's own stored Project is
+			// exactly as stale as the file's, and is refreshed here the
+			// same way fe's is (directive 015: "the same defect C-2
+			// fixed for declarations, still open for markers" — 013's
+			// own diagnosis of what was left).
+			project := scanner.ProjectFor(c.meta.Path, markerDirs, projectNames, fallbackProject)
 			for _, e := range ro.entriesByID(c.oldIDs) {
 				if e.Kind != entry.KindFile {
+					e.Project = project
 					decls = append(decls, e)
 				}
 			}
