@@ -211,19 +211,26 @@ func TestRefresh_FileItselfIsASearchTarget(t *testing.T) {
 		t.Error("expected a file entry to always be Exported (not a language-visibility concept)")
 	}
 
-	// Not carried forward by the extraction cache: a file entry is
-	// recomputed fresh from the scan on every call (Refresh's own top
-	// loop) and never part of what a file's EntryIDs names — see
-	// Store.build's own comment for why: carrying it forward would
-	// double it up with the freshly recomputed one on the next rebuild.
+	// Directive 013: the files bucket now names every entry a path
+	// owns, its own file entry included — that is what lets a
+	// differential update remove or replace exactly what one file owns
+	// without touching any other (see store.go's commit). A file whose
+	// content never changes still has its declarations carried forward
+	// unread; only the file entry itself is ever rewritten on its own
+	// (e.g. when a marker moves its Project), which is why the mapping
+	// needs to name it too.
 	rec, ok := s.fileRecord("internal/retry/retry.go")
 	if !ok {
 		t.Fatal("expected a files-bucket record for internal/retry/retry.go")
 	}
+	foundFileEntry := false
 	for _, e := range s.entriesByID(rec.EntryIDs) {
 		if e.Kind == entry.KindFile {
-			t.Fatalf("a file entry must never be part of the extraction cache's carried-forward set, found %#v", e)
+			foundFileEntry = true
 		}
+	}
+	if !foundFileEntry {
+		t.Fatalf("expected internal/retry/retry.go's own file entry among its EntryIDs, got %#v", s.entriesByID(rec.EntryIDs))
 	}
 }
 
@@ -231,10 +238,17 @@ func TestRefresh_FileItselfIsASearchTarget(t *testing.T) {
 // C-24): a file with no registered extractor still gets a file entry —
 // that is the property that justifies file-name indexing needing no
 // parser — but no declarations, no doc, no scope, no lang (absent, not
-// a placeholder), and no read or cache write of its own, since an
+// a placeholder), and no content read of its own, since an
 // unknown-language entry needs nothing an extractor computes. It still
 // carries Ext: a fact about the file itself, independent of whether
 // its language is known.
+//
+// It does get a files-bucket record now (directive 013): not because
+// anything was extracted from it, but because the differential store
+// needs to know, on a later call, whether this path is still there at
+// all — the record's freshness fields are never re-verified for a file
+// with no extractor (see Refresh's own comment for why), only its
+// presence is tracked.
 func TestRefresh_NoExtractorFileGetsANameOnlyEntry(t *testing.T) {
 	root := gitRepo(t)
 	writeFile(t, root, "retry.go", "package retry\n\nfunc Retry() {}\n")
@@ -273,15 +287,17 @@ func TestRefresh_NoExtractorFileGetsANameOnlyEntry(t *testing.T) {
 		t.Errorf("expected a no-language entry to carry no doc or scope, got %#v", found)
 	}
 
-	if _, cached := s.fileRecord("README.md"); cached {
-		t.Fatal("a no-language file must never be stat'd or cached by the extraction cache — it is never read or extracted")
+	if _, known := s.fileRecord("README.md"); !known {
+		t.Fatal("expected README.md to have a files-bucket record even with no extractor — needed to detect it later if it is deleted")
 	}
 }
 
 // TestRefresh_OperatorAssignmentFillsLangWithoutAddingAnExtractor
 // (§25 C-26): an extension-to-language assignment gives an
 // unextractable file a lang value, but does not make it extractable —
-// it is still never stat'd, cached, or read.
+// it is still never read or re-verified as fresh (directive 013: it
+// does get a files-bucket presence record, the same as any other
+// no-extractor file — see TestRefresh_NoExtractorFileGetsANameOnlyEntry).
 func TestRefresh_OperatorAssignmentFillsLangWithoutAddingAnExtractor(t *testing.T) {
 	root := gitRepo(t)
 	writeFile(t, root, "widget.inc", "int widget();\n")
@@ -314,8 +330,8 @@ func TestRefresh_OperatorAssignmentFillsLangWithoutAddingAnExtractor(t *testing.
 		t.Errorf("widget.inc entry Ext = %q, want %q", found.Ext, "inc")
 	}
 
-	if _, cached := s.fileRecord("widget.inc"); cached {
-		t.Fatal("an assigned-but-unextractable file must never be stat'd or cached by the extraction cache")
+	if _, known := s.fileRecord("widget.inc"); !known {
+		t.Fatal("expected widget.inc to have a files-bucket record even though an assignment does not make it extractable")
 	}
 }
 
@@ -522,6 +538,139 @@ func TestRefresh_DeletedFileDropsItsEntries(t *testing.T) {
 		if e.Name == "B" {
 			t.Fatal("expected B's entry to be dropped after b.go was deleted")
 		}
+	}
+}
+
+// TestRefresh_KeysWritten_NothingChangedIsZero (directive 013): the fast
+// path never opens a write transaction at all.
+func TestRefresh_KeysWritten_NothingChangedIsZero(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, "a.go", "package p\n\nfunc A() {}\n")
+	writeFile(t, root, "b.go", "package p\n\nfunc B() {}\n")
+	gitCommit(t, root, "a.go", "b.go")
+	closeStore(t, mustRefresh(t, root))
+
+	s, stats, err := Refresh(context.Background(), root, scope(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(t, s)
+	if stats.KeysWritten != 0 {
+		t.Errorf("KeysWritten = %d, want 0 when nothing changed", stats.KeysWritten)
+	}
+}
+
+// TestRefresh_KeysWritten_OneChangedFileIsNotTheWholeCorpus (directive
+// 013's own completion condition, checked directly rather than only by
+// manual measurement): editing one file among several must write on the
+// order of that one file's own entries and postings, never every key in
+// the store.
+func TestRefresh_KeysWritten_OneChangedFileIsNotTheWholeCorpus(t *testing.T) {
+	root := gitRepo(t)
+	names := []string{"a", "b", "c", "d", "e"}
+	var paths []string
+	for _, n := range names {
+		p := n + ".go"
+		writeFile(t, root, p, fmt.Sprintf("package p\n\nfunc %s() {}\n", strings.ToUpper(n)))
+		paths = append(paths, p)
+	}
+	gitCommit(t, root, paths...)
+	closeStore(t, mustRefresh(t, root))
+
+	writeFile(t, root, "a.go", "package p\n\nfunc A() {}\nfunc A2() {}\n")
+
+	s, stats, err := Refresh(context.Background(), root, scope(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(t, s)
+	if stats.Reparsed != 1 {
+		t.Fatalf("Reparsed = %d, want 1 (only a.go changed)", stats.Reparsed)
+	}
+	// a.go's own file entry, its two declarations, a's own files-bucket
+	// record, and a handful of trigram grams — nowhere near the 5
+	// files' worth of entries and postings a full rewrite would touch.
+	if stats.KeysWritten == 0 || stats.KeysWritten > 20 {
+		t.Errorf("KeysWritten = %d, want a small number on the order of one file's own entries and postings", stats.KeysWritten)
+	}
+}
+
+// TestRefresh_DeletedUntrackedNonExtractorFileDropsItsEntry (directive
+// 013's "before that": the files bucket must map every scanned file to
+// its own entries well enough to remove one without touching others —
+// including a file with no extractor, which previously had no files-
+// bucket record at all and so could never be told apart from "still
+// there").
+func TestRefresh_DeletedUntrackedNonExtractorFileDropsItsEntry(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, "tracked.go", "package p\n\nfunc Tracked() {}\n")
+	gitCommit(t, root, "tracked.go")
+	writeFile(t, root, "notes.md", "# notes\n") // untracked, no extractor
+	closeStore(t, mustRefresh(t, root))
+
+	s0 := mustRefresh(t, root)
+	found := false
+	for e := range s0.All() {
+		if e.Path == "notes.md" {
+			found = true
+		}
+	}
+	closeStore(t, s0)
+	if !found {
+		t.Fatal("expected notes.md to be indexed before deletion")
+	}
+
+	if err := os.Remove(filepath.Join(root, "notes.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
+	for e := range s.All() {
+		if e.Path == "notes.md" {
+			t.Fatal("expected notes.md's entry to be dropped after it was deleted")
+		}
+	}
+	if _, known := s.fileRecord("notes.md"); known {
+		t.Fatal("expected notes.md's files-bucket record to be removed too")
+	}
+}
+
+// TestRefresh_MarkerChangeUpdatesProjectWithoutReparsing (directive 013:
+// the enumeration cache moving forces a file's own entry to be
+// refreshed, since its Project may have changed, but must not force its
+// unrelated declarations to be re-extracted — they are carried forward
+// under fresh ids, not re-read).
+func TestRefresh_MarkerChangeUpdatesProjectWithoutReparsing(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, "go.mod", "module outer\n")
+	writeFile(t, root, "main.go", "package main\n\nfunc Main() {}\n")
+	gitCommit(t, root, "go.mod", "main.go")
+	closeStore(t, mustRefresh(t, root))
+
+	// Staged, so the git index (and therefore GitIndexFingerprint) moves
+	// — an unstaged marker edit would not be caught by the enum cache at
+	// all, a separate, pre-existing limitation named in the completion
+	// report, not tested here.
+	writeFile(t, root, "go.mod", "module renamed\n")
+	gitCommit(t, root, "go.mod")
+
+	s, stats, err := Refresh(context.Background(), root, scope(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(t, s)
+	if stats.Reparsed != 0 {
+		t.Fatalf("Reparsed = %d, want 0 — main.go's own content never changed", stats.Reparsed)
+	}
+	found := false
+	for e := range s.All() {
+		if e.Name == "Main" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected Main's declaration to survive, carried forward under a fresh id")
 	}
 }
 

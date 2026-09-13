@@ -7,6 +7,12 @@
 // lives in one bucket; any mismatch — including a file that does not open
 // as a valid bbolt database at all — means discard and rebuild, never
 // migrate (§23 C-14, unchanged by this directive).
+//
+// commit, below, is the one place anything is written: directive 013
+// made it differential — a write transaction touches only the paths a
+// caller names as changed or deleted, never the whole store — with the
+// very first build of a store expressed as the same call, not a
+// separate path (see commit's own comment).
 package index
 
 import (
@@ -46,6 +52,7 @@ var (
 	bucketNameTrigrams = []byte("name_trigrams")
 	keySchemaVersion   = []byte("schema_version")
 	keyEnumBlob        = []byte("blob")
+	keyNextID          = []byte("next_id")
 )
 
 // Store is one root's persistent state: extracted entries, the
@@ -136,6 +143,23 @@ func createStore(root string) (*Store, error) {
 	}); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("initialise store: %w", err)
+	}
+	return &Store{db: db, path: path}, nil
+}
+
+// openForWrite reopens root's existing store read-write, for a
+// differential update (directive 013): unlike createStore, it neither
+// removes nor recreates the file — the whole point is to modify what is
+// already there in place, so the entries and postings a change does not
+// touch are never even read. Only called once Refresh already knows,
+// from a prior read-only open, that the file exists and opens cleanly;
+// a failure here would mean it changed shape between the two opens,
+// which callers treat as any other I/O error.
+func openForWrite(root string) (*Store, error) {
+	path := filepath.Join(root, Dir, cacheDir, storeFilename)
+	db, err := bolt.Open(path, 0o644, &bolt.Options{Timeout: time.Second})
+	if err != nil {
+		return nil, fmt.Errorf("reopen store for writing: %w", err)
 	}
 	return &Store{db: db, path: path}, nil
 }
@@ -369,25 +393,28 @@ func (s *Store) fileRecord(path string) (rec Record, ok bool) {
 	return rec, ok
 }
 
-// fileCount reports how many extraction-cache records the store holds —
-// used only to detect "a file present before is gone now" (deletion or
-// a newly added exclusion pattern), which must force a rebuild since a
-// Refresh call only ever adds to the files map it builds, never deletes
-// from an existing store.
-func (s *Store) fileCount() int {
+// filePaths returns every path the files bucket currently knows about —
+// a key-only cursor walk, no value decoded — so Refresh can compute
+// exactly which paths from a previous run are gone now (directive 013:
+// "entries belonging to deleted files: removed" needs to name them, not
+// just notice the count changed).
+func (s *Store) filePaths() []string {
 	if s == nil {
-		return 0
+		return nil
 	}
-	n := 0
+	var paths []string
 	_ = s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketFiles)
 		if b == nil {
 			return nil
 		}
-		n = b.Stats().KeyN
+		c := b.Cursor()
+		for k, _ := c.First(); k != nil; k, _ = c.Next() {
+			paths = append(paths, string(k))
+		}
 		return nil
 	})
-	return n
+	return paths
 }
 
 // entriesByID reads exactly the entries named by ids — a targeted
@@ -438,76 +465,155 @@ func decodeFileRecord(v []byte) (Record, error) {
 	return Record{ModTime: modTime, Size: size, EntryIDs: decodeIDList([]byte(fields[2]))}, nil
 }
 
-// build writes a complete store in one transaction: every entry (fresh
-// id assigned to each), the files freshness records, the enum blob, and
-// the name-trigram posting list built alongside entry assignment. This
-// is always a full rewrite, never an incremental update (§23 C-14's
-// "discard and rebuild" ethos, extended here: a full rebuild is exactly
-// what the old text cache did on every Save too, just against a
-// database file instead of a line-oriented one).
-func (s *Store) build(files map[string]Record, allEntries []entry.Entry, enumBlob []byte) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+// fileChange is one file's fresh contribution to the store, as Refresh
+// prepares it: its freshness fingerprint and every entry it now owns —
+// its own file entry, plus declarations if it is extractable. commit
+// assigns fresh ids to Entries after first removing whatever that path
+// owned before, so a file's identity as "the set of ids it owns" never
+// straddles a stale id and a new one.
+type fileChange struct {
+	Path    string
+	ModTime int64
+	Size    int64
+	Entries []entry.Entry
+}
+
+// commit applies a differential set of changes in one write transaction
+// (directive 013): each change in changes replaces whatever entries its
+// path owned before with fresh ones — the old ones, and their trigram
+// postings, are removed first, so the id space never carries a stale
+// entry forward under a live id — and each path in deletes is removed
+// outright. enumBlob is written only when writeEnum says it actually
+// differs from what is stored. A path this call says nothing about is
+// never opened: the write transaction's size is the size of the diff,
+// not the corpus.
+//
+// The very first build of a store is not a separate code path: it is
+// this same function with changes covering every scanned file, deletes
+// empty, and nothing yet in the files bucket for remove to find (§23
+// C-14's discard-and-rebuild ethos — one mechanism, not two that must be
+// kept in step by hand).
+//
+// keysWritten counts distinct bbolt keys touched (Put or Delete) across
+// entries, files, name_trigrams and meta — the number directive 013's
+// own completion report is required to give for "nothing changed / 5
+// files changed / full build": a Put and a Delete on the same key
+// within one call (an entry's trigram gram losing an old id and
+// gaining a new one) count once, since that gram is the thing that
+// changed, not twice for how many operations it took.
+func (s *Store) commit(changes []fileChange, deletes []string, enumBlob []byte, writeEnum bool) (keysWritten int, err error) {
+	err = s.db.Update(func(tx *bolt.Tx) error {
 		eb := tx.Bucket(bucketEntries)
 		fb := tx.Bucket(bucketFiles)
 		tb := tx.Bucket(bucketNameTrigrams)
+		mb := tx.Bucket(bucketMeta)
 
-		trigramPostings := make(map[string][]uint64)
-		nextID := uint64(1)
-		fileIDs := make(map[string][]uint64, len(files))
-		for path := range files {
-			fileIDs[path] = nil
+		touched := make(map[string]struct{})
+		touch := func(bucket byte, key []byte) {
+			touched[string(bucket)+string(key)] = struct{}{}
 		}
-		for _, e := range allEntries {
-			id := nextID
-			nextID++
-			if err := eb.Put(idKey(id), encodeEntry(e)); err != nil {
+
+		nextID := readNextID(mb)
+
+		// Trigram postings are batched in memory across every change and
+		// delete in this call, not read-modify-written per entry: a
+		// full build's common case is a gram shared by thousands of
+		// entries (kubernetes: 172,397 of them), and touching bbolt once
+		// per entry that happens to share it — decoding and re-encoding
+		// a growing list each time — makes that gram's own cost grow
+		// quadratically in how many entries share it. Collecting every
+		// add and remove here first, then applying each distinct gram
+		// exactly once below, keeps the cost linear in how many
+		// (entry, gram) pairs exist, the same bound the old full-rewrite
+		// build had via its own in-memory map.
+		addIDs := make(map[string][]uint64)
+		removeIDs := make(map[string][]uint64)
+
+		removeOwned := func(path string) error {
+			v := fb.Get([]byte(path))
+			if v == nil {
+				return nil
+			}
+			rec, err := decodeFileRecord(v)
+			if err != nil {
+				return nil
+			}
+			for _, id := range rec.EntryIDs {
+				ev := eb.Get(idKey(id))
+				if ev == nil {
+					continue
+				}
+				if e, decErr := decodeEntry(ev); decErr == nil {
+					for _, g := range trigrams(strings.ToLower(e.Name)) {
+						removeIDs[g] = append(removeIDs[g], id)
+					}
+				}
+				if err := eb.Delete(idKey(id)); err != nil {
+					return err
+				}
+				touch('e', idKey(id))
+			}
+			return nil
+		}
+
+		sortedDeletes := append([]string(nil), deletes...)
+		sort.Strings(sortedDeletes)
+		for _, path := range sortedDeletes {
+			if err := removeOwned(path); err != nil {
 				return err
 			}
-			// A file's own fileEntry (Kind==KindFile) shares its Path
-			// with every declaration extracted from it, but is never
-			// part of the extraction cache's carried-forward set — it
-			// is recomputed fresh from the scan every single call
-			// (Refresh's own top loop), never read back from a store.
-			// Including it here too would have an unchanged file's
-			// carried-over EntryIDs return its own file entry a second
-			// time on every subsequent rebuild, once alongside the
-			// freshly recomputed one.
-			if e.Kind != entry.KindFile {
-				fileIDs[e.Path] = append(fileIDs[e.Path], id)
-			}
-			for _, g := range trigrams(strings.ToLower(e.Name)) {
-				trigramPostings[g] = append(trigramPostings[g], id)
-			}
-		}
-		// §3 C5: sorted rather than ranged over directly — a Go map's
-		// iteration order is randomised, and Put's insertion order can
-		// affect a B-tree's resulting page layout. Sorting keeps this
-		// deterministic in the same sense §3 always meant (the same
-		// tree produces the same output), even though it is a bbolt
-		// file now, not text.
-		paths := make([]string, 0, len(files))
-		for path := range files {
-			paths = append(paths, path)
-		}
-		sort.Strings(paths)
-		for _, path := range paths {
-			rec := files[path]
-			rec.EntryIDs = fileIDs[path]
-			if err := fb.Put([]byte(path), encodeFileRecord(rec)); err != nil {
+			if err := fb.Delete([]byte(path)); err != nil {
 				return err
 			}
+			touch('f', []byte(path))
 		}
-		grams := make([]string, 0, len(trigramPostings))
-		for g := range trigramPostings {
-			grams = append(grams, g)
-		}
-		sort.Strings(grams)
-		for _, g := range grams {
-			if err := tb.Put([]byte(g), encodeIDList(trigramPostings[g])); err != nil {
+
+		sortedChanges := append([]fileChange(nil), changes...)
+		sort.Slice(sortedChanges, func(i, j int) bool { return sortedChanges[i].Path < sortedChanges[j].Path })
+		for _, c := range sortedChanges {
+			if err := removeOwned(c.Path); err != nil {
 				return err
 			}
+			ids := make([]uint64, 0, len(c.Entries))
+			for _, e := range c.Entries {
+				id := nextID
+				nextID++
+				if err := eb.Put(idKey(id), encodeEntry(e)); err != nil {
+					return err
+				}
+				touch('e', idKey(id))
+				ids = append(ids, id)
+				for _, g := range trigrams(strings.ToLower(e.Name)) {
+					addIDs[g] = append(addIDs[g], id)
+				}
+			}
+			rec := Record{ModTime: c.ModTime, Size: c.Size, EntryIDs: ids}
+			if err := fb.Put([]byte(c.Path), encodeFileRecord(rec)); err != nil {
+				return err
+			}
+			touch('f', []byte(c.Path))
 		}
-		if enumBlob != nil {
+
+		grams := make(map[string]struct{}, len(addIDs)+len(removeIDs))
+		for g := range addIDs {
+			grams[g] = struct{}{}
+		}
+		for g := range removeIDs {
+			grams[g] = struct{}{}
+		}
+		sortedGrams := make([]string, 0, len(grams))
+		for g := range grams {
+			sortedGrams = append(sortedGrams, g)
+		}
+		sort.Strings(sortedGrams)
+		for _, g := range sortedGrams {
+			if err := applyPosting(tb, g, addIDs[g], removeIDs[g]); err != nil {
+				return err
+			}
+			touch('t', []byte(g))
+		}
+
+		if writeEnum && enumBlob != nil {
 			eb2, err := tx.CreateBucketIfNotExists(bucketEnum)
 			if err != nil {
 				return err
@@ -515,9 +621,77 @@ func (s *Store) build(files map[string]Record, allEntries []entry.Entry, enumBlo
 			if err := eb2.Put(keyEnumBlob, enumBlob); err != nil {
 				return err
 			}
+			touch('u', keyEnumBlob)
 		}
+
+		if len(sortedChanges) > 0 {
+			if err := writeNextID(mb, nextID); err != nil {
+				return err
+			}
+			touch('m', keyNextID)
+		}
+
+		keysWritten = len(touched)
 		return nil
 	})
+	return keysWritten, err
+}
+
+// applyPosting reads gram's current posting list once, removes every id
+// in remove and appends every id in add, and writes the result back
+// once — deleting the key entirely if the result is empty, so an absent
+// key and an empty list are never two representations of the same fact
+// (intersectPostings' "no postings at all" short-circuit depends on
+// that). ids are assigned sequentially and never reused, so every id in
+// add is larger than anything already stored or being removed —
+// appending after filtering keeps the list sorted without a re-sort.
+//
+// One call handles everything gram loses and gains in this commit, no
+// matter how many entries that is — commit's own caller batches every
+// add and remove across the whole transaction into add/remove first,
+// specifically so a gram shared by thousands of entries costs one read
+// and one write here, not thousands.
+func applyPosting(tb *bolt.Bucket, gram string, add, remove []uint64) error {
+	ids := decodeIDList(tb.Get([]byte(gram)))
+	if len(remove) > 0 {
+		skip := make(map[uint64]bool, len(remove))
+		for _, id := range remove {
+			skip[id] = true
+		}
+		kept := ids[:0]
+		for _, id := range ids {
+			if !skip[id] {
+				kept = append(kept, id)
+			}
+		}
+		ids = kept
+	}
+	ids = append(ids, add...)
+	if len(ids) == 0 {
+		return tb.Delete([]byte(gram))
+	}
+	return tb.Put([]byte(gram), encodeIDList(ids))
+}
+
+// readNextID and writeNextID persist the entry-id counter across calls
+// (meta bucket, key "next_id") — ids must never restart at 1 on a
+// differential update, or a fresh id could collide with one still live
+// from an earlier call. A missing key (a store just created by
+// createStore) means "nothing assigned yet": start at 1.
+func readNextID(b *bolt.Bucket) uint64 {
+	v := b.Get(keyNextID)
+	if v == nil {
+		return 1
+	}
+	id, err := strconv.ParseUint(string(v), 10, 64)
+	if err != nil {
+		return 1
+	}
+	return id
+}
+
+func writeNextID(b *bolt.Bucket, id uint64) error {
+	return b.Put(keyNextID, []byte(strconv.FormatUint(id, 10)))
 }
 
 // encodeEntry and decodeEntry are the store's per-entry shape: the ten

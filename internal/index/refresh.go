@@ -6,7 +6,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"giraffe/internal/entry"
@@ -14,14 +13,22 @@ import (
 	"giraffe/internal/scanner"
 )
 
-// Stats summarises one Refresh call — the evidence the directive's Step 6
-// asks for (index size, generation time are measured by the caller around
-// Refresh; these are the counts Refresh itself is positioned to know).
+// Stats summarises one Refresh call — the evidence prior directives'
+// measurement steps ask for (index size, generation time are measured by
+// the caller around Refresh; these are the counts Refresh itself is
+// positioned to know).
 type Stats struct {
-	Reused      int      // cached entries carried over unread (stat unchanged, §20 C-2)
+	Reused      int      // files whose stat matched their store record, left untouched this run (§20 C-2)
 	Reparsed    int      // files (re-)extracted this run
 	Warnings    []string // files that could not be extracted; skipped, not fatal
 	RootProject string   // this root's own project name — the marker at its own top, or its basename
+
+	// KeysWritten counts distinct bbolt keys the write transaction
+	// actually touched — 0 on the fast path, where no transaction runs
+	// at all. Directive 013's own completion condition is measured by
+	// this number directly: "5 files changed" must write on the order
+	// of those files' entries and postings, not the whole store.
+	KeysWritten int
 }
 
 // Refresh brings root's store up to date with the current working tree
@@ -30,21 +37,25 @@ type Stats struct {
 // process-resident slice here). Caller closes it when done querying.
 //
 // Freshness is decided by stat — mtime and size — over the candidate set
-// scanner.List already resolved (§20 C-2), exactly as before §30; only
-// where that comparison is read from, and what a hit or miss does next,
-// changed. When nothing at all needs to change — every extractable
-// file's stat matches its store record, and the enumeration cache is
-// still fresh — Refresh opens the existing store read-only and returns
-// it untouched: no entry is decoded, no write transaction happens (the
-// fast path §30 C-46 exists for). Any other outcome — a first run, a
-// stale or unreadable store, a changed file, or a stale enumeration
-// cache — rebuilds the whole store in one write transaction, the same
-// full-rewrite shape Save always had; carried-over files' entries are
-// looked up by id from the old store rather than re-extracted, but every
-// bucket in the new store (entries, files, name_trigrams) is written
-// fresh (§23 C-14's "discard and rebuild" ethos, applied to why a
-// partial update is not attempted: convergence, not incrementality, is
-// the property this cache needs).
+// scanner.List already resolved (§20 C-2), exactly as before; only what a
+// hit or miss does next changed with directive 013. When nothing at all
+// needs to change — every extractable file's stat matches its store
+// record, no file has appeared or disappeared, and the enumeration cache
+// is still fresh — Refresh opens the existing store read-only and
+// returns it untouched: no entry is decoded, no write transaction
+// happens (the fast path §30 C-46 exists for).
+//
+// Anything else is a differential update, not a rewrite: only the files
+// that actually changed have their own entries and trigram postings
+// replaced, and only the files that are actually gone have theirs
+// removed (directive 013 — "the write transaction contains the
+// difference, not the corpus"). The one exception is a first run, a
+// stale or unreadable store, or a stale enumeration cache (a marker's
+// content can reassign projects without any extractable file's own stat
+// moving) — those still rebuild the whole store from scratch, via the
+// same differential mechanism with every scanned file treated as
+// changed and nothing to remove (§23 C-14's discard-and-rebuild ethos:
+// one mechanism, not a full-rewrite path kept separately in step).
 func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments map[string]string) (*Store, Stats, error) {
 	ro, roOK, err := openStore(root, true)
 	if err != nil {
@@ -69,15 +80,16 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	// A changed enum blob means the tracked file set (or the exclude
 	// fingerprint it was filtered against) was actually re-enumerated,
 	// which can move marker directories and therefore project
-	// assignments even when every already-known extractable file's own
-	// stat is untouched — e.g. a project marker's content changing
-	// without any file being added or removed. Persisted file entries
-	// (fileEntry, cached in the store's entries bucket like anything
-	// else now) would otherwise carry a stale Project forward on the
-	// fast path below, since that path never recomputes them. Forcing a
-	// rebuild here is conservative — most enum-cache misses already
-	// force one via a changed or new extractable file too — but this is
-	// the one case that would not otherwise be caught.
+	// assignments even when every already-known file's own stat is
+	// untouched — e.g. a project marker's content changing without any
+	// file being added or removed. Persisted file entries would
+	// otherwise carry a stale Project forward on the fast path below,
+	// since that path never recomputes them. Forcing a full rebuild here
+	// is conservative — most enum-cache misses already force one via a
+	// changed or new file too — but this is the one case that would not
+	// otherwise be caught, and differentially reconciling exactly which
+	// files' Project actually moved is left for the next directive (see
+	// the completion report).
 	enumChanged := roOK && func() bool {
 		old, _ := ro.enumBlob()
 		return string(old) != string(enumBlob)
@@ -94,69 +106,121 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	}
 	rootProject := scanner.ProjectFor(".", markerDirs, projectNames, fallbackProject)
 
-	var all []entry.Entry
-	var extractable []scanner.FileMeta
-	var toRead []scanner.FileMeta
-	var toReadFingerprint []Record // ModTime/Size only, aligned with toRead
+	var stats Stats
+	stats.RootProject = rootProject
 
-	// §22 item 4 / §24 C-18: one file entry per scanned file, so a file
-	// can be found by name even when it has no declarations of its own.
-	// Computed fresh every call, never cached — see fileEntry's own
-	// comment for why.
-	for _, m := range metas {
-		fe := fileEntry(m, markerDirs, projectNames, fallbackProject, assignments)
-		fe.Size = m.Size
-		all = append(all, fe)
-		if _, ok := lang.For(path.Ext(m.Path)); ok {
-			extractable = append(extractable, m)
-		}
+	// changedFile is one scanned file this call must (re-)write: its own
+	// meta, the freshness fingerprint its new Record will carry, whether
+	// its declarations actually need re-extraction, and — when they do
+	// not — the ids its declarations already live under, so they can be
+	// carried forward rather than re-parsed.
+	type changedFile struct {
+		meta      scanner.FileMeta
+		modTime   int64
+		size      int64
+		reExtract bool
+		oldIDs    []uint64
 	}
-
-	files := make(map[string]Record, len(extractable))
-	changed := !roOK || enumChanged
-	for _, m := range extractable {
+	currentPaths := make(map[string]bool, len(metas))
+	var changed []changedFile
+	unchanged := 0
+	for _, m := range metas {
+		var oldRec Record
+		var known bool
+		if roOK {
+			oldRec, known = ro.fileRecord(m.Path)
+		}
+		_, extractable := lang.For(path.Ext(m.Path))
+		if !extractable {
+			// A non-extractable file's own entry carries nothing that a
+			// content edit changes except Size, an informational field
+			// — Name, Project, Ext and Lang all come from the path
+			// alone, and it has no declarations to re-extract at all.
+			// Re-verifying every such file's stat on every call (all of
+			// llvm-project, for instance, which has no extractor at
+			// all) would mean paying an O(files) freshness check for a
+			// rare, low-stakes staleness. It is rewritten only when new,
+			// or when enumChanged means its Project may have moved —
+			// what must not go stale either way is whether it is
+			// present at all, decided below from currentPaths against
+			// the store's own paths, not from a stat here.
+			currentPaths[m.Path] = true
+			if !known || enumChanged {
+				changed = append(changed, changedFile{meta: m, size: m.Size})
+			}
+			continue
+		}
 		info, statErr := os.Stat(filepath.Join(root, m.Path))
 		if statErr != nil {
 			// Gone between List and Stat (e.g. a race with an editor's
-			// save-as-rename); drop it from this run rather than fail
-			// the command. It reappears in the next List if it returns.
+			// save-as-rename): left out of currentPaths, so the
+			// deletion diff below removes any entries it already owned.
+			// It reappears in the next List if it returns.
 			continue
 		}
-		cur := Record{ModTime: info.ModTime().UnixNano(), Size: info.Size()}
+		currentPaths[m.Path] = true
+		cur := changedFile{meta: m, modTime: info.ModTime().UnixNano(), size: info.Size()}
+		contentSame := known && oldRec.ModTime == cur.modTime && oldRec.Size == cur.size
+		switch {
+		case !contentSame:
+			cur.reExtract = true
+			changed = append(changed, cur)
+		case enumChanged:
+			// Content itself is unchanged — its declarations do not
+			// need re-extraction — but its Project may have moved, so
+			// its own file entry still needs a fresh write; the
+			// existing declaration ids are carried forward untouched
+			// below rather than re-parsed.
+			cur.oldIDs = oldRec.EntryIDs
+			changed = append(changed, cur)
+		default:
+			unchanged++
+		}
+	}
 
-		if roOK {
-			if prev, ok := ro.fileRecord(m.Path); ok && prev.ModTime == cur.ModTime && prev.Size == cur.Size {
-				files[m.Path] = prev
-				continue
+	// Every path the store already knows about that this call did not
+	// see at all is gone — deleted, or newly excluded (directive 013:
+	// "entries belonging to deleted files: removed").
+	var deletes []string
+	if roOK {
+		for _, p := range ro.filePaths() {
+			if !currentPaths[p] {
+				deletes = append(deletes, p)
 			}
 		}
-		changed = true
-		toRead = append(toRead, m)
-		toReadFingerprint = append(toReadFingerprint, cur)
-	}
-	// A file present in the old store but no longer in the current
-	// candidate set (deleted, or newly excluded) must not survive into
-	// the rebuilt store — files only ever holds this run's own set, so a
-	// removal is simply "not added here," never something to delete. A
-	// length mismatch is the same conservative signal the old text
-	// cache's Save shortcut used (§23 Step 1: len(newCache) ==
-	// len(cached)), not a full set comparison.
-	if roOK && len(files) != ro.fileCount() {
-		changed = true
 	}
 
-	paths := make([]string, len(toRead))
-	for i, m := range toRead {
-		paths[i] = m.Path
+	// The zero-decode, zero-write fast path (§30 C-46, extended by
+	// directive 013 from "no entry decoded" to "no key touched at
+	// all"): nothing about any file, or the enumeration cache, needs to
+	// change, so the existing store is returned exactly as it was
+	// opened.
+	if roOK && len(changed) == 0 && len(deletes) == 0 {
+		result := ro
+		ro = nil // ownership transferred to the caller; the deferred Close above must not also close it
+		stats.Reused = unchanged
+		return result, stats, nil
 	}
-	readFiles, err := scanner.Read(ctx, root, paths)
+
+	// Only files that actually need re-extraction are read — a file
+	// with no extractor is never opened, and neither is a changed-only-
+	// because-of-enumChanged file whose declarations are being carried
+	// forward, not re-parsed.
+	var toRead []scanner.FileMeta
+	for _, c := range changed {
+		if c.reExtract {
+			toRead = append(toRead, c.meta)
+		}
+	}
+	readPaths := make([]string, len(toRead))
+	for i, m := range toRead {
+		readPaths[i] = m.Path
+	}
+	readFiles, err := scanner.Read(ctx, root, readPaths)
 	if err != nil {
 		return nil, Stats{}, err
 	}
-
-	var stats Stats
-	stats.RootProject = rootProject
-	var freshlyParsed []entry.Entry
+	declByPath := make(map[string][]entry.Entry, len(toRead))
 	for i, f := range readFiles {
 		m := toRead[i]
 		project := scanner.ProjectFor(f.Path, markerDirs, projectNames, fallbackProject)
@@ -165,75 +229,64 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 			// A file that fails to parse degrades the answer, not the
 			// command: the rest of the store still builds (§2, "a stale
 			// index degrades gracefully"). Reported in ## warnings by
-			// the output layer.
+			// the output layer. Its own file entry is still written
+			// below — the file itself is still a search target (§22
+			// item 4) — only its declarations are absent this run.
 			stats.Warnings = append(stats.Warnings, fmt.Sprintf("%s: %v", f.Path, err))
 			continue
 		}
-		freshlyParsed = append(freshlyParsed, entries...)
-		fp := toReadFingerprint[i]
-		files[m.Path] = Record{ModTime: fp.ModTime, Size: fp.Size}
+		declByPath[m.Path] = entries
 		stats.Reparsed++
 	}
-	stats.Reused = len(extractable) - stats.Reparsed - len(stats.Warnings)
+	stats.Reused = unchanged
 
-	// The zero-decode fast path: nothing about the extraction cache or
-	// the enumeration cache needs to change, so the existing store is
-	// returned exactly as it was opened — no entry, in this store or the
-	// old one, was ever decoded to reach this point.
-	if !changed && roOK {
-		result := ro
-		ro = nil // ownership transferred to the caller; the deferred Close above must not also close it
-		return result, stats, nil
-	}
-
-	// Something changed: rebuild. Carried-over files' entries are looked
-	// up by id from the old store (a targeted read, not a scan);
-	// declarations for reparsed files are already in freshlyParsed;
-	// every scanned file's own fileEntry is already in all.
-	if roOK {
-		// §3 C5: sorted rather than ranged over directly, so the order
-		// carried-over entries join all in does not depend on Go's
-		// randomised map iteration.
-		paths := make([]string, 0, len(files))
-		for path := range files {
-			paths = append(paths, path)
-		}
-		sort.Strings(paths)
-		for _, path := range paths {
-			rec := files[path]
-			if len(rec.EntryIDs) == 0 {
-				continue // reparsed this run, or a file with zero declarations
+	// §22 item 4 / §24 C-18: one file entry per changed file, so a file
+	// can be found by name even when it has no declarations of its own.
+	// DeclCount is known immediately — unlike the old full-rewrite
+	// design, there is no need for a second pass over every entry in
+	// the store to compute it, since a change's own declarations are
+	// already fully assembled right here.
+	fileChanges := make([]fileChange, 0, len(changed))
+	for _, c := range changed {
+		fe := fileEntry(c.meta, markerDirs, projectNames, fallbackProject, assignments)
+		fe.Size = c.meta.Size
+		var decls []entry.Entry
+		switch {
+		case c.reExtract:
+			decls = declByPath[c.meta.Path]
+		case len(c.oldIDs) > 0:
+			for _, e := range ro.entriesByID(c.oldIDs) {
+				if e.Kind != entry.KindFile {
+					decls = append(decls, e)
+				}
 			}
-			all = append(all, ro.entriesByID(rec.EntryIDs)...)
 		}
-	}
-	all = append(all, freshlyParsed...)
-
-	// A file's declaration count is only knowable once every declaration
-	// entry is assembled — fileEntry already built this file's own
-	// KindFile entry above, so DeclCount is patched here in one pass
-	// (directive 009 item 3).
-	declCounts := make(map[string]int, len(extractable))
-	for _, e := range all {
-		if e.Kind != entry.KindFile {
-			declCounts[e.Path]++
-		}
-	}
-	for i := range all {
-		if all[i].Kind == entry.KindFile {
-			all[i].DeclCount = declCounts[all[i].Path]
-		}
+		fe.DeclCount = len(decls)
+		entries := make([]entry.Entry, 0, 1+len(decls))
+		entries = append(entries, fe)
+		entries = append(entries, decls...)
+		fileChanges = append(fileChanges, fileChange{Path: c.meta.Path, ModTime: c.modTime, Size: c.size, Entries: entries})
 	}
 
-	fresh, err := createStore(root)
+	writeEnum := !roOK || enumChanged
+	var target *Store
+	if roOK {
+		_ = ro.Close()
+		ro = nil
+		target, err = openForWrite(root)
+	} else {
+		target, err = createStore(root)
+	}
 	if err != nil {
 		return nil, Stats{}, err
 	}
-	if err := fresh.build(files, all, enumBlob); err != nil {
-		_ = fresh.Close()
+	keysWritten, err := target.commit(fileChanges, deletes, enumBlob, writeEnum)
+	if err != nil {
+		_ = target.Close()
 		return nil, Stats{}, err
 	}
-	return fresh, stats, nil
+	stats.KeysWritten = keysWritten
+	return target, stats, nil
 }
 
 // fileEntry represents m itself as a search target, addressed by its own

@@ -18,30 +18,34 @@ func TestStore_BuildAndQuery_RoundTrip(t *testing.T) {
 	}
 	defer closeStore(t, s)
 
-	files := map[string]Record{
-		"internal/retry/retry.go": {ModTime: 111, Size: 222},
-		"main.go":                 {ModTime: 333, Size: 444},
-	}
-	all := []entry.Entry{
+	changes := []fileChange{
 		{
-			Path: "internal/retry/retry.go", Name: "Retry", Kind: "func",
-			Project: "giraffe", Scope: "exported", Exported: true, Doc: "Retry retries with backoff.",
-			Position: []entry.Position{{Name: "module", Value: "internal/retry"}},
+			Path: "internal/retry/retry.go", ModTime: 111, Size: 222,
+			Entries: []entry.Entry{
+				{
+					Path: "internal/retry/retry.go", Name: "Retry", Kind: "func",
+					Project: "giraffe", Scope: "exported", Exported: true, Doc: "Retry retries with backoff.",
+					Position: []entry.Position{{Name: "module", Value: "internal/retry"}},
+				},
+				{
+					Path: "internal/retry/retry.go", Name: "policyImpl", Kind: "type",
+					Project: "giraffe", Scope: "package", Exported: false,
+					Position: []entry.Position{{Name: "module", Value: "internal/retry"}},
+				},
+			},
 		},
 		{
-			Path: "internal/retry/retry.go", Name: "policyImpl", Kind: "type",
-			Project: "giraffe", Scope: "package", Exported: false,
-			Position: []entry.Position{{Name: "module", Value: "internal/retry"}},
+			Path: "main.go", ModTime: 333, Size: 444,
+			Entries: []entry.Entry{{Path: "main.go", Name: "main", Kind: "func", Project: "giraffe"}},
 		},
-		{Path: "main.go", Name: "main", Kind: "func", Project: "giraffe"},
 	}
-	if err := s.build(files, all, nil); err != nil {
+	if _, err := s.commit(changes, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 
 	got := allEntries(s)
-	if len(got) != len(all) {
-		t.Fatalf("All() returned %d entries, want %d", len(got), len(all))
+	if len(got) != 3 {
+		t.Fatalf("All() returned %d entries, want 3", len(got))
 	}
 	byName := make(map[string]entry.Entry, len(got))
 	for _, e := range got {
@@ -164,17 +168,12 @@ func TestStore_DeterministicOutput(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		files := map[string]Record{
-			"b.go": {ModTime: 2, Size: 20},
-			"a.go": {ModTime: 1, Size: 10},
-			"c.go": {ModTime: 3, Size: 30},
+		changes := []fileChange{
+			{Path: "b.go", ModTime: 2, Size: 20, Entries: []entry.Entry{{Path: "b.go", Name: "B", Kind: "func"}}},
+			{Path: "a.go", ModTime: 1, Size: 10, Entries: []entry.Entry{{Path: "a.go", Name: "A", Kind: "func"}}},
+			{Path: "c.go", ModTime: 3, Size: 30, Entries: []entry.Entry{{Path: "c.go", Name: "Cluster", Kind: "type"}}},
 		}
-		all := []entry.Entry{
-			{Path: "b.go", Name: "B", Kind: "func"},
-			{Path: "a.go", Name: "A", Kind: "func"},
-			{Path: "c.go", Name: "Cluster", Kind: "type"},
-		}
-		if err := s.build(files, all, []byte("enum-blob")); err != nil {
+		if _, err := s.commit(changes, nil, []byte("enum-blob"), true); err != nil {
 			t.Fatal(err)
 		}
 		closeStore(t, s)

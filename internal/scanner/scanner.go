@@ -40,6 +40,11 @@ type FileMeta struct {
 	// (directive 009 item 3). 0 if the stat failed (gone between
 	// enumeration and filtering); callers already tolerate that race
 	// elsewhere (index.Refresh's own extraction stat).
+	//
+	// Not a freshness signal: on an enum-cache hit (index.discover),
+	// the tracked half's metas — this field included — come back from
+	// whenever the cache was written, not freshly stat'd this call.
+	// index.Refresh's own freshness comparison stats again, on purpose.
 	Size int64
 }
 
@@ -98,6 +103,17 @@ func (p Pattern) negation() (bool, Pattern) {
 // here so a real run stays comparable to that evidence. Per-project
 // configuration adds to this; it does not replace it.
 var defaultExclude = []Pattern{
+	// giraffe's own local cache and configuration (index.Dir — repeated
+	// as a literal here, not imported, since index already imports this
+	// package). A repository with no .gitignore entry for it — every
+	// test repo in this codebase, and plausibly some real ones — would
+	// otherwise have its own store file picked up by the untracked-file
+	// scan the moment the store is created, indexing giraffe's cache as
+	// a search target of itself. Directive 013 found this: its own
+	// fix — a newly-appeared untracked file is no longer silently
+	// dropped by the fast path (§20 C-2, extended) — is what turned this
+	// from a latent gap into an observed one.
+	".giraffe/",
 	"vendor/",
 	"node_modules/",
 	"testdata/",
