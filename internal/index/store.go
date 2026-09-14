@@ -478,6 +478,22 @@ type fileChange struct {
 	Entries []entry.Entry
 }
 
+// commitMode selects how commit fills bbolt's pages while writing —
+// see commit's own doc comment for why this is a named fork, not a
+// bool.
+type commitMode int
+
+const (
+	// commitDifferential is an update against a store that already has
+	// content — bbolt's own default page-fill behaviour, chosen for
+	// future scattered writes, not this one.
+	commitDifferential commitMode = iota
+	// commitBulk is a first build, or a full rebuild of a discarded
+	// store — every key this call writes is new and arrives in
+	// ascending order, so packing pages fuller costs nothing later.
+	commitBulk
+)
+
 // commit applies a differential set of changes in one write transaction
 // (directive 013): each change in changes replaces whatever entries its
 // path owned before with fresh ones — the old ones, and their trigram
@@ -501,12 +517,45 @@ type fileChange struct {
 // within one call (an entry's trigram gram losing an old id and
 // gaining a new one) count once, since that gram is the thing that
 // changed, not twice for how many operations it took.
-func (s *Store) commit(changes []fileChange, deletes []string, enumBlob []byte, writeEnum bool) (keysWritten int, err error) {
+//
+// mode (directive 020 §1) is commitBulk exactly when this transaction is
+// writing into a store with nothing in it yet — a first run, or a
+// stale/unreadable store being rebuilt from scratch (see Refresh's own
+// !roOK) — never for a differential update against a store that already
+// has content. Measured before changing anything (this directive's
+// completion report has the breakdown): on a cold kubernetes build,
+// commit was ~70% of total wall time, and within commit itself,
+// entries+files (encoding and inserting) and the bbolt transaction's
+// own internal commit (page spill, rebalance, write, fsync) were each
+// roughly a third — with 013's own trigram-posting batching (below)
+// confirmed still doing its job (applying every gram once, not
+// read-modify-written per entry that shares it). commitBulk addresses
+// the bbolt-internal third: entries, files and name_trigrams are all
+// written in ascending key order on a full build (nextID is sequential;
+// sortedChanges and sortedGrams are both sorted), which is exactly the
+// append-only pattern bbolt's own Bucket.FillPercent doc names as worth
+// raising — and the same value its own compact tool uses for a bulk
+// copy (compact.go). Left at bbolt's 0.5 default for a differential
+// update: those writes land among a live tree's already-filled pages,
+// not appended past its end, where packing every touched page to 100%
+// now would only move today's saving into tomorrow's extra split.
+//
+// An enumerated mode, not a second bool parameter (code-manners M5:
+// "no boolean parameter that selects behavior... one enumerated mode")
+// — bulk-vs-differential is a named behavior fork this call makes, not
+// a data flag like writeEnum above, which says only whether a value is
+// present to write, not how the write itself behaves.
+func (s *Store) commit(changes []fileChange, deletes []string, enumBlob []byte, writeEnum bool, mode commitMode) (keysWritten int, err error) {
 	err = s.db.Update(func(tx *bolt.Tx) error {
 		eb := tx.Bucket(bucketEntries)
 		fb := tx.Bucket(bucketFiles)
 		tb := tx.Bucket(bucketNameTrigrams)
 		mb := tx.Bucket(bucketMeta)
+		if mode == commitBulk {
+			eb.FillPercent = 1.0
+			fb.FillPercent = 1.0
+			tb.FillPercent = 1.0
+		}
 
 		touched := make(map[string]struct{})
 		touch := func(bucket byte, key []byte) {

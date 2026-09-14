@@ -1,6 +1,7 @@
 package index
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,7 +40,7 @@ func TestStore_BuildAndQuery_RoundTrip(t *testing.T) {
 			Entries: []entry.Entry{{Path: "main.go", Name: "main", Kind: "func", Project: "giraffe"}},
 		},
 	}
-	if _, err := s.commit(changes, nil, nil, false); err != nil {
+	if _, err := s.commit(changes, nil, nil, false, commitBulk); err != nil {
 		t.Fatal(err)
 	}
 
@@ -173,7 +174,7 @@ func TestStore_DeterministicOutput(t *testing.T) {
 			{Path: "a.go", ModTime: 1, Size: 10, Entries: []entry.Entry{{Path: "a.go", Name: "A", Kind: "func"}}},
 			{Path: "c.go", ModTime: 3, Size: 30, Entries: []entry.Entry{{Path: "c.go", Name: "Cluster", Kind: "type"}}},
 		}
-		if _, err := s.commit(changes, nil, []byte("enum-blob"), true); err != nil {
+		if _, err := s.commit(changes, nil, []byte("enum-blob"), true, commitBulk); err != nil {
 			t.Fatal(err)
 		}
 		closeStore(t, s)
@@ -191,6 +192,99 @@ func TestStore_DeterministicOutput(t *testing.T) {
 	for i := range b1 {
 		if b1[i] != b2[i] {
 			t.Fatalf("store files differ at byte %d", i)
+		}
+	}
+}
+
+// manyChanges builds n distinct single-entry fileChanges — enough of them,
+// on a fresh store, to span several bbolt pages (the default page size is
+// 4KiB; one entry's own encoding is on the order of 100 bytes), which is
+// what TestStore_BulkFillPercent_FewerLeafPages below needs to actually
+// exercise a page-fill difference rather than fit in one page regardless.
+func manyChanges(n int) []fileChange {
+	changes := make([]fileChange, n)
+	for i := 0; i < n; i++ {
+		path := fmt.Sprintf("pkg%03d/file%03d.go", i/20, i)
+		changes[i] = fileChange{
+			Path: path, ModTime: int64(i), Size: int64(i),
+			Entries: []entry.Entry{{Path: path, Name: fmt.Sprintf("Symbol%03d", i), Kind: "func", Project: "giraffe"}},
+		}
+	}
+	return changes
+}
+
+// TestStore_BulkFillPercent_FewerLeafPages (directive 020 §1): a first
+// build (commitBulk) packs bbolt's leaf pages fuller than a
+// differential-style build (commitDifferential) would, for the same
+// content — the measured effect behind this directive's own FillPercent
+// change (kubernetes: a 142MB store file at the default 0.5 fill vs 78MB
+// at 1.0, cold build). Checked here via bbolt's own Bucket.Stats() (leaf
+// bytes actually allocated), not the store file's overall size: bbolt
+// grows a file in coarse steps, so a fixture small enough for a unit
+// test to run quickly can easily fit inside one such step either way and
+// show no file-size difference at all despite a real difference in how
+// full the pages bbolt actually wrote are underneath — LeafAlloc reports
+// that directly.
+func TestStore_BulkFillPercent_FewerLeafPages(t *testing.T) {
+	changes := manyChanges(3000)
+
+	leafAllocOf := func(mode commitMode) int {
+		root := t.TempDir()
+		s, err := createStore(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.commit(changes, nil, nil, false, mode); err != nil {
+			t.Fatal(err)
+		}
+		defer closeStore(t, s)
+		var alloc int
+		_ = s.db.View(func(tx *bolt.Tx) error {
+			alloc = tx.Bucket(bucketEntries).Stats().LeafAlloc
+			return nil
+		})
+		return alloc
+	}
+
+	bulkAlloc := leafAllocOf(commitBulk)
+	differentialAlloc := leafAllocOf(commitDifferential)
+	if bulkAlloc >= differentialAlloc {
+		t.Errorf("commitBulk entries bucket LeafAlloc (%d bytes) is not smaller than commitDifferential (%d bytes), want smaller", bulkAlloc, differentialAlloc)
+	}
+}
+
+// TestStore_BulkFillPercent_SameContent: commitMode only changes how full
+// bbolt packs its pages, never what is actually stored — both modes must
+// read back identically.
+func TestStore_BulkFillPercent_SameContent(t *testing.T) {
+	changes := manyChanges(50)
+
+	entriesFor := func(mode commitMode) []entry.Entry {
+		root := t.TempDir()
+		s, err := createStore(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.commit(changes, nil, nil, false, mode); err != nil {
+			t.Fatal(err)
+		}
+		defer closeStore(t, s)
+		return allEntries(s)
+	}
+
+	bulkEntries := entriesFor(commitBulk)
+	nonBulkEntries := entriesFor(commitDifferential)
+	if len(bulkEntries) != len(nonBulkEntries) || len(bulkEntries) != 50 {
+		t.Fatalf("got %d bulk / %d non-bulk entries, want 50 each", len(bulkEntries), len(nonBulkEntries))
+	}
+	byName := make(map[string]entry.Entry, len(nonBulkEntries))
+	for _, e := range nonBulkEntries {
+		byName[e.Name] = e
+	}
+	for _, e := range bulkEntries {
+		other, ok := byName[e.Name]
+		if !ok || other.Path != e.Path {
+			t.Errorf("bulk entry %+v has no matching non-bulk entry", e)
 		}
 	}
 }

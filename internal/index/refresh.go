@@ -122,7 +122,17 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	}
 
 	writeEnum := !roOK || result.enumChanged
+	// commitMode is commitBulk exactly when there is no prior store to
+	// update in place — a first run, or a stale/unreadable one this call
+	// is rebuilding from scratch (§23 C-14's discard-and-rebuild path,
+	// above). Every key commit writes below is then genuinely new, not
+	// an update to a live tree — see commit's own comment on what that
+	// changes about how it fills bbolt's pages.
 	var target *Store
+	mode := commitDifferential
+	if !roOK {
+		mode = commitBulk
+	}
 	if roOK {
 		_ = ro.Close()
 		ro = nil
@@ -133,7 +143,7 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	if err != nil {
 		return nil, Stats{}, err
 	}
-	keysWritten, err := target.commit(result.fileChanges, deletes, result.enumBlob, writeEnum)
+	keysWritten, err := target.commit(result.fileChanges, deletes, result.enumBlob, writeEnum, mode)
 	if err != nil {
 		_ = target.Close()
 		return nil, Stats{}, err
