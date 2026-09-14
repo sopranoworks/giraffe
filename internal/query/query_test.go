@@ -21,9 +21,6 @@ func TestParse_ValidAndInvalid(t *testing.T) {
 	if _, err := Parse("bogus:x", valid); err == nil {
 		t.Fatal("expected an error for an unknown attribute")
 	}
-	if _, err := Parse("name:Retry", valid); err == nil {
-		t.Fatal("expected an error: name is valid but not filterable in this version")
-	}
 	if _, err := Parse("malformed", valid); err == nil {
 		t.Fatal("expected an error for a malformed attribute")
 	}
@@ -254,17 +251,37 @@ func TestFilter_MatchesPositionAttribute(t *testing.T) {
 	}
 }
 
-// TestParse_NameStaysExcludedFromQuery: unchanged by directive 015 —
-// find's positional word already substring-matches name, so --query
-// itself continues to reject it (§23's "accepted as reported"). name
-// was never given a second way in: directive 016 §2 withdrew show,
-// which was the only other caller that needed it (ParseAddress), and
-// browsing a place (§31.3) is entries at a path or project, never one
-// singled out by name.
-func TestParse_NameStaysExcludedFromQuery(t *testing.T) {
+// TestParse_NameIsFilterable (directive 018 §3): name closes the last
+// gap in §6's "printed attributes are exactly the filterable ones"
+// invariant — filterable now, as one more --query attribute, distinct
+// from find's own positional substring match against the same field.
+func TestParse_NameIsFilterable(t *testing.T) {
 	valid := map[string]bool{"name": true}
-	if _, err := Parse("name:Retry", valid); err == nil {
-		t.Fatal("expected --query to still reject name")
+	f, err := Parse("name:Retry", valid)
+	if err != nil {
+		t.Fatalf("expected name to be filterable, got: %v", err)
+	}
+	if f["name"][0] != "Retry" {
+		t.Fatalf("got %v", f)
+	}
+}
+
+// TestFilter_MatchesNameExactly: an exact match, not a substring one —
+// distinct from find's own positional word (see tier), which is
+// case-insensitive and matches a substring.
+func TestFilter_MatchesNameExactly(t *testing.T) {
+	f := Filter{"name": {"Retry"}}
+	exact := entry.Entry{Name: "Retry"}
+	substring := entry.Entry{Name: "RetryLoop"}
+	caseFolded := entry.Entry{Name: "retry"}
+	if !f.Match(exact) {
+		t.Error("expected an exact name match")
+	}
+	if f.Match(substring) {
+		t.Error("expected name:Retry not to match RetryLoop (exact, not substring)")
+	}
+	if f.Match(caseFolded) {
+		t.Error("expected name:Retry not to match retry (exact, not case-folded)")
 	}
 }
 

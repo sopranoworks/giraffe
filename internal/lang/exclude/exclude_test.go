@@ -54,6 +54,32 @@ func TestExtract_DeclinesAKnownExtensionlessFile(t *testing.T) {
 	}
 }
 
+// TestExtract_OperatorAssignmentOverridesTheDenyList (directive 018
+// §2): an ext:<x> lang:<y> assignment for a denied extension makes this
+// module decline instead of claiming it, so a later module (in
+// practice file.Extract) still produces a labelled entry — restoring
+// the override capability 017 dropped, via the assignments route
+// rather than a scanner.Pattern one.
+func TestExtract_OperatorAssignmentOverridesTheDenyList(t *testing.T) {
+	f := scanner.WithContent("logo.png", []byte("\x89PNG"))
+	assignments := map[string]string{".png": "image"}
+	entries, handled, err := Extract(f, "giraffe", assignments)
+	if handled || entries != nil || err != nil {
+		t.Errorf("Extract(logo.png, assigned) = %v, %v, %v, want nil, false, nil", entries, handled, err)
+	}
+}
+
+// TestExtract_UnrelatedAssignmentDoesNotOverride: an assignment for a
+// different extension must not affect a denied file's own claim.
+func TestExtract_UnrelatedAssignmentDoesNotOverride(t *testing.T) {
+	f := scanner.WithContent("logo.png", []byte("\x89PNG"))
+	assignments := map[string]string{".inc": "c"}
+	entries, handled, err := Extract(f, "giraffe", assignments)
+	if !handled || entries != nil || err != nil {
+		t.Errorf("Extract(logo.png, unrelated assignment) = %v, %v, %v, want nil, true, nil", entries, handled, err)
+	}
+}
+
 // TestExtract_NeverReadsContent (directive 017 §1, §2): the exclusion
 // decision is made from f.Path alone — scanner.Open's read is lazy, so
 // a path that does not exist on disk still resolves without error for

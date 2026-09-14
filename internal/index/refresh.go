@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"giraffe/internal/entry"
-	"giraffe/internal/lang"
 	"giraffe/internal/scanner"
 )
 
@@ -18,8 +16,14 @@ import (
 // the caller around Refresh; these are the counts Refresh itself is
 // positioned to know).
 type Stats struct {
-	Reused      int      // files whose stat matched their store record, left untouched this run (§20 C-2)
-	Reparsed    int      // files (re-)extracted this run
+	Reused int // files whose stat matched their store record, left untouched this run (§20 C-2)
+
+	// Dispatched counts files actually sent through lang.Extract this
+	// run (directive 018 §4 — named for exactly what it counts: since
+	// directive 017 §1, a file the generic module handles is dispatched
+	// without ever being opened, so "files read" and "files dispatched"
+	// are different numbers, and this is the second, not the first).
+	Dispatched  int
 	Warnings    []string // files that could not be extracted; skipped, not fatal
 	RootProject string   // this root's own project name — the marker at its own top, or its basename
 
@@ -125,64 +129,27 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	var stats Stats
 	stats.RootProject = rootProject
 
-	// changedFile is one scanned file this call must (re-)write: its own
-	// meta, the freshness fingerprint its new Record will carry, whether
-	// its declarations actually need re-extraction, and — when they do
-	// not — the ids its declarations already live under, so they can be
-	// carried forward rather than re-parsed.
-	type changedFile struct {
-		meta      scanner.FileMeta
-		modTime   int64
-		size      int64
-		reExtract bool
-		oldIDs    []uint64
+	fc := fileContext{
+		root:            root,
+		markerDirs:      markerDirs,
+		projectNames:    projectNames,
+		fallbackProject: fallbackProject,
+		markersByDir:    markersByDir,
+		assignments:     assignments,
 	}
-	currentPaths := make(map[string]bool, len(metas))
-	var changed []changedFile
-	unchanged := 0
-	for _, m := range metas {
-		var oldRec Record
-		var known bool
-		if roOK {
-			oldRec, known = ro.fileRecord(m.Path)
-		}
-		// §20 C-2 puts freshness on stat over the whole candidate set:
-		// every file is stat'd and compared against its own last-known
-		// fingerprint the same way, regardless of what, if anything,
-		// ends up extracting from it — directive 016 §1 removed the
-		// only place that distinction was knowable in advance (there is
-		// no extension table left to consult here; see reExtract below).
-		info, statErr := os.Stat(filepath.Join(root, m.Path))
-		if statErr != nil {
-			// Gone between List and Stat (e.g. a race with an editor's
-			// save-as-rename): left out of currentPaths, so the
-			// deletion diff below removes any entries it already owned.
-			// It reappears in the next List if it returns.
-			continue
-		}
-		currentPaths[m.Path] = true
-		cur := changedFile{meta: m, modTime: info.ModTime().UnixNano(), size: info.Size()}
-		contentSame := known && oldRec.ModTime == cur.modTime && oldRec.Size == cur.size
-		switch {
-		case !contentSame:
-			// Content changed: every registered module gets a chance to
-			// claim it (lang.Extract, directive 016 §1) — "no extension
-			// table, no capability query" means there is no cheaper way
-			// left to decide this file is not worth reading than asking.
-			cur.reExtract = true
-			changed = append(changed, cur)
-		case enumChanged:
-			// Content itself is unchanged — its declarations do not
-			// need re-extraction — but its Project may have moved, so
-			// its own file entry still needs a fresh write; the
-			// existing declaration ids are carried forward untouched
-			// below rather than re-parsed.
-			cur.oldIDs = oldRec.EntryIDs
-			changed = append(changed, cur)
-		default:
-			unchanged++
-		}
-	}
+	// The pipeline (directive 018 §1; see pipeline.go) is Refresh's own
+	// concurrency boundary: it stats and classifies every candidate,
+	// dispatches whatever actually needs (re-)extraction through a fixed
+	// pool of extract workers, and returns fileChanges ready for
+	// store.commit below, warnings ready for ## warnings, how many files
+	// were dispatched, how many were found unchanged, and every path
+	// seen this call (for the deletion diff that follows). ro may be nil
+	// (first run); runPipeline and everything it calls tolerate that the
+	// same way the code it replaced did.
+	fileChanges, warnings, dispatched, unchanged, currentPaths := runPipeline(fc, metas, ro, enumChanged)
+	stats.Warnings = warnings
+	stats.Dispatched = dispatched
+	stats.Reused = unchanged
 
 	// Every path the store already knows about that this call did not
 	// see at all is gone — deleted, or newly excluded (directive 013:
@@ -201,107 +168,10 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	// all"): nothing about any file, or the enumeration cache, needs to
 	// change, so the existing store is returned exactly as it was
 	// opened.
-	if roOK && len(changed) == 0 && len(deletes) == 0 {
+	if roOK && len(fileChanges) == 0 && len(deletes) == 0 {
 		result := ro
 		ro = nil // ownership transferred to the caller; the deferred Close above must not also close it
-		stats.Reused = unchanged
 		return result, stats, nil
-	}
-
-	// Every content-changed file is dispatched through lang.Extract:
-	// directive 016 §1 left no extension table here to pre-filter
-	// toRead against, and no capability query is allowed to stand in
-	// for one — the only way to learn whether a registered module
-	// wants a file is to hand it over and ask. Directive 017 §1 makes
-	// that hand-off lazy: scanner.Open defers the actual read until a
-	// module calls File.Content, so a file the exclusion module claims
-	// by extension, or that only the generic module ever sees, is
-	// never opened at all. A changed-only-because-of-enumChanged file
-	// is excluded, same as before: its declarations are carried
-	// forward, not re-parsed, so nothing needs reading for it.
-	var toRead []scanner.FileMeta
-	for _, c := range changed {
-		if c.reExtract {
-			toRead = append(toRead, c.meta)
-		}
-	}
-	// entriesByPath holds, per changed file, exactly what lang.Extract
-	// returned: the file's own entry (whichever module produced it —
-	// every module's contract includes it, entry.FileEntry) followed by
-	// whatever declarations that module found, or just the file entry
-	// alone when none did (§18; directive 016 §1 — "the generic module
-	// ... produces the file's own entry"), or nothing at all when the
-	// exclusion module claimed it (directive 017 §2).
-	entriesByPath := make(map[string][]entry.Entry, len(toRead))
-	for _, m := range toRead {
-		f := scanner.Open(root, m)
-		project := scanner.ProjectFor(m.Path, markerDirs, projectNames, fallbackProject)
-		dirMarkers := markersByDir[scanner.OwningDir(m.Path, markerDirs)]
-		entries, declined := lang.Extract(f, project, assignments, dirMarkers)
-		if declined != nil {
-			// A module that recognised the file and then failed to
-			// parse (or even read) it degrades the answer, not the
-			// command (§2, "a stale index degrades gracefully"): the
-			// next module in order — ultimately the generic one — still
-			// produced the file's own entry, reported here in
-			// ## warnings rather than dropped silently.
-			stats.Warnings = append(stats.Warnings, fmt.Sprintf("%s: %v", m.Path, declined))
-		}
-		entriesByPath[m.Path] = entries
-		stats.Reparsed++
-	}
-	stats.Reused = unchanged
-
-	// fileEntry() is gone (directive 016 §1): the file's own entry now
-	// arrives as part of whatever lang.Extract already produced, not as
-	// a second, separately-computed value. This loop only patches the
-	// two facts index.Refresh itself knows that no language module
-	// could (Size, from this call's own fresh stat, and DeclCount, from
-	// how many non-file entries came back) — the same two patches the
-	// old fileEntry()-based loop made, applied to whichever entry in
-	// the slice is Kind==KindFile rather than to a value held apart
-	// from the rest.
-	fileChanges := make([]fileChange, 0, len(changed))
-	for _, c := range changed {
-		var entries []entry.Entry
-		switch {
-		case c.reExtract:
-			entries = entriesByPath[c.meta.Path]
-		case len(c.oldIDs) > 0:
-			// Carried forward, not re-parsed — but this branch only
-			// runs because enumChanged means Project may have moved
-			// (see above), so each entry's own stored Project is
-			// exactly as stale as the file's, and is refreshed here the
-			// same way Size is below (directive 015: "the same defect
-			// C-2 fixed for declarations, still open for markers" —
-			// 013's own diagnosis of what was left).
-			project := scanner.ProjectFor(c.meta.Path, markerDirs, projectNames, fallbackProject)
-			for _, e := range ro.entriesByID(c.oldIDs) {
-				e.Project = project
-				entries = append(entries, e)
-			}
-		}
-		declCount := 0
-		fileIdx := -1
-		for i, e := range entries {
-			if e.Kind == entry.KindFile {
-				fileIdx = i
-			} else {
-				declCount++
-			}
-		}
-		if fileIdx >= 0 {
-			// c.size, not c.meta.Size: the latter can be the enum
-			// cache's own stat, taken whenever the cache was last
-			// written, not this call (scanner.FileMeta.Size's own doc
-			// comment says so directly) — exactly the staleness this
-			// whole loop exists to prevent. c.size is always this
-			// call's own fresh stat (see the freshness loop above), for
-			// every file in changed regardless of what handled it.
-			entries[fileIdx].Size = c.size
-			entries[fileIdx].DeclCount = declCount
-		}
-		fileChanges = append(fileChanges, fileChange{Path: c.meta.Path, ModTime: c.modTime, Size: c.size, Entries: entries})
 	}
 
 	writeEnum := !roOK || enumChanged

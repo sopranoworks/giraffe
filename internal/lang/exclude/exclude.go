@@ -2,7 +2,8 @@
 // file is offered to it before anything else, and it claims — answers
 // handled=true, produces no entries — every extension and extensionless
 // shape that should never be indexed at all. Nothing downstream, not
-// even the generic module, ever sees a file this module claims.
+// even the generic module, ever sees a file this module claims — unless
+// the operator has said otherwise (directive 018 §2, below).
 //
 // This is the same chain-of-responsibility structure directive 016 §1
 // already established and justified against design-review's
@@ -51,7 +52,19 @@ var knownExtensionless = []string{
 // nothing here ever calls f.Content, an excluded file is never read
 // either. handled=false means this module has no opinion; the chain
 // continues.
+//
+// An operator assignment for f's own extension (assignments, from
+// .giraffe/exclude's "ext:<x> lang:<y>" lines, §25 C-26) always wins
+// over the deny list (directive 018 §2: "a project that wants a .png
+// indexed by name must be able to say so") — checked first, and
+// answered handled=false so a later module, in practice file.Extract,
+// still produces a labelled entry for it. This is the same
+// assignments map file.Extract already reads to label Lang; no new
+// coupling to scanner.Pattern is introduced to get it.
 func Extract(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, handled bool, err error) {
+	if assignments[path.Ext(f.Path)] != "" {
+		return nil, false, nil
+	}
 	if excluded(f.Path) {
 		return nil, true, nil
 	}

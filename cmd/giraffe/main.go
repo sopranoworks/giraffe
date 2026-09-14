@@ -68,7 +68,7 @@ type searchState struct {
 	stores            []*index.Store // closed once this invocation is done querying — see run
 	invocationProject string         // §21 C-6: home root's own project; unexported entries elsewhere are hidden unless a search runs from within them
 	commitLine        string
-	reparsed          int
+	dispatched        int
 	warnings          []string
 	ignoreWarnings    []string
 	exclusions        []string
@@ -198,7 +198,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 	// since resolveRoots always puts it first.
 	invocationProject := results[0].stats.RootProject
 
-	var totalReparsed int
+	var totalDispatched int
 	var warnings []string
 	var commitParts []string
 	exclusionSet := make(map[string]bool)
@@ -207,7 +207,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 	for i, r := range results {
 		sources[i] = r.store
 		stores[i] = r.store
-		totalReparsed += r.stats.Reparsed
+		totalDispatched += r.stats.Dispatched
 		warnings = append(warnings, r.stats.Warnings...)
 		commitParts = append(commitParts, fmt.Sprintf("%s@%s", filepath.Base(r.root), r.commit))
 		for _, p := range r.exclusion {
@@ -238,7 +238,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 		stores:            stores,
 		invocationProject: invocationProject,
 		commitLine:        commitLine,
-		reparsed:          totalReparsed,
+		dispatched:        totalDispatched,
 		warnings:          warnings,
 		ignoreWarnings:    ignoreWarnings,
 		exclusions:        exclusions,
@@ -271,7 +271,7 @@ func runFind(args []string, st searchState) int {
 		}
 	}
 
-	summary := output.Summarize(st.entries.All(), st.commitLine, st.reparsed, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
+	summary := output.Summarize(st.entries.All(), st.commitLine, st.dispatched, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
 
 	if word == "" {
 		// Browsing a place (§31.3): no search word to rank against, so
@@ -304,7 +304,7 @@ func runPrepare(args []string, st searchState) int {
 		fmt.Fprintln(os.Stderr, "usage: giraffe prepare")
 		return 2
 	}
-	summary := output.Summarize(st.entries.All(), st.commitLine, st.reparsed, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
+	summary := output.Summarize(st.entries.All(), st.commitLine, st.dispatched, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
 	fmt.Print(output.Format(summary, nil))
 	return 0
 }

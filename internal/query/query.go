@@ -91,28 +91,29 @@ func (c concatEntries) Candidates(word string) iter.Seq[entry.Entry] {
 // accepted for it. Different attribute names are AND'd together (§5).
 type Filter map[string][]string
 
-// excludedFromQuery names attributes that are valid (they appear in
-// output, so an unknown-attribute error would be wrong for them) but
-// are not accepted by --query specifically. Every other valid attribute
-// is filterable by construction (§6: "attribute names appearing in
-// output are exactly the names --query accepts") — there is
-// deliberately no second, separately-maintained list of filterable
-// names: a language module that adds a position attribute (module,
-// receiver, type, or a future language's own) becomes filterable the
-// moment it is valid, via matchesAny's default case, with nothing else
-// to register (directive 015 — the split between ValidAttributes and a
-// hand-maintained filterable set is what left this false for fourteen
-// directives).
+// Every valid attribute is filterable by construction (§6: "attribute
+// names appearing in output are exactly the names --query accepts") —
+// there is deliberately no second, separately-maintained list of
+// filterable names: a language module that adds a position attribute
+// (module, receiver, type, or a future language's own) becomes
+// filterable the moment it is valid, via matchesAny's default case,
+// with nothing else to register (directive 015 — the split between
+// ValidAttributes and a hand-maintained filterable set is what left
+// this false for fourteen directives).
 //
-// name stays out, deliberately, not by oversight: find's positional
-// word argument already does a case-insensitive substring match against
-// name (see tier), so --query 'name:...' would either duplicate that or
-// silently mean something different (exact match) for the same
-// attribute depending on how it was spelled — worse than the gap it
-// would close. Browsing a place (no search word, only --query, §31.3)
-// still works without name: a place is everything at a path or a
-// project, never one declaration singled out by its own name.
-var excludedFromQuery = map[string]bool{"name": true}
+// name was the one exception, from §22 C-10 through directive 017: this
+// invariant was restored three times (C-10 for kind/scope, 015 for the
+// positions, 017 for size/declarations/line) and each time left one
+// name still unfilterable, most recently this one. Directive 018 §3
+// closes it rather than repeating the pattern: name is filterable too
+// now (matchesAny, below), as an exact match — deliberately distinct
+// from find's own positional word, which still does a case-insensitive
+// substring match against name (see tier). The two coexist because they
+// answer different questions: the positional word is "what looks like
+// this", --query 'name:...' is "exactly this, as one more AND'd
+// condition alongside path, kind, project, ...". Browsing a place (no
+// search word, only --query, §31.3) can now also narrow to one
+// declaration by its exact name, which it could not before.
 
 // ValidAttributes returns the common attribute names plus every
 // language-position name actually present in entries: "the set of valid
@@ -155,9 +156,6 @@ func Parse(raw string, validAttributes map[string]bool) (Filter, error) {
 		name, value := tok[:i], tok[i+1:]
 		if !validAttributes[name] {
 			return nil, fmt.Errorf("unknown attribute %q; valid attributes for this repository: %s", name, strings.Join(sortedKeys(validAttributes), ", "))
-		}
-		if excludedFromQuery[name] {
-			return nil, fmt.Errorf("attribute %q is valid but not supported by --query (name is matched via find's own search word instead)", name)
 		}
 		f[name] = append(f[name], value)
 	}
@@ -240,6 +238,10 @@ func matchesAny(name string, e entry.Entry, values []string) bool {
 				return true
 			}
 		case "name":
+			// Exact match (directive 018 §3), deliberately distinct from
+			// find's own positional word, which substring-matches Name
+			// case-insensitively (see tier) — the two are different
+			// questions, not two spellings of the same one.
 			if e.Name == v {
 				return true
 			}

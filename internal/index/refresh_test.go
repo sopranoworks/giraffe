@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -135,8 +136,8 @@ func TestRefresh_FirstRun_BuildsFromScratch(t *testing.T) {
 	if len(decls) != 1 || decls[0].Name != "Retry" {
 		t.Fatalf("declarations = %#v", decls)
 	}
-	if stats.Reparsed != 1 || stats.Reused != 0 {
-		t.Fatalf("stats = %#v, want Reparsed=1 Reused=0", stats)
+	if stats.Dispatched != 1 || stats.Reused != 0 {
+		t.Fatalf("stats = %#v, want Dispatched=1 Reused=0", stats)
 	}
 }
 
@@ -156,12 +157,12 @@ func TestRefresh_SecondRun_UnchangedFileIsReused(t *testing.T) {
 	if len(declarations(entries)) != 1 {
 		t.Fatalf("declarations = %#v", declarations(entries))
 	}
-	if stats.Reused != 1 || stats.Reparsed != 0 {
-		t.Fatalf("stats = %#v, want Reused=1 Reparsed=0 on an unchanged second run", stats)
+	if stats.Reused != 1 || stats.Dispatched != 0 {
+		t.Fatalf("stats = %#v, want Reused=1 Dispatched=0 on an unchanged second run", stats)
 	}
 }
 
-func TestRefresh_StagedEditIsReparsed(t *testing.T) {
+func TestRefresh_StagedEditIsDispatched(t *testing.T) {
 	root := gitRepo(t)
 	writeFile(t, root, "retry.go", "package retry\n\nfunc Retry() {}\n")
 	gitCommit(t, root, "retry.go")
@@ -179,8 +180,8 @@ func TestRefresh_StagedEditIsReparsed(t *testing.T) {
 	if len(declarations(entries)) != 2 {
 		t.Fatalf("declarations = %#v, want Retry and Backoff", declarations(entries))
 	}
-	if stats.Reparsed != 1 {
-		t.Fatalf("stats = %#v, want Reparsed=1 for the changed file", stats)
+	if stats.Dispatched != 1 {
+		t.Fatalf("stats = %#v, want Dispatched=1 for the changed file", stats)
 	}
 }
 
@@ -250,11 +251,11 @@ func TestRefresh_FileItselfIsASearchTarget(t *testing.T) {
 // It is dispatched through lang.Extract now (directive 016 §1): with
 // no extension table left outside the language modules, the only way
 // to learn that no module wants README.md is to hand it over and let
-// the generic module answer — so Reparsed (files run through
-// lang.Extract this call) counts it too, alongside retry.go. Its
-// content is not actually read, though (directive 017 §1): the
-// generic module never calls File.Content, so the read scanner.Open
-// defers never happens for this file.
+// the generic module answer — so Dispatched (files run through
+// lang.Extract this call, directive 018 §4) counts it too, alongside
+// retry.go. Its content is not actually read, though (directive 017
+// §1): the generic module never calls File.Content, so the read
+// scanner.Open defers never happens for this file.
 //
 // It gets a files-bucket record (directive 013): not because anything
 // meaningful was extracted from it, but because the differential store
@@ -301,8 +302,8 @@ func TestRefresh_NoExtractorFileGetsANameOnlyEntry(t *testing.T) {
 	}
 	defer closeStore(t, s)
 	entries := allEntries(s)
-	if stats.Reparsed != 2 {
-		t.Fatalf("stats = %#v, want Reparsed=2 (retry.go and README.md are both handed to lang.Extract, §1)", stats)
+	if stats.Dispatched != 2 {
+		t.Fatalf("stats = %#v, want Dispatched=2 (retry.go and README.md are both handed to lang.Extract, §1)", stats)
 	}
 
 	var found *entry.Entry
@@ -353,8 +354,8 @@ func TestRefresh_OperatorAssignmentFillsLangWithoutAddingAnExtractor(t *testing.
 	}
 	defer closeStore(t, s)
 	entries := allEntries(s)
-	if stats.Reparsed != 1 {
-		t.Fatalf("stats = %#v, want Reparsed=1 — widget.inc is still handed to lang.Extract (§1), even though the assignment does not add a module", stats)
+	if stats.Dispatched != 1 {
+		t.Fatalf("stats = %#v, want Dispatched=1 — widget.inc is still handed to lang.Extract (§1), even though the assignment does not add a module", stats)
 	}
 
 	var found *entry.Entry
@@ -408,13 +409,13 @@ func TestRefresh_ExtractedEntriesCarryTheirLanguage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeStore(t, s2)
-	if stats2.Reparsed != 0 {
+	if stats2.Dispatched != 0 {
 		t.Fatalf("expected the second run to reuse the cache, got %#v", stats2)
 	}
 	check(allEntries(s2)) // served from cache
 }
 
-func TestRefresh_ZeroEntryFileIsReusedNotReparsed(t *testing.T) {
+func TestRefresh_ZeroEntryFileIsReusedNotDispatched(t *testing.T) {
 	// §21 C-6 indexes unexported declarations too, so a file needs zero
 	// top-level declarations at all (not merely zero exported ones) to
 	// exercise the presence-line case.
@@ -427,8 +428,8 @@ func TestRefresh_ZeroEntryFileIsReusedNotReparsed(t *testing.T) {
 		t.Fatal(err)
 	}
 	closeStore(t, s1)
-	if stats1.Reparsed != 1 {
-		t.Fatalf("first run: stats = %#v, want Reparsed=1", stats1)
+	if stats1.Dispatched != 1 {
+		t.Fatalf("first run: stats = %#v, want Dispatched=1", stats1)
 	}
 
 	s2, stats, err := Refresh(context.Background(), root, scope(), nil)
@@ -436,8 +437,8 @@ func TestRefresh_ZeroEntryFileIsReusedNotReparsed(t *testing.T) {
 		t.Fatal(err)
 	}
 	closeStore(t, s2)
-	if stats.Reparsed != 0 || stats.Reused != 1 {
-		t.Fatalf("second run: stats = %#v, want Reused=1 Reparsed=0 — a file with no "+
+	if stats.Dispatched != 0 || stats.Reused != 1 {
+		t.Fatalf("second run: stats = %#v, want Reused=1 Dispatched=0 — a file with no "+
 			"declarations must still be recognised as unchanged, not re-read every run", stats)
 	}
 }
@@ -463,8 +464,8 @@ func TestRefresh_UntrackedFileIsCachedLikeAnyOther(t *testing.T) {
 	if len(declarations(entries)) != 2 {
 		t.Fatalf("declarations = %#v, want both Tracked and WorkInProgress", declarations(entries))
 	}
-	if stats.Reparsed != 2 {
-		t.Fatalf("stats = %#v, want Reparsed=2 on the first run", stats)
+	if stats.Dispatched != 2 {
+		t.Fatalf("stats = %#v, want Dispatched=2 on the first run", stats)
 	}
 
 	if _, cached := s.fileRecord("wip.go"); !cached {
@@ -482,12 +483,12 @@ func TestRefresh_UntrackedFileIsCachedLikeAnyOther(t *testing.T) {
 		t.Fatal(err)
 	}
 	closeStore(t, s2)
-	if stats2.Reparsed != 0 || stats2.Reused != 2 {
-		t.Fatalf("stats = %#v, want Reused=2 Reparsed=0 — an unchanged untracked file must be reused too", stats2)
+	if stats2.Dispatched != 0 || stats2.Reused != 2 {
+		t.Fatalf("stats = %#v, want Reused=2 Dispatched=0 — an unchanged untracked file must be reused too", stats2)
 	}
 }
 
-func TestRefresh_UnstagedEditIsReparsed(t *testing.T) {
+func TestRefresh_UnstagedEditIsDispatched(t *testing.T) {
 	root := gitRepo(t)
 	writeFile(t, root, "retry.go", "package retry\n\nfunc Retry() {}\n")
 	gitCommit(t, root, "retry.go")
@@ -506,8 +507,8 @@ func TestRefresh_UnstagedEditIsReparsed(t *testing.T) {
 	if len(declarations(allEntries(s))) != 2 {
 		t.Fatalf("declarations = %#v, want Retry and Backoff even though the edit was never staged", declarations(allEntries(s)))
 	}
-	if stats.Reparsed != 1 {
-		t.Fatalf("stats = %#v, want Reparsed=1 for the unstaged edit", stats)
+	if stats.Dispatched != 1 {
+		t.Fatalf("stats = %#v, want Dispatched=1 for the unstaged edit", stats)
 	}
 }
 
@@ -627,8 +628,8 @@ func TestRefresh_KeysWritten_OneChangedFileIsNotTheWholeCorpus(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeStore(t, s)
-	if stats.Reparsed != 1 {
-		t.Fatalf("Reparsed = %d, want 1 (only a.go changed)", stats.Reparsed)
+	if stats.Dispatched != 1 {
+		t.Fatalf("Dispatched = %d, want 1 (only a.go changed)", stats.Dispatched)
 	}
 	// a.go's own file entry, its two declarations, a's own files-bucket
 	// record, and a handful of trigram grams — nowhere near the 5
@@ -703,14 +704,14 @@ func TestRefresh_MarkerChangeUpdatesProjectWithoutReparsing(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeStore(t, s)
-	// go.mod's own content changed, so it — unlike main.go — takes the
-	// reExtract path and is counted: Reparsed is "files run through
+	// go.mod's own content changed, so it — unlike main.go — is sent to
+	// the extract stage and counted: Dispatched is "files run through
 	// lang.Extract this call" (directive 016 §1: go.mod is itself a
 	// candidate file, handed over and handled by the generic module,
-	// same as README.md would be), not "files a language module found
-	// declarations in."
-	if stats.Reparsed != 1 {
-		t.Fatalf("Reparsed = %d, want 1 (go.mod's own content changed) — main.go's did not, so it must not be counted", stats.Reparsed)
+	// same as README.md would be; directive 018 §4 named the field for
+	// this), not "files a language module found declarations in."
+	if stats.Dispatched != 1 {
+		t.Fatalf("Dispatched = %d, want 1 (go.mod's own content changed) — main.go's did not, so it must not be counted", stats.Dispatched)
 	}
 	found := false
 	for e := range s.All() {
@@ -793,8 +794,8 @@ func TestRefresh_NonExtractableFileContentChangeUpdatesSize(t *testing.T) {
 	// directive 016 §1 removed the extension pre-filter — it is handed
 	// to lang.Extract and counted, even though only the generic module
 	// answers for it.
-	if stats.Reparsed != 1 {
-		t.Fatalf("stats = %#v, want Reparsed=1 — README.md's content changed and is handed to lang.Extract (§1)", stats)
+	if stats.Dispatched != 1 {
+		t.Fatalf("stats = %#v, want Dispatched=1 — README.md's content changed and is handed to lang.Extract (§1)", stats)
 	}
 	entries := allEntries(s)
 	var found *entry.Entry
@@ -998,5 +999,78 @@ func TestRefresh_FileEntryCarriesSizeAndDeclCount(t *testing.T) {
 	}
 	if mdFile.Size != int64(len("# hello\n")) {
 		t.Errorf("README.md Size = %d, want %d", mdFile.Size, len("# hello\n"))
+	}
+}
+
+// TestRefresh_ManyChangedFilesAllExtracted (directive 018 §1): more
+// changed files than extractWorkers, so the extract stage's fixed pool
+// must genuinely process every one of them, not just the first
+// extractWorkers-worth — every declaration from every file must still
+// be found, and Dispatched must count every one of them, regardless of
+// which worker happened to pick up which file.
+func TestRefresh_ManyChangedFilesAllExtracted(t *testing.T) {
+	root := gitRepo(t)
+	const n = 3 * extractWorkers // comfortably more than one worker's share
+	var paths []string
+	for i := 0; i < n; i++ {
+		p := fmt.Sprintf("f%02d.go", i)
+		writeFile(t, root, p, fmt.Sprintf("package p\n\nfunc F%02d() {}\n", i))
+		paths = append(paths, p)
+	}
+	gitCommit(t, root, paths...)
+
+	s, stats, err := Refresh(context.Background(), root, scope(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(t, s)
+	if stats.Dispatched != n {
+		t.Fatalf("Dispatched = %d, want %d", stats.Dispatched, n)
+	}
+	found := make(map[string]bool, n)
+	for _, e := range declarations(allEntries(s)) {
+		found[e.Name] = true
+	}
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("F%02d", i)
+		if !found[name] {
+			t.Errorf("expected declaration %s to survive concurrent extraction, got %v", name, found)
+		}
+	}
+}
+
+// TestRefresh_WarningsAreSortedByPathRegardlessOfConcurrency (directive
+// 018 §1, §3 C5): extract workers finish in whatever order the
+// scheduler picks, so runPipeline sorts warnings by path before
+// returning them — otherwise the same tree could print ## warnings in a
+// different order from one run to the next, breaking C5's "byte-
+// identical index output." Deliberately writes the warning-producing
+// files in reverse path order, so a pass-through-unsorted regression
+// would show up as out-of-order output here rather than accidentally
+// passing because creation order already matched sort order.
+func TestRefresh_WarningsAreSortedByPathRegardlessOfConcurrency(t *testing.T) {
+	root := gitRepo(t)
+	var paths []string
+	for i := extractWorkers; i >= 0; i-- {
+		p := fmt.Sprintf("bad%02d.go", i)
+		writeFile(t, root, p, "package p\n\nfunc ( { // invalid syntax\n")
+		paths = append(paths, p)
+	}
+	gitCommit(t, root, paths...)
+
+	s, stats, err := Refresh(context.Background(), root, scope(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(t, s)
+	if len(stats.Warnings) != len(paths) {
+		t.Fatalf("Warnings = %#v, want %d entries (one per malformed file)", stats.Warnings, len(paths))
+	}
+	sorted := append([]string(nil), stats.Warnings...)
+	sort.Strings(sorted)
+	for i := range stats.Warnings {
+		if stats.Warnings[i] != sorted[i] {
+			t.Fatalf("Warnings = %#v, not sorted by path", stats.Warnings)
+		}
 	}
 }

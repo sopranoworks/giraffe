@@ -35,9 +35,13 @@ const (
 // Summary is the evidence carried on the always-present ## index line: it
 // is what the caller pastes into a report to show the command actually
 // ran, so it is whole-index totals, not counts scoped to one query — the
-// same numbers specifications/giraffe.md §11 measures. Reparsed is the
+// same numbers specifications/giraffe.md §11 measures. Dispatched is the
 // one field that is specific to this invocation (how much work this run
-// actually did).
+// actually did) — named for exactly what it counts (directive 018 §4):
+// files sent through lang.Extract this run, not files actually read.
+// Since directive 017 §1 the two are different numbers (a file the
+// generic module handles is dispatched without ever being opened), and
+// "Reparsed" claimed the second when it always meant the first.
 type Summary struct {
 	Commit   string
 	Symbols  int
@@ -50,7 +54,7 @@ type Summary struct {
 	// moved at all.
 	UndocumentedExported int
 	UndocumentedPackage  int
-	Reparsed             int
+	Dispatched           int
 	ShowProject          bool // true when the index spans more than one project
 	// ShowLang mirrors ShowProject (§24 C-20, §25 C-25): lang costs a
 	// line's worth of bytes per result the same way project does, so it
@@ -101,7 +105,7 @@ type Summary struct {
 // and genuinely absent). A plain list of opaque names, the same
 // treatment Kind and Scope values already get (§21 C-12) — this
 // package still never imports the lang package itself.
-func Summarize(entries iter.Seq[entry.Entry], commit string, reparsed int, warnings, notices, exclusions, knownLanguages []string) Summary {
+func Summarize(entries iter.Seq[entry.Entry], commit string, dispatched int, warnings, notices, exclusions, knownLanguages []string) Summary {
 	projects := make(map[string]bool)
 	positions := make(map[string]bool)
 	languages := make(map[string]bool) // known langs only — see ShowLang
@@ -176,7 +180,7 @@ func Summarize(entries iter.Seq[entry.Entry], commit string, reparsed int, warni
 		Packages:             len(positions),
 		UndocumentedExported: undocExported,
 		UndocumentedPackage:  undocPackage,
-		Reparsed:             reparsed,
+		Dispatched:           dispatched,
 		ShowProject:          len(projects) > 1,
 		ShowLang:             len(languages) > 1,
 		ExtVaries:            extVaries,
@@ -253,8 +257,8 @@ func breakdownLine(counts map[string]int) string {
 func Format(s Summary, matches []entry.Entry) string {
 	var b strings.Builder
 
-	indexLine := fmt.Sprintf("commit %s | symbols %d | packages %d | undocumented %d exported, %d package | reparsed %d",
-		s.Commit, s.Symbols, s.Packages, s.UndocumentedExported, s.UndocumentedPackage, s.Reparsed)
+	indexLine := fmt.Sprintf("commit %s | symbols %d | packages %d | undocumented %d exported, %d package | dispatched %d",
+		s.Commit, s.Symbols, s.Packages, s.UndocumentedExported, s.UndocumentedPackage, s.Dispatched)
 	b.WriteString("## index\n")
 	b.WriteString(indexLine)
 	b.WriteByte('\n')
