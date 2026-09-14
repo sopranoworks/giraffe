@@ -92,10 +92,10 @@ type Filter map[string][]string
 
 // excludedFromQuery names attributes that are valid (they appear in
 // output, so an unknown-attribute error would be wrong for them) but
-// are not accepted by find's --query specifically. Every other valid
-// attribute is filterable by construction (§6: "attribute names
-// appearing in output are exactly the names --query accepts") — there
-// is deliberately no second, separately-maintained list of filterable
+// are not accepted by --query specifically. Every other valid attribute
+// is filterable by construction (§6: "attribute names appearing in
+// output are exactly the names --query accepts") — there is
+// deliberately no second, separately-maintained list of filterable
 // names: a language module that adds a position attribute (module,
 // receiver, type, or a future language's own) becomes filterable the
 // moment it is valid, via matchesAny's default case, with nothing else
@@ -108,8 +108,9 @@ type Filter map[string][]string
 // name (see tier), so --query 'name:...' would either duplicate that or
 // silently mean something different (exact match) for the same
 // attribute depending on how it was spelled — worse than the gap it
-// would close. show has no positional word and addresses a declaration
-// by name instead (§4) — see ParseAddress, which accepts it.
+// would close. Browsing a place (no search word, only --query, §31.3)
+// still works without name: a place is everything at a path or a
+// project, never one declaration singled out by its own name.
 var excludedFromQuery = map[string]bool{"name": true}
 
 // ValidAttributes returns the common attribute names plus every
@@ -132,18 +133,6 @@ func ValidAttributes(src Entries) map[string]bool {
 // are whitespace-separated, each is name:value with no space after the
 // colon, and a value containing whitespace is wrapped in single quotes.
 func Parse(raw string, validAttributes map[string]bool) (Filter, error) {
-	return parseFilter(raw, validAttributes, excludedFromQuery)
-}
-
-// ParseAddress tokenizes a show argument (§4): "the declaration itself,
-// addressed by attributes copied from a find result line" — and a
-// result line always carries name, the one attribute Parse excludes.
-// Same tokenizer, same validity check, nothing excluded.
-func ParseAddress(raw string, validAttributes map[string]bool) (Filter, error) {
-	return parseFilter(raw, validAttributes, nil)
-}
-
-func parseFilter(raw string, validAttributes, excluded map[string]bool) (Filter, error) {
 	tokens, err := tokenize(raw)
 	if err != nil {
 		return nil, err
@@ -158,7 +147,7 @@ func parseFilter(raw string, validAttributes, excluded map[string]bool) (Filter,
 		if !validAttributes[name] {
 			return nil, fmt.Errorf("unknown attribute %q; valid attributes for this repository: %s", name, strings.Join(sortedKeys(validAttributes), ", "))
 		}
-		if excluded[name] {
+		if excludedFromQuery[name] {
 			return nil, fmt.Errorf("attribute %q is valid but not supported by --query (name is matched via find's own search word instead)", name)
 		}
 		f[name] = append(f[name], value)
@@ -494,12 +483,12 @@ func dedupKey(e entry.Entry) string {
 }
 
 // Browse returns every entry matching filter and visible from
-// invocationProject, ordered by path then name (§22 item 5: `show`
-// lists what is in a place — there is no search word to rank matches
-// against, so declaration order stands in for relevance order). filter
-// must be non-empty; the caller (main.runShow) rejects an empty one,
-// since "show" always names a place rather than browsing the whole
-// index.
+// invocationProject, ordered by path then name (§31.3: browsing a
+// place — find with no search word and a --query — lists what is
+// there; there is no search word to rank matches against, so path/name
+// order stands in for relevance order). filter must be non-empty; the
+// caller (main.runFind) rejects an empty one, since browsing always
+// names a place rather than dumping the whole index.
 func Browse(src Entries, filter Filter, invocationProject string) []entry.Entry {
 	var out []entry.Entry
 	for e := range src.All() {

@@ -20,8 +20,15 @@ import (
 )
 
 // Extensions lists the file extensions this module wants from the
-// scanner.
+// scanner, and is also how it recognises a file as its own: the only
+// place ".go" is named (specifications/giraffe.md §18; directive 016
+// §1 — no extension table outside a language module).
 var Extensions = []string{".go"}
+
+// langName is this module's own value for a produced entry's Lang
+// attribute (§6, unmapped) — stamped by Extract itself, not looked up
+// from outside (directive 016 §1: "the module reports its own name").
+const langName = "go"
 
 // scopeExported and scopePackage are Go's own words for a declaration's
 // visibility (§21 C-12: the displayed value is the language's own
@@ -32,11 +39,20 @@ const (
 	scopePackage  = "package"
 )
 
-// Extract returns one entry per top-level declaration in f: func, type,
-// const, var, method, and field (§10, §28 C-38), both exported and
-// unexported (§21 C-6) — each carries Scope and Exported accordingly.
-// Grouped declarations — type (...), const (...) — are expanded to one
-// entry per spec, matching what the sizing prototype in §11 undercounted.
+// Extract reports whether f is a Go file (its own extension check,
+// §18) and, if so, returns f's own entry (entry.FileEntry, §22 item 4)
+// followed by one entry per top-level declaration: func, type, const,
+// var, method, and field (§10, §28 C-38), both exported and unexported
+// (§21 C-6) — each carries Scope and Exported accordingly. Grouped
+// declarations — type (...), const (...) — are expanded to one entry
+// per spec, matching what the sizing prototype in §11 undercounted.
+//
+// handled is false, regardless of err, whenever this module is not the
+// right answer for f — a wrong extension, or (§18; directive 016 §1)
+// an extension that matched but content that did not parse. The
+// caller tries the next registered module either way; err, when
+// non-nil, is a diagnostic worth reporting even though the file was
+// not left unhandled.
 //
 // A method's Name is its own bare name, never qualified with its
 // receiver's type ("Snapshot", not "Cluster.Snapshot"); the receiver
@@ -48,27 +64,33 @@ const (
 // burying the type declaration itself under its own members. A plain
 // method or field name only collides with a search word the way any
 // other declaration's name already can.
-func Extract(f scanner.File, project string) ([]entry.Entry, error) {
+func Extract(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, handled bool, err error) {
+	if !handles(f.Path) {
+		return nil, false, nil
+	}
+
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, f.Path, f.Content, parser.ParseComments|parser.SkipObjectResolution)
 	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", f.Path, err)
+		return nil, false, fmt.Errorf("parse %s: %w", f.Path, err)
 	}
+	lines := strings.Split(string(f.Content), "\n")
 
 	position := []entry.Position{{Name: "module", Value: path.Dir(f.Path)}}
 
-	var entries []entry.Entry
+	decls := []entry.Entry{entry.FileEntry(f.Path, project, langName)}
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
 			if d.Recv != nil {
-				if e, ok := methodEntry(f.Path, project, d, position); ok {
-					entries = append(entries, e)
+				if e, ok := methodEntry(f.Path, project, d, position, fset, lines); ok {
+					decls = append(decls, e)
 				}
 				continue
 			}
 			exported := d.Name.IsExported()
-			entries = append(entries, entry.Entry{
+			line, text := lineOf(fset, d.Pos(), lines)
+			decls = append(decls, entry.Entry{
 				Path:     f.Path,
 				Name:     d.Name.Name,
 				Kind:     "func",
@@ -77,6 +99,8 @@ func Extract(f scanner.File, project string) ([]entry.Entry, error) {
 				Exported: exported,
 				Doc:      firstLine(d.Doc),
 				Position: position,
+				Line:     line,
+				LineText: text,
 			})
 
 		case *ast.GenDecl:
@@ -85,43 +109,82 @@ func Extract(f scanner.File, project string) ([]entry.Entry, error) {
 				continue // import, or another declaration kind this version does not index
 			}
 			for _, spec := range d.Specs {
-				name, doc, ok := specNameAndDoc(spec, d.Doc)
+				specName, doc, pos, ok := specNameDocAndPos(spec, d.Doc)
 				if !ok {
 					continue
 				}
-				exported := ast.IsExported(name)
-				entries = append(entries, entry.Entry{
+				exported := ast.IsExported(specName)
+				line, text := lineOf(fset, pos, lines)
+				decls = append(decls, entry.Entry{
 					Path:     f.Path,
-					Name:     name,
+					Name:     specName,
 					Kind:     kind,
 					Project:  project,
 					Scope:    scopeOf(exported),
 					Exported: exported,
 					Doc:      doc,
 					Position: position,
+					Line:     line,
+					LineText: text,
 				})
 				if kind == "type" {
 					if ts, ok := spec.(*ast.TypeSpec); ok {
-						entries = append(entries, fieldEntries(f.Path, project, ts, position)...)
+						decls = append(decls, fieldEntries(f.Path, project, ts, position, fset, lines)...)
 					}
 				}
 			}
 		}
 	}
-	return entries, nil
+	// decls[0] is the file's own entry (entry.FileEntry already stamped
+	// its Ext and Lang); every declaration after it needs the same two
+	// facts, which no single-entry literal above sets, since one module
+	// produces every entry here under the one extension and the one
+	// module name.
+	for i := 1; i < len(decls); i++ {
+		decls[i].Ext = "go"
+		decls[i].Lang = langName
+	}
+	return decls, true, nil
+}
+
+// handles reports whether path is one this module claims, by
+// extension — checked here, inside the module, and nowhere else
+// (§18).
+func handles(p string) bool {
+	for _, ext := range Extensions {
+		if strings.HasSuffix(p, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// lineOf renders pos as a 1-based line number and that line's own
+// text, trimmed of surrounding whitespace (§31.4) — the fact that lets
+// a caller discard a candidate ("struct X {" vs "v := X.New") without
+// opening the file. Out-of-range is defensive only: fset.Position
+// always resolves a valid ast.Node's own Pos within lines already
+// split from the same content that produced file.
+func lineOf(fset *token.FileSet, pos token.Pos, lines []string) (int, string) {
+	line := fset.Position(pos).Line
+	if line < 1 || line > len(lines) {
+		return line, ""
+	}
+	return line, strings.TrimSpace(lines[line-1])
 }
 
 // methodEntry returns the index entry for a method declaration, or
 // ok=false if its receiver's type cannot be determined (a shape the Go
 // spec does not actually allow, but the extractor skips rather than
-// guesses — the same defensiveness specNameAndDoc already applies to a
-// spec it does not recognise).
-func methodEntry(path, project string, d *ast.FuncDecl, base []entry.Position) (entry.Entry, bool) {
+// guesses — the same defensiveness specNameDocAndPos already applies to
+// a spec it does not recognise).
+func methodEntry(path, project string, d *ast.FuncDecl, base []entry.Position, fset *token.FileSet, lines []string) (entry.Entry, bool) {
 	recv := bareTypeName(d.Recv.List[0].Type)
 	if recv == "" {
 		return entry.Entry{}, false
 	}
 	exported := d.Name.IsExported()
+	line, text := lineOf(fset, d.Pos(), lines)
 	return entry.Entry{
 		Path:     path,
 		Name:     d.Name.Name,
@@ -131,6 +194,8 @@ func methodEntry(path, project string, d *ast.FuncDecl, base []entry.Position) (
 		Exported: exported,
 		Doc:      firstLine(d.Doc),
 		Position: withPosition(base, "receiver", recv),
+		Line:     line,
+		LineText: text,
 	}, true
 }
 
@@ -139,7 +204,7 @@ func methodEntry(path, project string, d *ast.FuncDecl, base []entry.Position) (
 // own) is addressed, and named here, by its embedded type's own name,
 // the same identifier Go resolves it by; a blank identifier field is
 // skipped, since "_" is never addressable.
-func fieldEntries(path, project string, ts *ast.TypeSpec, base []entry.Position) []entry.Entry {
+func fieldEntries(path, project string, ts *ast.TypeSpec, base []entry.Position, fset *token.FileSet, lines []string) []entry.Entry {
 	st, ok := ts.Type.(*ast.StructType)
 	if !ok || st.Fields == nil {
 		return nil
@@ -154,6 +219,7 @@ func fieldEntries(path, project string, ts *ast.TypeSpec, base []entry.Position)
 				names = []*ast.Ident{{Name: n}}
 			}
 		}
+		line, text := lineOf(fset, field.Pos(), lines)
 		for _, n := range names {
 			if n.Name == "_" {
 				continue
@@ -168,6 +234,8 @@ func fieldEntries(path, project string, ts *ast.TypeSpec, base []entry.Position)
 				Exported: exported,
 				Doc:      firstLine(field.Doc),
 				Position: position,
+				Line:     line,
+				LineText: text,
 			})
 		}
 	}
@@ -229,24 +297,28 @@ func genDeclKind(tok token.Token) string {
 	}
 }
 
-// specNameAndDoc returns the declared name and doc comment for one spec
-// inside a (possibly grouped) declaration. A spec's own Doc — present when
-// each item in a group has its own comment — takes precedence; groupDoc is
-// the comment above the declaration keyword itself, used as a fallback.
-func specNameAndDoc(spec ast.Spec, groupDoc *ast.CommentGroup) (name, doc string, ok bool) {
+// specNameDocAndPos returns the declared name, doc comment and source
+// position for one spec inside a (possibly grouped) declaration. A
+// spec's own Doc — present when each item in a group has its own
+// comment — takes precedence; groupDoc is the comment above the
+// declaration keyword itself, used as a fallback. pos is always the
+// spec's own position, never the group's: in `const (\n A = 1\n B = 2\n)`
+// each spec's own line is what a caller discarding a candidate needs
+// (§31.4), not the line the group starts on.
+func specNameDocAndPos(spec ast.Spec, groupDoc *ast.CommentGroup) (name, doc string, pos token.Pos, ok bool) {
 	switch s := spec.(type) {
 	case *ast.TypeSpec:
-		return s.Name.Name, firstLine(preferDoc(s.Doc, groupDoc)), true
+		return s.Name.Name, firstLine(preferDoc(s.Doc, groupDoc)), s.Pos(), true
 	case *ast.ValueSpec:
 		if len(s.Names) == 0 {
-			return "", "", false
+			return "", "", token.NoPos, false
 		}
 		// const/var can declare several names on one line (A, B = 1, 2);
 		// only the first is reported for this version, matching the
 		// declaration's own doc comment.
-		return s.Names[0].Name, firstLine(preferDoc(s.Doc, groupDoc)), true
+		return s.Names[0].Name, firstLine(preferDoc(s.Doc, groupDoc)), s.Pos(), true
 	default:
-		return "", "", false
+		return "", "", token.NoPos, false
 	}
 }
 

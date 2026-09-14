@@ -40,6 +40,42 @@ func TestFormat_ResultsSection_PasteReadyAttributes(t *testing.T) {
 	}
 }
 
+// TestFormat_LineNumberAndLineTextBothPrint (§31.4): a result line
+// carries line:N in the attribute line, and the declaration's own
+// source line as a second indented line above Doc — both present when
+// both are known.
+func TestFormat_LineNumberAndLineTextBothPrint(t *testing.T) {
+	entries := []entry.Entry{
+		{Path: "internal/retry/retry.go", Name: "Retry", Kind: "func", Doc: "retries with backoff", Exported: true,
+			Line: 14, LineText: "func Retry(ctx context.Context) error {"},
+	}
+	s := Summarize(slices.Values(entries), "abc1234", 1, nil, nil, nil, nil)
+	out := Format(s, entries)
+	if !strings.Contains(out, "name:Retry kind:func path:internal/retry/retry.go line:14") {
+		t.Fatalf("expected line:14 in the attribute line:\n%s", out)
+	}
+	if !strings.Contains(out, "  func Retry(ctx context.Context) error {\n") {
+		t.Fatalf("expected the declaration's own line, indented:\n%s", out)
+	}
+	if !strings.Contains(out, "  retries with backoff\n") {
+		t.Fatalf("expected Doc to still print alongside the line text:\n%s", out)
+	}
+}
+
+// TestFormat_NoLineForAFileEntry (§31.4, §25 C-24): a generic file
+// entry addresses no specific line — absence is the correct encoding,
+// not a placeholder like line:0.
+func TestFormat_NoLineForAFileEntry(t *testing.T) {
+	entries := []entry.Entry{
+		{Path: "README.md", Name: "README", Kind: entry.KindFile, Exported: true},
+	}
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
+	out := Format(s, entries)
+	if strings.Contains(out, "line:") {
+		t.Fatalf("expected no line: attribute for a file entry:\n%s", out)
+	}
+}
+
 func TestFormat_TruncatesAtEightResults(t *testing.T) {
 	var entries []entry.Entry
 	for i := 0; i < 12; i++ {
@@ -292,9 +328,9 @@ func TestFormat_KnownLanguageWithZeroMatchesStillNamed(t *testing.T) {
 
 // TestResultLine_SizeAndDeclCount (directive 009 item 3): a file result
 // prints declarations: when it holds enough of them to be worth
-// browsing with `show`, size: when it is large but does not (or has no
-// extractor), and neither when both stay below threshold — §25 C-25's
-// "only when it discriminates" applied to a new attribute.
+// narrowing with --query, size: when it is large but does not (or has
+// no extractor), and neither when both stay below threshold — §25
+// C-25's "only when it discriminates" applied to a new attribute.
 func TestResultLine_SizeAndDeclCount(t *testing.T) {
 	tests := []struct {
 		name string

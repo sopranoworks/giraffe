@@ -5,6 +5,11 @@
 // attribute names --query accepts are one vocabulary with one definition.
 package entry
 
+import (
+	"path"
+	"strings"
+)
+
 // Entry is one fact in the index: one declaration, addressable by its
 // attributes.
 //
@@ -54,16 +59,27 @@ type Entry struct {
 	Position []Position // language position; nil for files with no language structure
 
 	// Size is the file's byte size on disk, and DeclCount the number of
-	// declarations extracted from it (0 when no extractor covers its
-	// extension). Both are facts about the *file*, not the declaration,
-	// so they are only ever meaningful on a Kind==KindFile entry — a
+	// declarations extracted from it (0 when no language module found
+	// any). Both are facts about the *file*, not the declaration, so
+	// they are only ever meaningful on a Kind==KindFile entry — a
 	// caller deciding whether to open a file directly or narrow it
-	// first (with `show`, or with grep) wants exactly this (§27
+	// first (with --query, or with grep) wants exactly this (§27
 	// directive 009 item 3, giraffe.md §25 C-25: printed only when it
 	// discriminates, never on every line). Left zero-valued on
 	// declaration entries; nothing reads them there.
 	Size      int64
 	DeclCount int
+
+	// Line is the 1-based source line the declaration starts at, and
+	// LineText is that line's own text, trimmed of surrounding
+	// whitespace (specifications/giraffe.md §31.4): a caller can
+	// discard a candidate from these two facts without opening the
+	// file, the same way `struct X {` and `v := X.New` answer the same
+	// name search differently. Zero/empty on a Kind==KindFile entry,
+	// which addresses no specific line — absence is the correct
+	// encoding (§25 C-24), never a placeholder.
+	Line     int
+	LineText string
 }
 
 // Position is one named language-position pair, e.g. {"module",
@@ -73,6 +89,32 @@ type Entry struct {
 type Position struct {
 	Name  string
 	Value string
+}
+
+// FileEntry returns filePath's own entry (§22 item 4): a file is a
+// search target addressed by its own name, not by any declaration
+// inside it, so every language module that handles a file needs this
+// same construction — the golang module for the file it parses, and
+// the generic module for a file no other module claims (directive 016
+// §1: "the generic module ... is not a fallback mechanism, not a
+// special case ... a language module like any other"). lang is the
+// value this file's own Lang attribute should carry ("" for none —
+// absence, not a placeholder, §25 C-24). Size and DeclCount are left
+// zero; index.Refresh fills them in from facts only it has (the
+// freshness stat already taken this call, and the count of whatever
+// declarations were extracted alongside this entry).
+func FileEntry(filePath, project, lang string) Entry {
+	base := path.Base(filePath)
+	ext := path.Ext(base)
+	return Entry{
+		Path:     filePath,
+		Name:     strings.TrimSuffix(base, ext),
+		Kind:     KindFile,
+		Project:  project,
+		Ext:      strings.TrimPrefix(ext, "."),
+		Lang:     lang,
+		Exported: true,
+	}
 }
 
 // KindFile is the Kind value for an entry representing a file itself,

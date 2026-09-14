@@ -1,0 +1,30 @@
+// Package file is the generic language module: registered last, in
+// internal/lang's order, and the only one that always handles what it
+// is given (specifications/giraffe.md §18; directive 016 §1). It
+// produces exactly the file's own entry (§22 item 4) and nothing
+// else — not a fallback mechanism, not a special case, not a branch: a
+// language module like any other, satisfying the same contract
+// ("produce values of the attribute type"). Because it always accepts,
+// nothing reaches the end of internal/lang's registration order
+// unhandled.
+package file
+
+import (
+	"path"
+
+	"giraffe/internal/entry"
+	"giraffe/internal/scanner"
+)
+
+// Extract always handles f, and never touches its content: a file this
+// module reaches has already been declined by every module that reads
+// declarations out of file content, so there are none to report — only
+// the fact that the file itself exists and is addressable by name.
+// lang is the operator's own assignment for f's extension
+// (.giraffe/exclude, §25 C-26) if one exists — the only tier that can
+// label a file giraffe has no extractor for at all — or "" when none
+// applies.
+func Extract(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, handled bool, err error) {
+	lang := assignments[path.Ext(f.Path)]
+	return []entry.Entry{entry.FileEntry(f.Path, project, lang)}, true, nil
+}

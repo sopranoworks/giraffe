@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 
@@ -130,14 +129,12 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 		if roOK {
 			oldRec, known = ro.fileRecord(m.Path)
 		}
-		// §20 C-2 puts freshness on stat over the whole candidate set,
-		// with no exception for a file with no extractor (directive
-		// 015): every file, extractable or not, is stat'd and compared
-		// against its own last-known fingerprint the same way. A
-		// non-extractable file simply never sets reExtract, since it
-		// has nothing to extract — its own entry still needs a fresh
-		// Size the moment its content changes, the same as any other
-		// informational field would.
+		// §20 C-2 puts freshness on stat over the whole candidate set:
+		// every file is stat'd and compared against its own last-known
+		// fingerprint the same way, regardless of what, if anything,
+		// ends up extracting from it — directive 016 §1 removed the
+		// only place that distinction was knowable in advance (there is
+		// no extension table left to consult here; see reExtract below).
 		info, statErr := os.Stat(filepath.Join(root, m.Path))
 		if statErr != nil {
 			// Gone between List and Stat (e.g. a race with an editor's
@@ -147,12 +144,15 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 			continue
 		}
 		currentPaths[m.Path] = true
-		_, extractable := lang.For(path.Ext(m.Path))
 		cur := changedFile{meta: m, modTime: info.ModTime().UnixNano(), size: info.Size()}
 		contentSame := known && oldRec.ModTime == cur.modTime && oldRec.Size == cur.size
 		switch {
 		case !contentSame:
-			cur.reExtract = extractable
+			// Content changed: every registered module gets a chance to
+			// claim it (lang.Extract, directive 016 §1) — "no extension
+			// table, no capability query" means there is no cheaper way
+			// left to decide this file is not worth reading than asking.
+			cur.reExtract = true
 			changed = append(changed, cur)
 		case enumChanged:
 			// Content itself is unchanged — its declarations do not
@@ -191,10 +191,14 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 		return result, stats, nil
 	}
 
-	// Only files that actually need re-extraction are read — a file
-	// with no extractor is never opened, and neither is a changed-only-
-	// because-of-enumChanged file whose declarations are being carried
-	// forward, not re-parsed.
+	// Every file whose content changed is read: directive 016 §1 left
+	// no extension table here to pre-filter toRead against, and no
+	// capability query is allowed to stand in for one — the only way to
+	// learn whether a registered module wants a file is to hand it the
+	// content and ask (lang.Extract, below). A changed-only-because-of-
+	// enumChanged file is excluded, same as before: its declarations
+	// are carried forward, not re-parsed, so its content need not be
+	// read again.
 	var toRead []scanner.FileMeta
 	for _, c := range changed {
 		if c.reExtract {
@@ -209,67 +213,80 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	if err != nil {
 		return nil, Stats{}, err
 	}
-	declByPath := make(map[string][]entry.Entry, len(toRead))
+	// entriesByPath holds, per changed file, exactly what lang.Extract
+	// returned: the file's own entry (whichever module produced it —
+	// every module's contract includes it, entry.FileEntry) followed by
+	// whatever declarations that module found, or just the file entry
+	// alone when none did (§18; directive 016 §1 — "the generic module
+	// ... produces the file's own entry").
+	entriesByPath := make(map[string][]entry.Entry, len(toRead))
 	for i, f := range readFiles {
 		m := toRead[i]
 		project := scanner.ProjectFor(f.Path, markerDirs, projectNames, fallbackProject)
-		entries, err := extract(f, project, assignments)
-		if err != nil {
-			// A file that fails to parse degrades the answer, not the
-			// command: the rest of the store still builds (§2, "a stale
-			// index degrades gracefully"). Reported in ## warnings by
-			// the output layer. Its own file entry is still written
-			// below — the file itself is still a search target (§22
-			// item 4) — only its declarations are absent this run.
-			stats.Warnings = append(stats.Warnings, fmt.Sprintf("%s: %v", f.Path, err))
-			continue
+		entries, declined := lang.Extract(f, project, assignments)
+		if declined != nil {
+			// A module that recognised the file and then failed to
+			// parse it degrades the answer, not the command (§2, "a
+			// stale index degrades gracefully"): the next module in
+			// order — ultimately the generic one — still produced the
+			// file's own entry, reported here in ## warnings rather
+			// than dropped silently.
+			stats.Warnings = append(stats.Warnings, fmt.Sprintf("%s: %v", f.Path, declined))
 		}
-		declByPath[m.Path] = entries
+		entriesByPath[m.Path] = entries
 		stats.Reparsed++
 	}
 	stats.Reused = unchanged
 
-	// §22 item 4 / §24 C-18: one file entry per changed file, so a file
-	// can be found by name even when it has no declarations of its own.
-	// DeclCount is known immediately — unlike the old full-rewrite
-	// design, there is no need for a second pass over every entry in
-	// the store to compute it, since a change's own declarations are
-	// already fully assembled right here.
+	// fileEntry() is gone (directive 016 §1): the file's own entry now
+	// arrives as part of whatever lang.Extract already produced, not as
+	// a second, separately-computed value. This loop only patches the
+	// two facts index.Refresh itself knows that no language module
+	// could (Size, from this call's own fresh stat, and DeclCount, from
+	// how many non-file entries came back) — the same two patches the
+	// old fileEntry()-based loop made, applied to whichever entry in
+	// the slice is Kind==KindFile rather than to a value held apart
+	// from the rest.
 	fileChanges := make([]fileChange, 0, len(changed))
 	for _, c := range changed {
-		fe := fileEntry(c.meta, markerDirs, projectNames, fallbackProject, assignments)
-		// c.size, not c.meta.Size: the latter can be the enum cache's
-		// own stat, taken whenever the cache was last written, not this
-		// call (scanner.FileMeta.Size's own doc comment says so
-		// directly) — exactly the staleness this whole loop exists to
-		// prevent. c.size is always this call's own fresh stat (see the
-		// freshness loop above), for every file in changed regardless
-		// of extractor.
-		fe.Size = c.size
-		var decls []entry.Entry
+		var entries []entry.Entry
 		switch {
 		case c.reExtract:
-			decls = declByPath[c.meta.Path]
+			entries = entriesByPath[c.meta.Path]
 		case len(c.oldIDs) > 0:
 			// Carried forward, not re-parsed — but this branch only
 			// runs because enumChanged means Project may have moved
-			// (see above), so each declaration's own stored Project is
+			// (see above), so each entry's own stored Project is
 			// exactly as stale as the file's, and is refreshed here the
-			// same way fe's is (directive 015: "the same defect C-2
-			// fixed for declarations, still open for markers" — 013's
-			// own diagnosis of what was left).
+			// same way Size is below (directive 015: "the same defect
+			// C-2 fixed for declarations, still open for markers" —
+			// 013's own diagnosis of what was left).
 			project := scanner.ProjectFor(c.meta.Path, markerDirs, projectNames, fallbackProject)
 			for _, e := range ro.entriesByID(c.oldIDs) {
-				if e.Kind != entry.KindFile {
-					e.Project = project
-					decls = append(decls, e)
-				}
+				e.Project = project
+				entries = append(entries, e)
 			}
 		}
-		fe.DeclCount = len(decls)
-		entries := make([]entry.Entry, 0, 1+len(decls))
-		entries = append(entries, fe)
-		entries = append(entries, decls...)
+		declCount := 0
+		fileIdx := -1
+		for i, e := range entries {
+			if e.Kind == entry.KindFile {
+				fileIdx = i
+			} else {
+				declCount++
+			}
+		}
+		if fileIdx >= 0 {
+			// c.size, not c.meta.Size: the latter can be the enum
+			// cache's own stat, taken whenever the cache was last
+			// written, not this call (scanner.FileMeta.Size's own doc
+			// comment says so directly) — exactly the staleness this
+			// whole loop exists to prevent. c.size is always this
+			// call's own fresh stat (see the freshness loop above), for
+			// every file in changed regardless of what handled it.
+			entries[fileIdx].Size = c.size
+			entries[fileIdx].DeclCount = declCount
+		}
 		fileChanges = append(fileChanges, fileChange{Path: c.meta.Path, ModTime: c.modTime, Size: c.size, Entries: entries})
 	}
 
@@ -292,52 +309,6 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	}
 	stats.KeysWritten = keysWritten
 	return target, stats, nil
-}
-
-// fileEntry represents m itself as a search target, addressed by its own
-// name rather than by any declaration inside it (§22 item 4). Not
-// cached: computing it fresh here, from the same scanner.List result
-// Refresh already has on every call, costs one small struct per file
-// already being walked, with no file I/O of its own to save by caching
-// it — unlike a declaration entry, there is nothing here a cache hit
-// would spare.
-func fileEntry(m scanner.FileMeta, markerDirs []string, projectNames map[string]string, fallbackProject string, assignments map[string]string) entry.Entry {
-	base := path.Base(m.Path)
-	ext := path.Ext(base)
-	return entry.Entry{
-		Path:     m.Path,
-		Name:     strings.TrimSuffix(base, ext),
-		Kind:     entry.KindFile,
-		Project:  scanner.ProjectFor(m.Path, markerDirs, projectNames, fallbackProject),
-		Ext:      strings.TrimPrefix(ext, "."),
-		Lang:     lang.NameFor(ext, assignments),
-		Exported: true,
-	}
-}
-
-// extract runs the extractor registered for f's extension and stamps
-// Ext and Lang on every entry it returns (§24 C-20, §25 C-24): one
-// place does this for every language module, rather than each module
-// naming itself. extractable already filtered Refresh's candidates
-// down to extensions lang.For recognises, so the only way ok is false
-// here is a defect in that filtering, not a normal input.
-func extract(f scanner.File, project string, assignments map[string]string) ([]entry.Entry, error) {
-	ext := path.Ext(f.Path)
-	fn, ok := lang.For(ext)
-	if !ok {
-		return nil, fmt.Errorf("no extractor registered for %s", f.Path)
-	}
-	entries, err := fn(f, project)
-	if err != nil {
-		return nil, err
-	}
-	extNoDot := strings.TrimPrefix(ext, ".")
-	name := lang.NameFor(ext, assignments)
-	for i := range entries {
-		entries[i].Ext = extNoDot
-		entries[i].Lang = name
-	}
-	return entries, nil
 }
 
 // readLines reads root/Dir/name as a list of trimmed, non-empty lines

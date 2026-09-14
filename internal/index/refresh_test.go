@@ -235,20 +235,52 @@ func TestRefresh_FileItselfIsASearchTarget(t *testing.T) {
 }
 
 // TestRefresh_NoExtractorFileGetsANameOnlyEntry (§24 C-18/C-19, §25
-// C-24): a file with no registered extractor still gets a file entry —
+// C-24): a file no registered module claims still gets a file entry —
 // that is the property that justifies file-name indexing needing no
 // parser — but no declarations, no doc, no scope, no lang (absent, not
-// a placeholder), and no content read of its own, since an
-// unknown-language entry needs nothing an extractor computes. It still
-// carries Ext: a fact about the file itself, independent of whether
-// its language is known.
+// a placeholder). It still carries Ext: a fact about the file itself,
+// independent of whether its language is known.
 //
-// It does get a files-bucket record now (directive 013): not because
-// anything was extracted from it, but because the differential store
+// Its content is read now (directive 016 §1): with no extension table
+// left outside the language modules, the only way to learn that no
+// module wants README.md is to hand it over and let the generic module
+// answer — so Reparsed (files run through lang.Extract this call)
+// counts it too, alongside retry.go, even though only the generic
+// module actually did anything with it.
+//
+// It gets a files-bucket record (directive 013): not because anything
+// meaningful was extracted from it, but because the differential store
 // needs to know, on a later call, whether this path is still there at
-// all — the record's freshness fields are never re-verified for a file
-// with no extractor (see Refresh's own comment for why), only its
-// presence is tracked.
+// all — the record's freshness fields are still stat-compared like any
+// other file's (§20 C-2), only its declarations are always empty.
+// TestRefresh_LineAndLineTextSurviveAStoreRoundTrip (§31.4): a
+// declaration's Line and LineText are new store.go fields
+// (encodeEntry/decodeEntry) — this exercises the real write-then-read
+// path Refresh uses, not just the in-package extractor test, so a
+// field-count mismatch between encode and decode would fail here even
+// if it left every other field looking fine.
+func TestRefresh_LineAndLineTextSurviveAStoreRoundTrip(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, "retry.go", "package retry\n\n// Retry retries.\nfunc Retry() {}\n")
+	gitCommit(t, root, "retry.go")
+
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
+	for _, e := range allEntries(s) {
+		if e.Name != "Retry" {
+			continue
+		}
+		if e.Line != 4 {
+			t.Errorf("Line = %d, want 4", e.Line)
+		}
+		if e.LineText != "func Retry() {}" {
+			t.Errorf("LineText = %q, want %q", e.LineText, "func Retry() {}")
+		}
+		return
+	}
+	t.Fatal("expected a Retry entry in the store")
+}
+
 func TestRefresh_NoExtractorFileGetsANameOnlyEntry(t *testing.T) {
 	root := gitRepo(t)
 	writeFile(t, root, "retry.go", "package retry\n\nfunc Retry() {}\n")
@@ -261,8 +293,8 @@ func TestRefresh_NoExtractorFileGetsANameOnlyEntry(t *testing.T) {
 	}
 	defer closeStore(t, s)
 	entries := allEntries(s)
-	if stats.Reparsed != 1 {
-		t.Fatalf("stats = %#v, want Reparsed=1 (only retry.go has an extractor)", stats)
+	if stats.Reparsed != 2 {
+		t.Fatalf("stats = %#v, want Reparsed=2 (retry.go and README.md are both handed to lang.Extract, §1)", stats)
 	}
 
 	var found *entry.Entry
@@ -293,11 +325,14 @@ func TestRefresh_NoExtractorFileGetsANameOnlyEntry(t *testing.T) {
 }
 
 // TestRefresh_OperatorAssignmentFillsLangWithoutAddingAnExtractor
-// (§25 C-26): an extension-to-language assignment gives an
-// unextractable file a lang value, but does not make it extractable —
-// it is still never read or re-verified as fresh (directive 013: it
-// does get a files-bucket presence record, the same as any other
-// no-extractor file — see TestRefresh_NoExtractorFileGetsANameOnlyEntry).
+// (§25 C-26): an extension-to-language assignment gives a file no
+// module claims a lang value, but does not make its content mean
+// anything — no module reads .inc's syntax, assigned or not. It still
+// gets a files-bucket presence record (directive 013: same as any
+// other no-module file — see TestRefresh_NoExtractorFileGetsANameOnlyEntry)
+// and, since directive 016 §1, its content is still read once (there is
+// no extension table left to skip that with — see the same test) even
+// though the assignment changes nothing about who reads it.
 func TestRefresh_OperatorAssignmentFillsLangWithoutAddingAnExtractor(t *testing.T) {
 	root := gitRepo(t)
 	writeFile(t, root, "widget.inc", "int widget();\n")
@@ -310,8 +345,8 @@ func TestRefresh_OperatorAssignmentFillsLangWithoutAddingAnExtractor(t *testing.
 	}
 	defer closeStore(t, s)
 	entries := allEntries(s)
-	if stats.Reparsed != 0 {
-		t.Fatalf("stats = %#v, want Reparsed=0 — an assignment does not add an extractor", stats)
+	if stats.Reparsed != 1 {
+		t.Fatalf("stats = %#v, want Reparsed=1 — widget.inc is still handed to lang.Extract (§1), even though the assignment does not add a module", stats)
 	}
 
 	var found *entry.Entry
@@ -660,8 +695,14 @@ func TestRefresh_MarkerChangeUpdatesProjectWithoutReparsing(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeStore(t, s)
-	if stats.Reparsed != 0 {
-		t.Fatalf("Reparsed = %d, want 0 — main.go's own content never changed", stats.Reparsed)
+	// go.mod's own content changed, so it — unlike main.go — takes the
+	// reExtract path and is counted: Reparsed is "files run through
+	// lang.Extract this call" (directive 016 §1: go.mod is itself a
+	// candidate file, handed over and handled by the generic module,
+	// same as README.md would be), not "files a language module found
+	// declarations in."
+	if stats.Reparsed != 1 {
+		t.Fatalf("Reparsed = %d, want 1 (go.mod's own content changed) — main.go's did not, so it must not be counted", stats.Reparsed)
 	}
 	found := false
 	for e := range s.All() {
@@ -722,8 +763,8 @@ func TestRefresh_UnstagedMarkerDeletionUpdatesProject(t *testing.T) {
 
 // TestRefresh_NonExtractableFileContentChangeUpdatesSize (directive 015
 // item 5): §20 C-2 puts stat freshness over the whole candidate set,
-// with no exception for a file with no extractor — 013 wrote one
-// anyway ("never re-verified" for these files' own Record), so a
+// with no exception for a file no language module claims — 013 wrote
+// one anyway ("never re-verified" for these files' own Record), so a
 // content edit to a file like README.md silently left its Size
 // attribute stale forever.
 func TestRefresh_NonExtractableFileContentChangeUpdatesSize(t *testing.T) {
@@ -740,8 +781,12 @@ func TestRefresh_NonExtractableFileContentChangeUpdatesSize(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeStore(t, s)
-	if stats.Reparsed != 0 {
-		t.Fatalf("stats = %#v, want Reparsed=0 — README.md has no extractor", stats)
+	// README.md's content changed, so — like any changed file since
+	// directive 016 §1 removed the extension pre-filter — it is handed
+	// to lang.Extract and counted, even though only the generic module
+	// answers for it.
+	if stats.Reparsed != 1 {
+		t.Fatalf("stats = %#v, want Reparsed=1 — README.md's content changed and is handed to lang.Extract (§1)", stats)
 	}
 	entries := allEntries(s)
 	var found *entry.Entry
@@ -876,9 +921,10 @@ func TestLoadExclude_OrdinaryPatternsAreNotMistakenForAssignments(t *testing.T) 
 
 // TestRefresh_FileEntryCarriesSizeAndDeclCount (directive 009 item 3): a
 // file's KindFile entry reports its byte size and the number of
-// declarations extracted from it — a fact about the file, computed once
-// over the whole entry set (declarations are not known until extraction
-// finishes, after fileEntry already ran), not per declaration.
+// declarations extracted from it — a fact about the file, patched onto
+// whichever entry in lang.Extract's own result is Kind==KindFile once
+// every declaration alongside it is known (directive 016 §1), not
+// computed per declaration.
 func TestRefresh_FileEntryCarriesSizeAndDeclCount(t *testing.T) {
 	root := gitRepo(t)
 	content := "package p\n\nfunc A() {}\nfunc B() {}\n"

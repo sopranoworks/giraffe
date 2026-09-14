@@ -1,87 +1,93 @@
-// Package lang holds the one place file extensions are mapped to a
-// language module (specifications/giraffe.md §18): main and every other
-// package consult this table; none of them contain language-specific
-// logic themselves.
+// Package lang holds the one route from a scanned file to the entries
+// it produces (specifications/giraffe.md §18; directive 016 §1): every
+// registered module is tried, in order, until one handles the file.
+// main and index consult only Extract and RegisteredNames; neither
+// contains language-specific logic itself, and no file extension is
+// named anywhere in this package — only inside the module that claims
+// it.
 package lang
 
 import (
 	"sort"
 
 	"giraffe/internal/entry"
+	"giraffe/internal/lang/file"
 	"giraffe/internal/lang/golang"
 	"giraffe/internal/scanner"
 )
 
-// Extractor is what a language module is: a function that turns one
-// scanned file into the entries found in it. Declared here, in the
-// package that consumes it, not beside either implementation
-// (language-policy G2).
-type Extractor func(f scanner.File, project string) ([]entry.Entry, error)
+// Extractor is what a language module is: given a scanned file, it
+// either handles the file and returns the entries it produced
+// (handled=true), or it does not, and the caller tries the next
+// module in the registration order. A module that recognises the
+// file's extension but fails to parse its content still answers
+// handled=false — "not handled" covers both "this is not mine" and
+// "this was mine and its content did not parse" (directive 016 §1:
+// same-extension-different-language falls out of this without a
+// special case). err, when non-nil, is a diagnostic worth reporting
+// even when a later module went on to handle the file anyway.
+//
+// Declared here, in the package that consumes it, not beside any one
+// implementation (language-policy G2).
+type Extractor func(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, handled bool, err error)
 
 // module pairs a language's own display name — the lang attribute's
-// value (§24 C-20), unmapped per §6 — with the function that extracts
-// from it.
+// value (§24 C-20), unmapped per §6 — with its Extractor, for
+// RegisteredNames' use only. Extract itself never branches on name;
+// dispatch is entirely "ask the next module."
 type module struct {
 	name    string
 	extract Extractor
 }
 
-// registry maps a file extension to the module that extracts from it.
-//
-// Go is the only entry this version registers. The table is nonetheless
-// the extension point languages are added through later (§10: "add a
-// language when it is actually used, driven by observed need") — a data
-// addition here, not a restructuring of main or the scanner.
-var registry = map[string]module{
-	".go": {name: "go", extract: golang.Extract},
+// registered is every language module, tried in the order below. No
+// extension is named here: this is a registration order and nothing
+// else (§18; directive 016 §1). file.Extract is last and always
+// handles, so Extract never falls through with nothing produced.
+var registered = []module{
+	{name: "go", extract: golang.Extract},
+	{name: "", extract: file.Extract},
 }
 
-// For returns the extractor registered for ext, if any.
-func For(ext string) (Extractor, bool) {
-	m, ok := registry[ext]
-	if !ok {
-		return nil, false
+// Extract hands f to each registered module in turn and returns the
+// first one's entries once it answers handled=true. declined carries
+// forward whatever diagnostic a module that declined attached on its
+// way past — e.g. a parse error after a module's own extension
+// matched — for the caller to report (in ## warnings) alongside the
+// entries a later module still produced; it is not itself a failure of
+// this call.
+func Extract(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, declined error) {
+	for _, m := range registered {
+		es, handled, err := m.extract(f, project, assignments)
+		if err != nil {
+			declined = err
+		}
+		if handled {
+			return es, declined
+		}
 	}
-	return m.extract, true
-}
-
-// NameFor returns ext's lang value: a registered extractor's own name
-// if one exists, otherwise the operator's own assignment for ext, if
-// one was written in .giraffe/exclude (§25 C-26). Neither existing is
-// not an error — most extensions have no assigned language — so the
-// result is "", not a placeholder (§25 C-24: "none" was withdrawn
-// because it delivered neither visibility nor a narrowing axis).
-// assignments comes from index.LoadExclude; nil is a valid empty set.
-//
-// An extractor's own registration always wins over an operator
-// assignment for the same extension: the assignment exists to label
-// what giraffe cannot otherwise parse (C-26), not to relabel what it
-// already extracts correctly.
-func NameFor(ext string, assignments map[string]string) string {
-	if m, ok := registry[ext]; ok {
-		return m.name
-	}
-	if name, ok := assignments[ext]; ok {
-		return name
-	}
-	return ""
+	return nil, declined // unreachable: file.Extract always handles
 }
 
 // RegisteredNames returns every distinct language name a registered
-// extractor answers to, sorted. Used to give ## index's language
-// breakdown (§25 C-24) visibility even at zero: "go 0, unknown 181099"
-// for llvm-project is an accurate statement precisely because Go *is*
-// registered and genuinely found nothing, distinct from a language
-// giraffe has no extractor for at all — a distinction the breakdown
-// loses if an unrepresented registered language is simply omitted.
-// Returns names, not extensions, deliberately: a caller outside this
-// package (output.Summarize, via main) treats them as opaque strings,
-// the same way it already treats Kind and Scope values (§21 C-12) —
-// never a reason to import this package into common structures.
+// extractor answers to, sorted — the generic module's own empty name
+// excluded, since it is not a language. Used to give ## index's
+// language breakdown (§25 C-24) visibility even at zero: "go 0,
+// unknown 181099" for llvm-project is an accurate statement precisely
+// because Go is registered and genuinely found nothing, distinct from
+// a language giraffe has no extractor for at all — a distinction the
+// breakdown loses if an unrepresented registered language is simply
+// omitted. Returns names, not extensions, deliberately: a caller
+// outside this package (output.Summarize, via main) treats them as
+// opaque strings, the same way it already treats Kind and Scope values
+// (§21 C-12) — never a reason to import this package into common
+// structures.
 func RegisteredNames() []string {
-	seen := make(map[string]bool, len(registry))
-	for _, m := range registry {
-		seen[m.name] = true
+	seen := make(map[string]bool, len(registered))
+	for _, m := range registered {
+		if m.name != "" {
+			seen[m.name] = true
+		}
 	}
 	names := make([]string, 0, len(seen))
 	for n := range seen {

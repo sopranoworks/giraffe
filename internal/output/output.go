@@ -19,7 +19,7 @@ const (
 
 	// declCountThreshold and sizeThreshold gate directive 009 item 3: a
 	// caller deciding whether to open a file result directly or narrow
-	// it first (with `show`, or with grep) wants to know it is unusually
+	// it first (with --query, or with grep) wants to know it is unusually
 	// large or holds unusually many declarations — not on every line
 	// (giraffe.md §25 C-25), only when the fact would actually change
 	// what happens next. Chosen from the three measurement corpora
@@ -321,19 +321,24 @@ func Format(s Summary, matches []entry.Entry) string {
 	return b.String()
 }
 
-// resultLine renders one result. project, ext and lang each print only
-// when they discriminate (§25 C-25): project only across more than one
-// project (unchanged from §24); ext only when it is not recoverable
-// from lang — either lang is unknown, so ext is all there is, or lang
-// is known but was observed with more than one extension (extVaries);
-// lang only when more than one known language is actually present
-// (showLang), the same "costs a line, so only when it varies" treatment
-// project already gets — printing lang unconditionally would make
-// "lang:go" redundant noise on every line of an all-Go repository,
+// resultLine renders one result. line prints whenever the entry has one
+// (a generic file entry addresses no specific line, §31.4 — absence is
+// the correct encoding, not a placeholder). project, ext and lang each
+// print only when they discriminate (§25 C-25): project only across more
+// than one project (unchanged from §24); ext only when it is not
+// recoverable from lang — either lang is unknown, so ext is all there
+// is, or lang is known but was observed with more than one extension
+// (extVaries); lang only when more than one known language is actually
+// present (showLang), the same "costs a line, so only when it varies"
+// treatment project already gets — printing lang unconditionally would
+// make "lang:go" redundant noise on every line of an all-Go repository,
 // exactly what this section exists to avoid.
 func resultLine(e entry.Entry, showProject, showLang bool, extVaries map[string]bool) string {
 	var line strings.Builder
 	fmt.Fprintf(&line, "name:%s kind:%s path:%s", quote(e.Name), quote(e.Kind), quote(e.Path))
+	if e.Line > 0 {
+		fmt.Fprintf(&line, " line:%d", e.Line)
+	}
 	if showProject && e.Project != "" {
 		fmt.Fprintf(&line, " project:%s", quote(e.Project))
 	}
@@ -356,7 +361,7 @@ func resultLine(e entry.Entry, showProject, showLang bool, extVaries map[string]
 	// Size and DeclCount are facts about the file, not the declaration
 	// (entry.Entry's own doc comment), so only a Kind==KindFile result
 	// carries them — printing declarations: when the file holds enough
-	// of them to be worth browsing with `show` rather than opening
+	// of them to be worth narrowing with --query rather than opening
 	// blind, else size: when the file is large enough that a caller
 	// about to grep it should know first (directive 009 item 3;
 	// giraffe.md §25 C-25: only when it changes the decision).
@@ -372,6 +377,18 @@ func resultLine(e entry.Entry, showProject, showLang bool, extVaries map[string]
 		fmt.Fprintf(&line, " %s:%s", p.Name, quote(p.Value))
 	}
 	line.WriteByte('\n')
+	// The declaration's own line (§31.4) prints first — it is what lets
+	// a caller discard a candidate without opening the file at all
+	// ("struct X {" vs "v := X.New" answer the same name search
+	// differently, and neither kind nor Doc distinguishes them) — then
+	// Doc, which says what the declaration is for rather than what it
+	// looks like. Both print when both are present; whether that binds
+	// the response budget in practice is measured, not assumed (see the
+	// report: the source line is typically shorter than Doc, so the
+	// common case costs nothing extra).
+	if e.LineText != "" {
+		fmt.Fprintf(&line, "  %s\n", e.LineText)
+	}
 	if e.Doc != "" {
 		fmt.Fprintf(&line, "  %s\n", e.Doc)
 	}

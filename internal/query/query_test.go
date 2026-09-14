@@ -160,9 +160,10 @@ func TestFilter_MatchesKindAndScope(t *testing.T) {
 // TestParse_PositionAttributeIsFilterable (directive 015 item 2): module,
 // receiver, type — any language position, present or future — are
 // filterable the moment ValidAttributes reports them, with no second
-// list to update. Reproduces the exact gap the audit found live:
-// `giraffe show module:...` erroring on an attribute printed on every
-// result line.
+// list to update. Reproduces the exact gap the audit found live: a
+// `--query 'module:...'` erroring on an attribute printed on every
+// result line (found via the now-withdrawn `show`, §31.3, but the gap
+// was in Parse/--query itself).
 func TestParse_PositionAttributeIsFilterable(t *testing.T) {
 	valid := map[string]bool{"module": true, "receiver": true, "type": true}
 	f, err := Parse("module:internal/limits", valid)
@@ -207,38 +208,15 @@ func TestFilter_MatchesPositionAttribute(t *testing.T) {
 
 // TestParse_NameStaysExcludedFromQuery: unchanged by directive 015 —
 // find's positional word already substring-matches name, so --query
-// itself continues to reject it (§23's "accepted as reported"). Only
-// ParseAddress (show) accepts it.
+// itself continues to reject it (§23's "accepted as reported"). name
+// was never given a second way in: directive 016 §2 withdrew show,
+// which was the only other caller that needed it (ParseAddress), and
+// browsing a place (§31.3) is entries at a path or project, never one
+// singled out by name.
 func TestParse_NameStaysExcludedFromQuery(t *testing.T) {
 	valid := map[string]bool{"name": true}
 	if _, err := Parse("name:Retry", valid); err == nil {
 		t.Fatal("expected --query to still reject name")
-	}
-}
-
-// TestParseAddress_AllowsName (§4): show addresses a declaration by
-// attributes copied verbatim from a find result line, which always
-// includes name — the one attribute Parse (--query) excludes.
-func TestParseAddress_AllowsName(t *testing.T) {
-	valid := map[string]bool{"name": true, "kind": true, "path": true}
-	f, err := ParseAddress("name:Retry kind:func path:internal/retry/retry.go", valid)
-	if err != nil {
-		t.Fatalf("expected ParseAddress to accept name, got: %v", err)
-	}
-	if f["name"][0] != "Retry" {
-		t.Fatalf("got %v", f)
-	}
-}
-
-// TestParseAddress_StillRejectsUnknownAndMalformed: ParseAddress relaxes
-// only the name exclusion, not §5's other error rules.
-func TestParseAddress_StillRejectsUnknownAndMalformed(t *testing.T) {
-	valid := map[string]bool{"name": true, "path": true}
-	if _, err := ParseAddress("bogus:x", valid); err == nil {
-		t.Fatal("expected an error for an unknown attribute")
-	}
-	if _, err := ParseAddress("malformed", valid); err == nil {
-		t.Fatal("expected an error for a malformed attribute")
 	}
 }
 

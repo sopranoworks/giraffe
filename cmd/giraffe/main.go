@@ -59,10 +59,10 @@ type rootResult struct {
 }
 
 // searchState is the outcome of resolving every root, refreshing its
-// index, and merging the results — the work find and show both need
-// before doing anything specific to either. Building it once and
-// branching afterward keeps their shared setup in one place rather than
-// two copies that would drift (code-manners M1).
+// index, and merging the results — the work every subcommand needs
+// before doing anything specific to itself. Building it once here keeps
+// that shared setup in one place rather than copies that would drift
+// (code-manners M1).
 type searchState struct {
 	entries           query.Entries  // §30 C-46: every root's store, merged; nothing decoded until Search/Suggest/Browse/Summarize actually range over it
 	stores            []*index.Store // closed once this invocation is done querying — see run
@@ -81,11 +81,11 @@ type searchState struct {
 }
 
 func run(ctx context.Context, args []string) int {
-	// find, show and prepare are mandatory and never implied (§4): a bare
-	// word is not treated as a search term, since all three are
-	// themselves plausible identifiers in real code.
-	if len(args) == 0 || (args[0] != "find" && args[0] != "show" && args[0] != "prepare") {
-		fmt.Fprintln(os.Stderr, "usage: giraffe find <word> [--query '<attr>:<value> ...'] | giraffe show <attr>:<value> [<attr>:<value> ...] | giraffe prepare")
+	// find and prepare are mandatory and never implied (§4): a bare word
+	// is not treated as a search term, since both are themselves
+	// plausible identifiers in real code.
+	if len(args) == 0 || (args[0] != "find" && args[0] != "prepare") {
+		fmt.Fprintln(os.Stderr, "usage: giraffe find [<word>] [--query '<attr>:<value> ...'] | giraffe prepare")
 		return 2
 	}
 	sub, rest := args[0], args[1:]
@@ -103,15 +103,13 @@ func run(ctx context.Context, args []string) int {
 	switch sub {
 	case "find":
 		return runFind(rest, st)
-	case "show":
-		return runShow(rest, st)
 	default: // "prepare", the only other value run reaches
 		return runPrepare(rest, st)
 	}
 }
 
 // buildSearchState resolves every configured root, refreshes each one's
-// index, and merges them into the state find and show both search over.
+// index, and merges them into the state every subcommand searches over.
 func buildSearchState(ctx context.Context) (searchState, int) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -248,14 +246,19 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 	}, 0
 }
 
+// runFind implements `giraffe find [<word>] [--query ...]`. Two modes,
+// both in the specification (§31.3): a word searches and ranks by
+// relevance (query.Search); no word — only --query — browses a place,
+// everything at it in path/name order (query.Browse). At least one of
+// the two must be given, or there is nothing to search or browse.
 func runFind(args []string, st searchState) int {
 	word, queryRaw, err := parseArgs(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "giraffe:", err)
 		return 2
 	}
-	if word == "" {
-		fmt.Fprintln(os.Stderr, "usage: giraffe find <word> [--query '<attr>:<value> ...']")
+	if word == "" && queryRaw == "" {
+		fmt.Fprintln(os.Stderr, "usage: giraffe find <word> [--query '<attr>:<value> ...'] | giraffe find --query '<attr>:<value> ...'")
 		return 2
 	}
 
@@ -267,65 +270,22 @@ func runFind(args []string, st searchState) int {
 			return 2
 		}
 	}
-	matches := query.Search(st.entries, word, filter, st.invocationProject)
 
 	summary := output.Summarize(st.entries.All(), st.commitLine, st.reparsed, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
+
+	if word == "" {
+		// Browsing a place (§31.3): no search word to rank against, so
+		// there is nothing to suggest either — TryNext only makes sense
+		// once a word has actually missed.
+		matches := query.Browse(st.entries, filter, st.invocationProject)
+		fmt.Print(output.Format(summary, matches))
+		return 0
+	}
+
+	matches := query.Search(st.entries, word, filter, st.invocationProject)
 	if len(matches) == 0 {
 		summary.TryNext = query.Suggest(st.entries, word, st.invocationProject)
 	}
-
-	fmt.Print(output.Format(summary, matches))
-	return 0
-}
-
-// runShow implements `giraffe show <attr>:<value>` (§4, §22 item 5): two
-// readings, both in the specification, distinguished by whether name is
-// among the given attributes.
-//
-//   - name given: §4's "the declaration itself, addressed by attributes
-//     copied from a find result line" — a result line always carries
-//     name, so its presence is exactly the signal that the attributes
-//     pin one specific declaration rather than a place. Anything but
-//     exactly one match is an error: "the declaration" is singular.
-//   - name absent: §22's later reframing — browsing a place, everything
-//     at it, file entries included. Unchanged.
-//
-// Both render in the same result-line shape find already uses (reusing
-// output.Format rather than a second rendering path, code-manners D5).
-// query.ParseAddress is query.Parse's own tokenizer with name allowed —
-// the one attribute --query itself excludes, since find's positional
-// word already matches it a different way (see query.go).
-func runShow(args []string, st searchState) int {
-	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: giraffe show <attr>:<value> [<attr>:<value> ...]")
-		return 2
-	}
-	filter, err := query.ParseAddress(args[0], query.ValidAttributes(st.entries))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "giraffe:", err)
-		return 2
-	}
-	if len(filter) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: giraffe show <attr>:<value> [<attr>:<value> ...]")
-		return 2
-	}
-
-	matches := query.Browse(st.entries, filter, st.invocationProject)
-
-	if _, byName := filter["name"]; byName {
-		switch len(matches) {
-		case 0:
-			fmt.Fprintln(os.Stderr, "giraffe: no declaration matches those attributes")
-			return 2
-		case 1:
-			// exactly one — "the declaration itself" (§4)
-		default:
-			fmt.Fprintf(os.Stderr, "giraffe: %d declarations match those attributes; narrow further (e.g. add path:)\n", len(matches))
-			return 2
-		}
-	}
-
-	summary := output.Summarize(st.entries.All(), st.commitLine, st.reparsed, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
 	fmt.Print(output.Format(summary, matches))
 	return 0
 }
