@@ -39,7 +39,7 @@ func gitRepo(t *testing.T) string {
 	run("add", "main.go", "vendor/dep/dep.go", "pkg/util_test.go")
 	run("commit", "-q", "-m", "initial")
 	write("pkg/new.go", "package pkg\n") // untracked
-	write("README.md", "not go\n")       // untracked, no extractor but covered by §24 C-19
+	write("README.md", "not go\n")       // untracked, no extractor, still a candidate (directive 017 §2)
 	dir, err := Root(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +68,7 @@ func TestList_ResolvesTrackedAndUntracked_AppliesCoverageAndExclude(t *testing.T
 	want := map[string]bool{
 		"main.go":    true,  // tracked
 		"pkg/new.go": false, // untracked
-		"README.md":  false, // untracked, no extractor, still covered by §24 C-19
+		"README.md":  false, // untracked, no extractor, still a candidate (directive 017 §2)
 	}
 	for path, tracked := range want {
 		hadHash, ok := got[path]
@@ -128,8 +128,8 @@ func TestList_ScopeExcludeIsAdditional(t *testing.T) {
 }
 
 // writeUntracked adds an extra file to an already-created repo without
-// staging it, for the coverage tests below (§24 C-19), which care about
-// path shape rather than tracked/untracked status.
+// staging it, for TestList_NoLongerAppliesAnyCoverageDefault below,
+// which cares about path shape rather than tracked/untracked status.
 func writeUntracked(t *testing.T, dir, rel, content string) {
 	t.Helper()
 	full := filepath.Join(dir, rel)
@@ -141,42 +141,18 @@ func writeUntracked(t *testing.T, dir, rel, content string) {
 	}
 }
 
-// TestList_CoversKnownExtensionlessFiles (§24 C-19, list 1): a known
-// build/doc file with no extension is included by name; an unlisted
-// extensionless file is skipped, since it has exactly the shape of a
-// compiled binary and defaulting to include is the dangerous direction.
-func TestList_CoversKnownExtensionlessFiles(t *testing.T) {
+// TestList_NoLongerAppliesAnyCoverageDefault (directive 017 §2: "the
+// scanner stops knowing about extensions entirely" — supersedes §24
+// C-19's coverage rules, which moved to giraffe/internal/lang/exclude).
+// Every one of these paths used to be filtered by extension or
+// extensionless shape here; List now returns all of them, since which
+// of them is worth indexing is decided downstream, per file, by the
+// language-module chain.
+func TestList_NoLongerAppliesAnyCoverageDefault(t *testing.T) {
 	dir := gitRepo(t)
 	writeUntracked(t, dir, "Makefile", "all:\n\techo hi\n")
-	writeUntracked(t, dir, "CMakeLists.txt", "project(x)\n") // known name despite its ".txt" extension
-	writeUntracked(t, dir, "configure", "#!/bin/sh\n")       // unknown, truly extensionless: shape of a compiled binary
-
-	metas, err := List(context.Background(), dir, Scope{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := make(map[string]bool)
-	for _, m := range metas {
-		got[m.Path] = true
-	}
-	if !got["Makefile"] {
-		t.Error("expected Makefile to be covered")
-	}
-	if !got["CMakeLists.txt"] {
-		t.Error("expected CMakeLists.txt to be covered by name, despite its .txt extension")
-	}
-	if got["configure"] {
-		t.Error("expected configure (unlisted extensionless) to be skipped")
-	}
-}
-
-// TestList_DeniesBinaryExtensions_IncludesEverythingElse (§24 C-19,
-// list 2): the extension already declares the type, so only the deny
-// list is excluded; anything extensioned and not on it — including a
-// language giraffe has no extractor for — is covered.
-func TestList_DeniesBinaryExtensions_IncludesEverythingElse(t *testing.T) {
-	dir := gitRepo(t)
-	writeUntracked(t, dir, "logo.png", "\x89PNG")
+	writeUntracked(t, dir, "configure", "#!/bin/sh\n") // unknown extensionless shape; still a candidate now
+	writeUntracked(t, dir, "logo.png", "\x89PNG")      // denied extension; still a candidate now
 	writeUntracked(t, dir, "widget.cpp", "int main() {}\n")
 
 	metas, err := List(context.Background(), dir, Scope{})
@@ -187,47 +163,37 @@ func TestList_DeniesBinaryExtensions_IncludesEverythingElse(t *testing.T) {
 	for _, m := range metas {
 		got[m.Path] = true
 	}
-	if got["logo.png"] {
-		t.Error("expected logo.png (a denied extension) to be excluded")
-	}
-	if !got["widget.cpp"] {
-		t.Error("expected widget.cpp to be covered even though giraffe has no C++ extractor")
-	}
-}
-
-// TestList_NegatedPatternOverridesCoverage (§24 C-19: "extendable and
-// overridable through .giraffe/exclude"): a leading "!" forces
-// inclusion of a file the built-in deny list would otherwise drop.
-func TestList_NegatedPatternOverridesCoverage(t *testing.T) {
-	dir := gitRepo(t)
-	writeUntracked(t, dir, "logo.png", "\x89PNG")
-
-	metas, err := List(context.Background(), dir, Scope{Exclude: []Pattern{"!logo.png"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, m := range metas {
-		if m.Path == "logo.png" {
-			return
+	for _, want := range []string{"Makefile", "configure", "logo.png", "widget.cpp"} {
+		if !got[want] {
+			t.Errorf("expected %s to be a candidate; List no longer filters by extension or name shape", want)
 		}
 	}
-	t.Fatalf("expected a negated pattern to force logo.png back in, got %v", metas)
 }
 
-func TestRead_ReadsExactlyTheGivenPaths(t *testing.T) {
+func TestOpen_ReadsExactlyTheGivenPath(t *testing.T) {
 	dir := gitRepo(t)
-	files, err := Read(context.Background(), dir, []string{"main.go"})
+	f := Open(dir, FileMeta{Path: "main.go"})
+	content, err := f.Content()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 {
-		t.Fatalf("expected exactly 1 file, got %d", len(files))
+	if f.Path != "main.go" {
+		t.Errorf("path = %q", f.Path)
 	}
-	if files[0].Path != "main.go" {
-		t.Errorf("path = %q", files[0].Path)
+	if string(content) != "package main\n" {
+		t.Errorf("content = %q", content)
 	}
-	if string(files[0].Content) != "package main\n" {
-		t.Errorf("content = %q", files[0].Content)
+}
+
+// TestOpen_DoesNotReadUntilContentIsCalled (directive 017 §1): Open
+// itself never touches the filesystem — only Content does — so a File
+// for a path that does not exist on disk is still constructed without
+// error, and only errors once something actually asks for the bytes.
+func TestOpen_DoesNotReadUntilContentIsCalled(t *testing.T) {
+	dir := gitRepo(t)
+	f := Open(dir, FileMeta{Path: "does-not-exist.go"})
+	if _, err := f.Content(); err == nil {
+		t.Fatal("expected Content() to fail for a nonexistent file")
 	}
 }
 

@@ -3,10 +3,10 @@
 // `git ls-files -s`, untracked paths from `git ls-files --others
 // --exclude-standard` — without opening anything, so a caller can decide,
 // from blob hashes alone, which files are already indexed and can be left
-// unread (§9: "unchanged blob → file is not reopened"). Read then opens
-// exactly the paths it is given, with a fixed number of workers, so peak
-// open descriptors is computable in advance (§3, §18). Language modules
-// never open a file themselves; they receive File values.
+// unread (§9: "unchanged blob → file is not reopened"). Open then returns
+// a File whose content is read from disk only when a caller actually asks
+// for it (directive 017 §1). Language modules never open a file
+// themselves; they receive File values.
 package scanner
 
 import (
@@ -20,12 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 )
-
-// workers is the fixed concurrency for reading file contents (§3 C4: fixed
-// and small, so peak open descriptors is computable in advance).
-const workers = 8
 
 // FileMeta is one candidate file's identity, without its contents.
 type FileMeta struct {
@@ -48,12 +43,56 @@ type FileMeta struct {
 	Size int64
 }
 
-// File is one file's resolved identity and contents, as delivered to a
-// language module.
+// File is one file's resolved identity, as delivered to a language
+// module. Content is not carried on the value itself (directive 017
+// §1): a module gets it only by calling Content(), so a module that
+// never needs content — the exclusion module, the generic module —
+// never causes a read. Language modules still never touch the
+// filesystem themselves (§18): the read behind Content is scanner's
+// own, via Open below.
 type File struct {
 	Path     string
 	BlobHash string
-	Content  []byte
+	content  func() ([]byte, error)
+}
+
+// Content reads f's contents, the first time a caller actually asks
+// for them (directive 017 §1). A File with nothing behind it (the zero
+// value) reports no content and no error — never reached by a real
+// caller, since every File in this package is built by Open or
+// WithContent, both of which always set it.
+func (f File) Content() ([]byte, error) {
+	if f.content == nil {
+		return nil, nil
+	}
+	return f.content()
+}
+
+// Open returns a File for m, under root, whose content is read from
+// disk only when a caller calls Content() — scanner's one filesystem
+// read implementation (§18), deferred rather than run eagerly for
+// every candidate file (directive 017 §1: most never need it, and the
+// modules that do not read now never trigger the read at all).
+func Open(root string, m FileMeta) File {
+	p := m.Path
+	return File{
+		Path:     p,
+		BlobHash: m.BlobHash,
+		content: func() ([]byte, error) {
+			b, err := os.ReadFile(filepath.Join(root, p))
+			if err != nil {
+				return nil, fmt.Errorf("read %s: %w", p, err)
+			}
+			return b, nil
+		},
+	}
+}
+
+// WithContent returns a File whose content is already known — fixed
+// in-memory bytes, not read from disk. Used by tests, which have no
+// file on disk to defer a read against.
+func WithContent(path string, content []byte) File {
+	return File{Path: path, content: func() ([]byte, error) { return content, nil }}
 }
 
 // Pattern is one exclusion rule. A trailing "/" matches a directory and
@@ -85,11 +124,16 @@ func (p Pattern) excludes(relPath string) bool {
 // same mental model .gitignore already uses — Pattern's own doc
 // comment) and returns the pattern with that prefix stripped. A
 // negated pattern forces inclusion of whatever it matches, overriding
-// every other exclusion below, including the two coverage lists (§24
-// C-19: "extendable and overridable through .giraffe/exclude" — a
-// plain pattern extends either list by excluding more; a negated one
-// overrides a list's default by including something it would have
-// dropped).
+// every other exclusion pattern below it in the merged list.
+//
+// It no longer overrides the exclusion module's deny list the way it
+// once overrode scanner's own coverage default (§24 C-19): that
+// default moved out of this package entirely (directive 017 §2), to a
+// module dispatch stage a scanner Pattern cannot reach. A denied
+// extension (logo.png) can no longer be pulled back in with
+// `!logo.png` in .giraffe/exclude — named here, and in the completion
+// report, as a real behaviour change this directive did not ask for
+// and does not restore.
 func (p Pattern) negation() (bool, Pattern) {
 	if strings.HasPrefix(string(p), "!") {
 		return true, Pattern(strings.TrimPrefix(string(p), "!"))
@@ -122,46 +166,26 @@ var defaultExclude = []Pattern{
 	"*.pb.go",
 }
 
-// knownExtensionless are the extensionless files worth indexing by name
-// (§24 C-19): common build and doc files whose name alone says what
-// they are. An extensionless file not on this list is skipped — node,
-// configure have exactly the shape of a compiled binary, and defaulting
-// to include is the dangerous direction. Checked by exact basename,
-// before extension is considered at all, so CMakeLists.txt belongs here
-// despite technically having a ".txt" extension: its name is what
-// identifies it, the same as the others on this list.
-//
-// The directive's own third example, a.out, is not actually
-// extensionless under path.Ext (it has ".out") — named in the
-// completion report rather than silently reclassified; ".out" is
-// covered by the deny list below instead, so the outcome the directive
-// asked for still holds.
-var knownExtensionless = []string{
-	"Makefile", "Dockerfile", "CMakeLists.txt", "LICENSE", "README",
-	"Rakefile", "Gemfile", "Procfile", "Vagrantfile",
-}
-
-// deniedExtensions are binary, compiled, and archive formats excluded
-// from file-name indexing by default (§24 C-19). The extension already
-// declares the type, so a deny list is enough: no content is ever read
-// to decide, and everything not on this list is included.
-var deniedExtensions = []string{
-	".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".webp",
-	".o", ".out", ".so", ".a", ".dylib", ".dll", ".exe", ".class", ".pyc", ".wasm",
-	".zip", ".tar", ".gz", ".bz2", ".xz", ".jar", ".war", ".pdf",
-	".woff", ".woff2", ".ttf", ".eot", ".mp3", ".mp4", ".mov",
-}
-
-// Scope selects what List considers: the paths left out, on top of the
-// coverage rules below. Extension no longer gates the candidate set
-// itself (§24 C-18) — that gating produced an empty candidate list for
-// any repository with no registered extractor, which threw away the
-// one property that justified file-name indexing: it needs no parser,
-// so it can cover every language today. Which files get an extractor
-// run over them is decided downstream, per file, against the registry
-// (giraffe/internal/lang), not here.
+// Scope selects what List considers: the paths left out. Extension —
+// or extensionless shape — no longer gates the candidate set itself
+// (§24 C-18, extended by directive 017 §2): List returns every path
+// exclusion leaves standing, full stop. Which of those a language
+// module actually wants, including whether to exclude it from the
+// index entirely, is decided downstream, per file, by the registered
+// chain (giraffe/internal/lang) — the scanner names no extension and
+// no filename shape anywhere in this package.
 type Scope struct {
 	Exclude []Pattern
+
+	// Markers are extra root-marker basenames to recognise, on top of
+	// markerNames below — a registered language module's own root
+	// marker (go.mod, via lang.RegisteredMarkers()), threaded in by
+	// the caller rather than imported here: scanner must not depend on
+	// lang, which already depends on scanner for scanner.File
+	// (directive 017 §3 — "one authority over those names": go.mod is
+	// named once, in the golang module, and scanner only ever receives
+	// it).
+	Markers []string
 }
 
 // Root resolves and canonicalises a scan root (symlinks followed once, up
@@ -174,10 +198,11 @@ func Root(root string) (string, error) {
 	return resolved, nil
 }
 
-// List resolves the current file set — tracked and untracked, filtered by
-// scope and by the coverage rules above (§24 C-18/C-19) — without reading
-// any of it. Order is deterministic (path order), independent of anything
-// about how the files were produced.
+// List resolves the current file set — tracked and untracked, filtered
+// only by scope's exclusion patterns (§19; directive 017 §2 removed
+// the coverage-by-extension default this doc comment used to also
+// describe) — without reading any of it. Order is deterministic (path
+// order), independent of anything about how the files were produced.
 func List(ctx context.Context, root string, scope Scope) ([]FileMeta, error) {
 	tracked, untracked, err := enumerate(ctx, root)
 	if err != nil {
@@ -223,7 +248,7 @@ func EnumerateUntracked(ctx context.Context, root string) ([]string, error) {
 // re-running git for the tracked half without duplicating filterMetas
 // or markersOf.
 func Combine(root string, tracked map[string]string, untracked []string, scope Scope) (metas []FileMeta, markerPaths []string) {
-	return filterMetas(root, tracked, untracked, scope), markersOf(tracked, untracked)
+	return filterMetas(root, tracked, untracked, scope), markersOf(tracked, untracked, mergedMarkers(scope))
 }
 
 // GitIndexFingerprint reports the mtime and size of root's .git/index —
@@ -262,6 +287,19 @@ func mergedExclude(scope Scope) []Pattern {
 	exclude = append(exclude, defaultExclude...)
 	exclude = append(exclude, scope.Exclude...)
 	return exclude
+}
+
+// mergedMarkers is markerNames — the root markers scanner recognises on
+// its own, because no registered language module claims them yet
+// (directive 017 §3) — plus scope.Markers, a registered module's own
+// marker (go.mod, from lang.RegisteredMarkers()). Factored out so every
+// caller below combines the two the same way, without restating the
+// append.
+func mergedMarkers(scope Scope) []string {
+	markers := make([]string, 0, len(markerNames)+len(scope.Markers))
+	markers = append(markers, markerNames...)
+	markers = append(markers, scope.Markers...)
+	return markers
 }
 
 func filterMetas(root string, tracked map[string]string, untracked []string, scope Scope) []FileMeta {
@@ -303,12 +341,11 @@ func statSize(root, relPath string) int64 {
 }
 
 // FilterTracked filters tracked's paths through scope's exclusion rules
-// and the coverage defaults (§24 C-18/C-19), and separately finds every
-// marker file among them regardless of exclusion (§20 C-3: root
-// discovery must see go.mod even where an exclude pattern would
-// otherwise drop it — markersOf's own rule, reproduced here since a
-// cached tracked half needs both without re-deriving one from the
-// other).
+// (§19), and separately finds every marker file among them regardless
+// of exclusion (§20 C-3: root discovery must see go.mod even where an
+// exclude pattern would otherwise drop it — markersOf's own rule,
+// reproduced here since a cached tracked half needs both without
+// re-deriving one from the other).
 //
 // Exposed so a persistent enumeration cache (index.Refresh) can filter
 // and mark the tracked half once and reuse both results across calls:
@@ -317,11 +354,12 @@ func statSize(root, relPath string) int64 {
 // enumeration is cached (§26 C-28/item 5).
 func FilterTracked(root string, tracked map[string]string, scope Scope) (metas []FileMeta, markerPaths []string) {
 	exclude := mergedExclude(scope)
+	markers := mergedMarkers(scope)
 	for relPath, hash := range tracked {
 		if included(relPath, exclude) {
 			metas = append(metas, FileMeta{Path: relPath, BlobHash: hash, Size: statSize(root, relPath)})
 		}
-		if isMarker(relPath) {
+		if isMarker(relPath, markers) {
 			markerPaths = append(markerPaths, relPath)
 		}
 	}
@@ -334,11 +372,12 @@ func FilterTracked(root string, tracked map[string]string, scope Scope) (metas [
 // filtering and marker detection on every call.
 func FilterUntracked(root string, untracked []string, scope Scope) (metas []FileMeta, markerPaths []string) {
 	exclude := mergedExclude(scope)
+	markers := mergedMarkers(scope)
 	for _, relPath := range untracked {
 		if included(relPath, exclude) {
 			metas = append(metas, FileMeta{Path: relPath, BlobHash: "", Size: statSize(root, relPath)})
 		}
-		if isMarker(relPath) {
+		if isMarker(relPath, markers) {
 			markerPaths = append(markerPaths, relPath)
 		}
 	}
@@ -371,14 +410,16 @@ func MergeSortedMetas(a, b []FileMeta) []FileMeta {
 	return out
 }
 
-// included reports whether relPath survives scanning: the exclusion
-// patterns (default plus project-level, §19) first, then — for
-// anything no pattern named — the coverage rules above (§24 C-19). A
-// negated pattern is checked last and wins over everything above it,
-// including the coverage rules, so an operator can pull a specific
-// file back in without having to fight the built-in lists.
+// included reports whether relPath survives scanning: everything is a
+// candidate by default (directive 017 §2 — the scanner no longer has a
+// coverage default keyed on extension or filename shape; that decision
+// moved to the exclusion module, first in giraffe/internal/lang's
+// chain) except what an exclusion pattern (default plus project-level,
+// §19) removes. A negated pattern wins over a plain one, so an operator
+// can pull a specific file back in without having to fight the
+// built-in patterns.
 func included(relPath string, exclude []Pattern) bool {
-	keep := coverage(relPath)
+	keep := true
 	for _, p := range exclude {
 		if neg, plain := p.negation(); neg {
 			if plain.excludes(relPath) {
@@ -393,30 +434,6 @@ func included(relPath string, exclude []Pattern) bool {
 	return keep
 }
 
-// coverage is the default answer before any exclude pattern is applied:
-// a known extensionless file, or any extensioned file whose extension
-// is not on the deny list (§24 C-19). Decided from the path string
-// alone — no stat, no open — since a misclassification here costs one
-// index line and no I/O, never a wrong read.
-func coverage(relPath string) bool {
-	base := path.Base(relPath)
-	for _, n := range knownExtensionless {
-		if base == n {
-			return true
-		}
-	}
-	ext := path.Ext(relPath)
-	if ext == "" {
-		return false // shape of a compiled binary; defaulting to include is the dangerous direction
-	}
-	for _, d := range deniedExtensions {
-		if ext == d {
-			return false
-		}
-	}
-	return true
-}
-
 // Discover resolves, from one git-based enumeration, both the
 // scope-filtered candidate set List alone would return and every marker
 // file path MarkerFiles alone would return.
@@ -425,8 +442,8 @@ func coverage(relPath string) bool {
 // Step 1): Refresh calling List and MarkerFiles independently paid for
 // `git ls-files` (tracked and untracked) twice, at roughly the combined
 // cost of everything else Refresh does. Both need the same two lists —
-// List filters them by extension, MarkerFiles filters them by marker
-// name — so fetching once and deriving both removes the duplication
+// List filters them by exclusion pattern, MarkerFiles filters them by
+// marker name — so fetching once and deriving both removes the duplication
 // structurally rather than by remembering to call one before the other.
 func Discover(ctx context.Context, root string, scope Scope) (metas []FileMeta, markerPaths []string, err error) {
 	tracked, untracked, err := enumerate(ctx, root)
@@ -435,58 +452,6 @@ func Discover(ctx context.Context, root string, scope Scope) (metas []FileMeta, 
 	}
 	metas, markerPaths = Combine(root, tracked, untracked, scope)
 	return metas, markerPaths, nil
-}
-
-// Read opens exactly the given paths, once each, with a fixed pool of
-// workers. Callers pass only the paths that actually need (re-)reading —
-// typically a subset List returned, after comparing blob hashes against an
-// existing index.
-func Read(ctx context.Context, root string, paths []string) ([]File, error) {
-	results := make([]File, len(paths))
-	jobs := make(chan int)
-	errc := make(chan error, len(paths))
-
-	n := workers
-	if n > len(paths) {
-		n = len(paths)
-	}
-	var wg sync.WaitGroup
-	for w := 0; w < n; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range jobs {
-				content, err := os.ReadFile(filepath.Join(root, paths[i]))
-				if err != nil {
-					errc <- fmt.Errorf("read %s: %w", paths[i], err)
-					continue
-				}
-				results[i] = File{Path: paths[i], Content: content}
-			}
-		}()
-	}
-
-	go func() {
-		defer close(jobs)
-		for i := range paths {
-			select {
-			case jobs <- i:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	wg.Wait()
-	close(errc)
-
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	for err := range errc {
-		return nil, err // report the first read failure
-	}
-	return results, nil
 }
 
 func trackedFiles(ctx context.Context, root string) (map[string]string, error) {

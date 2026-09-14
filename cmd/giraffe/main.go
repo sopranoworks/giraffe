@@ -154,7 +154,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 		for _, name := range assignments {
 			knownLanguageSet[name] = true
 		}
-		scope := scanner.Scope{Exclude: exclude}
+		scope := scanner.Scope{Exclude: exclude, Markers: lang.RegisteredMarkers()}
 
 		store, stats, err := index.Refresh(ctx, r, scope, assignments)
 		if err != nil {

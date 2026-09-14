@@ -26,11 +26,24 @@ func TestMarkerDirs_NoMarkerAnywhere(t *testing.T) {
 }
 
 func TestIsMarker_GlobMarker(t *testing.T) {
-	if !isMarker("App.csproj") {
+	if !isMarker("App.csproj", markerNames) {
 		t.Error("App.csproj should match the *.csproj marker")
 	}
-	if isMarker("notes.txt") {
+	if isMarker("notes.txt", markerNames) {
 		t.Error("notes.txt should not be a marker")
+	}
+}
+
+// TestIsMarker_ExtraMarkerFromAScope (directive 017 §3): a registered
+// language module's own marker (go.mod today) is not in markerNames —
+// it reaches isMarker only via the extra list a caller (mergedMarkers,
+// MarkerFiles) merges in, the same way Scope.Markers does.
+func TestIsMarker_ExtraMarkerFromAScope(t *testing.T) {
+	if isMarker("go.mod", markerNames) {
+		t.Error("go.mod should not be in scanner's own markerNames; it belongs to the golang module now")
+	}
+	if !isMarker("go.mod", append(append([]string(nil), markerNames...), "go.mod")) {
+		t.Error("go.mod should be recognised once merged in as an extra marker")
 	}
 }
 

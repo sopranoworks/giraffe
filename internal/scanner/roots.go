@@ -8,21 +8,26 @@ import (
 	"strings"
 )
 
-// markerNames are the marker files that identify a project root
-// (specifications/giraffe.md §20 C-3). A directory containing one of
-// these is a root; roots are discovered from the same file list `git
-// ls-files` already produced, not configured.
+// markerNames are the root markers scanner recognises on its own
+// (specifications/giraffe.md §20 C-3): every ecosystem giraffe has no
+// registered language module for yet, so there is no module to move
+// this knowledge into. go.mod is deliberately not here — it moved to
+// golang.Marker (directive 017 §3: "recognising go.mod is Go's
+// knowledge") — a caller merges it, and any other registered module's
+// own marker, back in via Scope.Markers (see mergedMarkers in
+// scanner.go); this is the one list with no other owner, not a second
+// copy of a name a module already owns.
 //
 // Markers left out rather than guessed at: any marker whose declared-name
 // field would need its own parser to be useful (Cargo.toml's [package]
 // name, package.json's "name", pom.xml's <artifactId>) is still a valid
 // root boundary here — it just does not feed a language position, since
 // no language module for that ecosystem exists in this version.
-var markerNames = []string{"go.mod", "Cargo.toml", "package.json", "pom.xml", "build.sbt", "*.csproj"}
+var markerNames = []string{"Cargo.toml", "package.json", "pom.xml", "build.sbt", "*.csproj"}
 
-func isMarker(relPath string) bool {
+func isMarker(relPath string, markers []string) bool {
 	base := path.Base(relPath)
-	for _, m := range markerNames {
+	for _, m := range markers {
 		if ok, _ := path.Match(m, base); ok {
 			return true
 		}
@@ -31,36 +36,39 @@ func isMarker(relPath string) bool {
 }
 
 // MarkerFiles returns every marker file's path in the repository,
-// regardless of scope. Root discovery must see go.mod even though an
+// regardless of scope. Root discovery must see a marker even though an
 // exclude pattern could otherwise drop it — a marker is not itself an
 // extraction input (§20 C-3), so it needs its own, unfiltered
-// enumeration rather than reusing List's scoped result.
+// enumeration rather than reusing List's scoped result. extra names a
+// registered language module's own marker on top of markerNames, the
+// same way Scope.Markers does for FilterTracked/FilterUntracked.
 //
 // Called on its own, this pays for `git ls-files` (tracked and
 // untracked) a second time on top of whatever already called List — see
 // Discover for the single-enumeration path a caller needing both should
 // use instead.
-func MarkerFiles(ctx context.Context, root string) ([]string, error) {
+func MarkerFiles(ctx context.Context, root string, extra []string) ([]string, error) {
 	tracked, untracked, err := enumerate(ctx, root)
 	if err != nil {
 		return nil, err
 	}
-	return markersOf(tracked, untracked), nil
+	markers := append(append([]string(nil), markerNames...), extra...)
+	return markersOf(tracked, untracked, markers), nil
 }
 
-func markersOf(tracked map[string]string, untracked []string) []string {
-	var markers []string
+func markersOf(tracked map[string]string, untracked []string, markers []string) []string {
+	var out []string
 	for p := range tracked {
-		if isMarker(p) {
-			markers = append(markers, p)
+		if isMarker(p, markers) {
+			out = append(out, p)
 		}
 	}
 	for _, p := range untracked {
-		if isMarker(p) {
-			markers = append(markers, p)
+		if isMarker(p, markers) {
+			out = append(out, p)
 		}
 	}
-	return markers
+	return out
 }
 
 // MarkerDirs returns every directory that contains a marker file —

@@ -49,7 +49,7 @@ var Enabled = true
 `
 
 func TestExtract(t *testing.T) {
-	f := scanner.File{Path: "internal/retry/retry.go", Content: []byte(src)}
+	f := scanner.WithContent("internal/retry/retry.go", []byte(src))
 	entries, handled, err := Extract(f, "giraffe", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +166,7 @@ func TestExtract(t *testing.T) {
 // TestExtract_DeclinesAWrongExtension (directive 016 §1): this module
 // checks its own extension, and no other file reaches it.
 func TestExtract_DeclinesAWrongExtension(t *testing.T) {
-	f := scanner.File{Path: "README.md", Content: []byte("# hello\n")}
+	f := scanner.WithContent("README.md", []byte("# hello\n"))
 	entries, handled, err := Extract(f, "giraffe", nil)
 	if handled || entries != nil || err != nil {
 		t.Errorf("Extract(.md) = %v, %v, %v, want nil, false, nil", entries, handled, err)
@@ -178,13 +178,29 @@ func TestExtract_DeclinesAWrongExtension(t *testing.T) {
 // answer as a wrong extension, with the parse failure attached as a
 // diagnostic rather than silently dropped.
 func TestExtract_DeclinesUnparseableContent(t *testing.T) {
-	f := scanner.File{Path: "broken.go", Content: []byte("not valid go {{{")}
+	f := scanner.WithContent("broken.go", []byte("not valid go {{{"))
 	entries, handled, err := Extract(f, "giraffe", nil)
 	if handled || entries != nil {
 		t.Errorf("Extract(unparseable .go) = %v, %v, want nil, false", entries, handled)
 	}
 	if err == nil {
 		t.Error("expected a parse-error diagnostic, got nil")
+	}
+}
+
+// TestExtract_DeclinesUnreadableContent (directive 017 §1): a .go path
+// whose content cannot actually be read — scanner.Open's read is
+// lazy, so this only surfaces once Extract calls f.Content() — is
+// declined the same way unparseable content is: not handled, with the
+// read failure attached as a diagnostic.
+func TestExtract_DeclinesUnreadableContent(t *testing.T) {
+	f := scanner.Open(t.TempDir(), scanner.FileMeta{Path: "does-not-exist.go"})
+	entries, handled, err := Extract(f, "giraffe", nil)
+	if handled || entries != nil {
+		t.Errorf("Extract(unreadable .go) = %v, %v, want nil, false", entries, handled)
+	}
+	if err == nil {
+		t.Error("expected a read-error diagnostic, got nil")
 	}
 }
 

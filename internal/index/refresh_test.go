@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"giraffe/internal/entry"
+	"giraffe/internal/lang"
 	"giraffe/internal/scanner"
 )
 
@@ -65,8 +66,13 @@ func gitCommit(t *testing.T, root string, paths ...string) {
 	}
 }
 
+// scope mirrors main.go's own scope construction (directive 017 §3:
+// scanner does not know go.mod on its own any more — a test calling
+// Refresh directly needs the same lang.RegisteredMarkers() wiring main
+// gives it, or a nested go.mod stops being recognised as a root
+// marker at all).
 func scope() scanner.Scope {
-	return scanner.Scope{}
+	return scanner.Scope{Markers: lang.RegisteredMarkers()}
 }
 
 // mustRefresh calls Refresh and fails the test on error — most tests in
@@ -241,12 +247,14 @@ func TestRefresh_FileItselfIsASearchTarget(t *testing.T) {
 // a placeholder). It still carries Ext: a fact about the file itself,
 // independent of whether its language is known.
 //
-// Its content is read now (directive 016 §1): with no extension table
-// left outside the language modules, the only way to learn that no
-// module wants README.md is to hand it over and let the generic module
-// answer — so Reparsed (files run through lang.Extract this call)
-// counts it too, alongside retry.go, even though only the generic
-// module actually did anything with it.
+// It is dispatched through lang.Extract now (directive 016 §1): with
+// no extension table left outside the language modules, the only way
+// to learn that no module wants README.md is to hand it over and let
+// the generic module answer — so Reparsed (files run through
+// lang.Extract this call) counts it too, alongside retry.go. Its
+// content is not actually read, though (directive 017 §1): the
+// generic module never calls File.Content, so the read scanner.Open
+// defers never happens for this file.
 //
 // It gets a files-bucket record (directive 013): not because anything
 // meaningful was extracted from it, but because the differential store
@@ -800,6 +808,34 @@ func TestRefresh_NonExtractableFileContentChangeUpdatesSize(t *testing.T) {
 	}
 	if found.Size != int64(len(longer)) {
 		t.Errorf("README.md Size = %d, want %d (the edited content's length, re-verified)", found.Size, len(longer))
+	}
+}
+
+// TestRefresh_ExcludedExtensionProducesNoEntryAndIsNeverOpened
+// (directive 017 §1, §2): a denied extension gets no entry at all —
+// not even the generic module's file entry — and, since the exclusion
+// module never calls File.Content, it is never actually opened: made
+// unreadable by permission here, so Refresh would fail if anything
+// ever tried to read it.
+func TestRefresh_ExcludedExtensionProducesNoEntryAndIsNeverOpened(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, "logo.png", "\x89PNG\r\n\x1a\n")
+	gitCommit(t, root, "logo.png")
+	full := filepath.Join(root, "logo.png")
+	if err := os.Chmod(full, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(full, 0o644)
+
+	s, _, err := Refresh(context.Background(), root, scope(), nil)
+	if err != nil {
+		t.Fatalf("Refresh failed — logo.png must not have been read: %v", err)
+	}
+	defer closeStore(t, s)
+	for _, e := range allEntries(s) {
+		if e.Path == "logo.png" {
+			t.Fatalf("expected no entry for logo.png, got %#v", e)
+		}
 	}
 }
 

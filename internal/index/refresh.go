@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -95,6 +96,22 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	}()
 
 	markerDirs := scanner.MarkerDirs(markerPaths)
+	// markersByDir is every marker directory's own set of marker
+	// basenames — go.mod, Cargo.toml, whichever were actually found
+	// there — derived from the same markerPaths root discovery already
+	// resolved. dirMarkersFor below looks a file's owning directory up
+	// in this map to decide which extraction module's own marker
+	// (directive 017 §3) that directory claims; computed once per
+	// Refresh call, not per file, since it depends only on where the
+	// markers are, never on the file being dispatched.
+	markersByDir := make(map[string]map[string]bool, len(markerDirs))
+	for _, mp := range markerPaths {
+		d := path.Dir(mp)
+		if markersByDir[d] == nil {
+			markersByDir[d] = make(map[string]bool)
+		}
+		markersByDir[d][path.Base(mp)] = true
+	}
 	fallbackProject := filepath.Base(root)
 	projectNames := scanner.ProjectNames(markerDirs, fallbackProject)
 	// §21 C-8: nested marker directories sharing a name is the same
@@ -191,47 +208,44 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 		return result, stats, nil
 	}
 
-	// Every file whose content changed is read: directive 016 §1 left
-	// no extension table here to pre-filter toRead against, and no
-	// capability query is allowed to stand in for one — the only way to
-	// learn whether a registered module wants a file is to hand it the
-	// content and ask (lang.Extract, below). A changed-only-because-of-
-	// enumChanged file is excluded, same as before: its declarations
-	// are carried forward, not re-parsed, so its content need not be
-	// read again.
+	// Every content-changed file is dispatched through lang.Extract:
+	// directive 016 §1 left no extension table here to pre-filter
+	// toRead against, and no capability query is allowed to stand in
+	// for one — the only way to learn whether a registered module
+	// wants a file is to hand it over and ask. Directive 017 §1 makes
+	// that hand-off lazy: scanner.Open defers the actual read until a
+	// module calls File.Content, so a file the exclusion module claims
+	// by extension, or that only the generic module ever sees, is
+	// never opened at all. A changed-only-because-of-enumChanged file
+	// is excluded, same as before: its declarations are carried
+	// forward, not re-parsed, so nothing needs reading for it.
 	var toRead []scanner.FileMeta
 	for _, c := range changed {
 		if c.reExtract {
 			toRead = append(toRead, c.meta)
 		}
 	}
-	readPaths := make([]string, len(toRead))
-	for i, m := range toRead {
-		readPaths[i] = m.Path
-	}
-	readFiles, err := scanner.Read(ctx, root, readPaths)
-	if err != nil {
-		return nil, Stats{}, err
-	}
 	// entriesByPath holds, per changed file, exactly what lang.Extract
 	// returned: the file's own entry (whichever module produced it —
 	// every module's contract includes it, entry.FileEntry) followed by
 	// whatever declarations that module found, or just the file entry
 	// alone when none did (§18; directive 016 §1 — "the generic module
-	// ... produces the file's own entry").
+	// ... produces the file's own entry"), or nothing at all when the
+	// exclusion module claimed it (directive 017 §2).
 	entriesByPath := make(map[string][]entry.Entry, len(toRead))
-	for i, f := range readFiles {
-		m := toRead[i]
-		project := scanner.ProjectFor(f.Path, markerDirs, projectNames, fallbackProject)
-		entries, declined := lang.Extract(f, project, assignments)
+	for _, m := range toRead {
+		f := scanner.Open(root, m)
+		project := scanner.ProjectFor(m.Path, markerDirs, projectNames, fallbackProject)
+		dirMarkers := markersByDir[scanner.OwningDir(m.Path, markerDirs)]
+		entries, declined := lang.Extract(f, project, assignments, dirMarkers)
 		if declined != nil {
 			// A module that recognised the file and then failed to
-			// parse it degrades the answer, not the command (§2, "a
-			// stale index degrades gracefully"): the next module in
-			// order — ultimately the generic one — still produced the
-			// file's own entry, reported here in ## warnings rather
-			// than dropped silently.
-			stats.Warnings = append(stats.Warnings, fmt.Sprintf("%s: %v", f.Path, declined))
+			// parse (or even read) it degrades the answer, not the
+			// command (§2, "a stale index degrades gracefully"): the
+			// next module in order — ultimately the generic one — still
+			// produced the file's own entry, reported here in
+			// ## warnings rather than dropped silently.
+			stats.Warnings = append(stats.Warnings, fmt.Sprintf("%s: %v", m.Path, declined))
 		}
 		entriesByPath[m.Path] = entries
 		stats.Reparsed++

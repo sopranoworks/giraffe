@@ -205,8 +205,9 @@ const unknownLang = "unknown"
 
 // noExt labels, in the ## index by-ext breakdown only, the bucket of
 // files with no extension at all (Ext == "") — the known-extensionless
-// files §24 C-19 covers (Makefile, LICENSE, ...). Display text, not an
-// attribute value, the same way unknownLang is not.
+// files §24 C-19 named and internal/lang/exclude now recognises
+// (Makefile, LICENSE, ...). Display text, not an attribute value, the
+// same way unknownLang is not.
 const noExt = "(none)"
 
 // unknownLang and noExt labels are applied, and the "go 0, unknown

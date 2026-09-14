@@ -157,6 +157,54 @@ func TestFilter_MatchesKindAndScope(t *testing.T) {
 	}
 }
 
+// TestValidAttributes_IncludesSizeDeclarationsAndLine (directive 017
+// §4): these three are common Entry fields, valid unconditionally like
+// path/name/kind — not derived per repository like a language
+// position — so an empty entry set still reports them valid.
+func TestValidAttributes_IncludesSizeDeclarationsAndLine(t *testing.T) {
+	valid := ValidAttributes(Slice(nil))
+	for _, name := range []string{"size", "declarations", "line"} {
+		if !valid[name] {
+			t.Errorf("ValidAttributes() missing %q", name)
+		}
+	}
+}
+
+// TestParse_SizeDeclarationsAndLineAreFilterable (directive 017 §4:
+// "make every printed attribute filterable" — size and declarations
+// have printed unfilterable since 009, line since 016).
+func TestParse_SizeDeclarationsAndLineAreFilterable(t *testing.T) {
+	valid := map[string]bool{"size": true, "declarations": true, "line": true}
+	f, err := Parse("size:150000 declarations:42 line:17", valid)
+	if err != nil {
+		t.Fatalf("expected size, declarations and line to be filterable, got: %v", err)
+	}
+	if f["size"][0] != "150000" || f["declarations"][0] != "42" || f["line"][0] != "17" {
+		t.Fatalf("got %v", f)
+	}
+}
+
+func TestFilter_MatchesSizeDeclarationsAndLine(t *testing.T) {
+	fileEntry := entry.Entry{Kind: entry.KindFile, Size: 150000, DeclCount: 42}
+	declEntry := entry.Entry{Kind: "func", Line: 17}
+
+	if !(Filter{"size": {"150000"}}).Match(fileEntry) {
+		t.Error("expected size:150000 to match")
+	}
+	if (Filter{"size": {"1"}}).Match(fileEntry) {
+		t.Error("expected size:1 to exclude a 150000-byte file")
+	}
+	if !(Filter{"declarations": {"42"}}).Match(fileEntry) {
+		t.Error("expected declarations:42 to match")
+	}
+	if !(Filter{"line": {"17"}}).Match(declEntry) {
+		t.Error("expected line:17 to match")
+	}
+	if (Filter{"line": {"17"}}).Match(fileEntry) {
+		t.Error("expected line:17 to exclude a file entry (Line is zero-valued there)")
+	}
+}
+
 // TestParse_PositionAttributeIsFilterable (directive 015 item 2): module,
 // receiver, type — any language position, present or future — are
 // filterable the moment ValidAttributes reports them, with no second

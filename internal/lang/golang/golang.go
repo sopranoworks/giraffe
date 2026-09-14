@@ -30,6 +30,16 @@ var Extensions = []string{".go"}
 // from outside (directive 016 §1: "the module reports its own name").
 const langName = "go"
 
+// Marker is this module's own root-marker basename — the file whose
+// presence in a directory means that directory is Go's own (directive
+// 017 §3: "recognising go.mod is Go's knowledge"). Used two ways, from
+// one name: giraffe/internal/lang moves this module to the front of
+// the chain for files under a directory that has one, and
+// giraffe/internal/scanner's root discovery recognises it via
+// lang.RegisteredMarkers — one authority over the name, not a second
+// copy of it in the scanner.
+const Marker = "go.mod"
+
 // scopeExported and scopePackage are Go's own words for a declaration's
 // visibility (§21 C-12: the displayed value is the language's own
 // vocabulary, kept local to the language module — never a common,
@@ -48,10 +58,11 @@ const (
 // per spec, matching what the sizing prototype in §11 undercounted.
 //
 // handled is false, regardless of err, whenever this module is not the
-// right answer for f — a wrong extension, or (§18; directive 016 §1)
-// an extension that matched but content that did not parse. The
-// caller tries the next registered module either way; err, when
-// non-nil, is a diagnostic worth reporting even though the file was
+// right answer for f — a wrong extension, (§18; directive 016 §1) an
+// extension that matched but content that did not parse, or (directive
+// 017 §1) content that could not even be read. The caller tries the
+// next registered module either way; err, when non-nil, is a
+// diagnostic worth reporting even though the file was
 // not left unhandled.
 //
 // A method's Name is its own bare name, never qualified with its
@@ -69,12 +80,17 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 		return nil, false, nil
 	}
 
+	content, err := f.Content()
+	if err != nil {
+		return nil, false, err
+	}
+
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, f.Path, f.Content, parser.ParseComments|parser.SkipObjectResolution)
+	file, err := parser.ParseFile(fset, f.Path, content, parser.ParseComments|parser.SkipObjectResolution)
 	if err != nil {
 		return nil, false, fmt.Errorf("parse %s: %w", f.Path, err)
 	}
-	lines := strings.Split(string(f.Content), "\n")
+	lines := strings.Split(string(content), "\n")
 
 	position := []entry.Position{{Name: "module", Value: path.Dir(f.Path)}}
 
