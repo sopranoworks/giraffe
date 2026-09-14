@@ -535,6 +535,39 @@ func TestRefresh_NestedMarkerAssignsDistinctProjects(t *testing.T) {
 	}
 }
 
+// TestRefresh_ProjectCorrectEvenWhenMarkerSortsAfterItsOwnFile
+// (directive 019 §2): "proj/a.go" sorts before "proj/go.mod" in git's
+// own path-lexicographic output ('a' < 'g'), so classify's stat
+// comparison for proj/a.go runs, and could in principle be dispatched,
+// before the marker that owns its directory is even seen. This is
+// exactly the case runPipeline's own comment names as the reason
+// dispatch waits for enumerate to finish completely rather than
+// starting as soon as each file's freshness is known: proving Project
+// still comes out correct here is proving that boundary is drawn in
+// the right place, not just documented.
+func TestRefresh_ProjectCorrectEvenWhenMarkerSortsAfterItsOwnFile(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, "proj/go.mod", "module proj\n")
+	writeFile(t, root, "proj/a.go", "package p\n\nfunc AlphabeticallyFirst() {}\n")
+	gitCommit(t, root, "proj/go.mod", "proj/a.go")
+
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
+
+	found := false
+	for e := range s.All() {
+		if e.Name == "AlphabeticallyFirst" {
+			found = true
+			if e.Project != "proj" {
+				t.Errorf("Project = %q, want %q", e.Project, "proj")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected AlphabeticallyFirst to be indexed")
+	}
+}
+
 func TestRefresh_NestedMarkerCollisionIsHardError(t *testing.T) {
 	// §21 C-8: before this directive, two nested marker directories
 	// sharing a basename merged silently under one project: value — the
@@ -840,6 +873,42 @@ func TestRefresh_ExcludedExtensionProducesNoEntryAndIsNeverOpened(t *testing.T) 
 	}
 }
 
+// TestRefresh_IndexOnlyAssignmentIndexesWithoutClaimingLang (directive
+// 019 §4): an "ext:<x>" assignment with no "lang:" token overrides the
+// exclusion module's deny list, the same as the two-token form (018
+// §2), but the resulting entry's Lang stays "" — the operator said
+// "index this", not "call it this" — distinct from §25 C-24's ordinary
+// "unknown" case only in that it is deliberate, not absent information.
+func TestRefresh_IndexOnlyAssignmentIndexesWithoutClaimingLang(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, "logo.png", "\x89PNG\r\n\x1a\n")
+	gitCommit(t, root, "logo.png")
+
+	assignments := map[string]string{".png": ""}
+	s, _, err := Refresh(context.Background(), root, scope(), assignments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(t, s)
+
+	var found *entry.Entry
+	for _, e := range allEntries(s) {
+		if e.Path == "logo.png" {
+			e := e
+			found = &e
+		}
+	}
+	if found == nil {
+		t.Fatal("expected an entry for logo.png once ext:png is assigned, even with no lang")
+	}
+	if found.Lang != "" {
+		t.Errorf("logo.png entry Lang = %q, want \"\" (index-only assignment makes no language claim)", found.Lang)
+	}
+	if found.Ext != "png" {
+		t.Errorf("logo.png entry Ext = %q, want %q", found.Ext, "png")
+	}
+}
+
 func writeExclude(t *testing.T, root, content string) {
 	t.Helper()
 	full := filepath.Join(root, Dir, "exclude")
@@ -888,19 +957,35 @@ func TestLoadExclude_MissingFileYieldsEmptyAssignments(t *testing.T) {
 	}
 }
 
-// TestParseAssignment_RequiresExactlyBothTokens: anything short of a
-// well-formed two-token "ext:_ lang:_" line is left for the exclusion
-// pattern path, not partially interpreted as an assignment.
-func TestParseAssignment_RequiresExactlyBothTokens(t *testing.T) {
+// TestParseAssignment_ExtAloneIsIndexOnly (directive 019 §4): a single
+// "ext:<value>" token is a valid assignment on its own — index this
+// extension, with no language claim — distinct from the two-token form.
+func TestParseAssignment_ExtAloneIsIndexOnly(t *testing.T) {
+	ext, langName, ok := parseAssignment("ext:png")
+	if !ok {
+		t.Fatal("parseAssignment(\"ext:png\") = not-an-assignment, want ok")
+	}
+	if ext != "png" {
+		t.Errorf("ext = %q, want %q", ext, "png")
+	}
+	if langName != "" {
+		t.Errorf("langName = %q, want \"\" (index-only, no language claim)", langName)
+	}
+}
+
+// TestParseAssignment_RequiresWellFormedTokens: anything short of a
+// well-formed "ext:_" or two-token "ext:_ lang:_" line is left for the
+// exclusion pattern path, not partially interpreted as an assignment.
+func TestParseAssignment_RequiresWellFormedTokens(t *testing.T) {
 	cases := []string{
-		"ext:inc",                 // lang: missing
-		"lang:c",                  // ext: missing
-		"ext: lang:c",             // empty ext value
+		"ext:",                    // empty ext value, one token
+		"lang:c",                  // ext: missing entirely
+		"ext: lang:c",             // empty ext value, two tokens
 		"ext:inc lang:",           // empty lang value
 		"ext:inc lang:c extra",    // three tokens
 		"vendor/",                 // an ordinary pattern
 		"*.pb.go",                 // an ordinary pattern
-		"ext:inc lang:c lang:c++", // duplicate key, still not exactly one of each
+		"ext:inc lang:c lang:c++", // three tokens, not exactly the two-token shape
 	}
 	for _, c := range cases {
 		if _, _, ok := parseAssignment(c); ok {
@@ -919,7 +1004,7 @@ func TestLoadExclude_MalformedAssignmentIsAnError(t *testing.T) {
 		content  string
 		wantLine int
 	}{
-		{"ext:inc\n", 1},              // lang: missing
+		{"ext:\n", 1},                 // empty ext value — "ext:inc" alone is now valid (§4), but this is not
 		{"lang:c\n", 1},               // ext: missing
 		{"vendor/\nlang:cpp\n", 2},    // error on the second line specifically
 		{"ext:inc lang:c extra\n", 1}, // three tokens

@@ -80,6 +80,20 @@ func TestExtract_UnrelatedAssignmentDoesNotOverride(t *testing.T) {
 	}
 }
 
+// TestExtract_IndexOnlyAssignmentOverridesTheDenyList (directive 019
+// §4): an assignment present with an empty value — "ext:<x>" alone,
+// index this extension, no language claim — overrides the deny list
+// exactly like a labelled one, since the check is presence in the
+// map, not a non-empty value.
+func TestExtract_IndexOnlyAssignmentOverridesTheDenyList(t *testing.T) {
+	f := scanner.WithContent("logo.png", []byte("\x89PNG"))
+	assignments := map[string]string{".png": ""}
+	entries, handled, err := Extract(f, "giraffe", assignments)
+	if handled || entries != nil || err != nil {
+		t.Errorf("Extract(logo.png, index-only assignment) = %v, %v, %v, want nil, false, nil", entries, handled, err)
+	}
+}
+
 // TestExtract_NeverReadsContent (directive 017 §1, §2): the exclusion
 // decision is made from f.Path alone — scanner.Open's read is lazy, so
 // a path that does not exist on disk still resolves without error for

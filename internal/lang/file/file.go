@@ -23,7 +23,12 @@ import (
 // lang is the operator's own assignment for f's extension
 // (.giraffe/exclude, §25 C-26) if one exists — the only tier that can
 // label a file giraffe has no extractor for at all — or "" when none
-// applies.
+// applies, including when the operator assigned the extension without
+// a language claim (directive 019 §4's "ext:<x>" alone): that case
+// reads back from assignments as an empty string the same way "not
+// assigned" would, which is correct here — file.Extract's own contract
+// with a caller is "the label, or unknown", and an operator who
+// declined to name one is exactly the unknown case.
 func Extract(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, handled bool, err error) {
 	lang := assignments[path.Ext(f.Path)]
 	return []entry.Entry{entry.FileEntry(f.Path, project, lang)}, true, nil

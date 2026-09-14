@@ -152,7 +152,15 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 			return searchState{}, 1
 		}
 		for _, name := range assignments {
-			knownLanguageSet[name] = true
+			// An index-only assignment (directive 019 §4's "ext:<x>"
+			// alone) carries no language name at all — its value is ""
+			// by construction (index.parseAssignment), not a language
+			// this build could report. Adding it here would seed a
+			// phantom "" bucket in ## index's languages breakdown,
+			// distinct from and invisible next to unknownLang.
+			if name != "" {
+				knownLanguageSet[name] = true
+			}
 		}
 		scope := scanner.Scope{Exclude: exclude, Markers: lang.RegisteredMarkers()}
 

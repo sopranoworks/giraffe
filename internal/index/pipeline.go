@@ -1,25 +1,23 @@
-// pipeline.go is index.Refresh's own concurrency boundary (directive
-// 018 §1): produce, a fixed pool of extract workers, and Refresh itself
-// as the commit-accumulating sink, connected by two bounded channels —
-// design-review's own trigger ("a new concurrency... boundary") and
-// patterns.md §6's named shape ("data passes through several
-// transformation stages... a pipeline of stages with explicit
-// backpressure — bounded queues or bounded channels between stages").
+// pipeline.go is index.Refresh's own concurrency boundary. Directive
+// 018 §1 made the freshness-and-dispatch loop a produce/extract/commit
+// pipeline over bounded channels; directive 019 §2 extends it one
+// stage further upstream — enumeration itself (see enum.go's own
+// enumerate) now streams git's output directly into this pipeline's
+// classification stage, rather than resolving the whole candidate set
+// before anything downstream can start.
 //
 // This restructures Refresh's freshness-and-dispatch loop, not its
 // storage layer: the final store.commit call (store.go) is still one
 // differential transaction (directive 013), built from whatever
 // runPipeline accumulated — that design is unchanged and out of scope
-// here. What changes is that stat'ing file N+1 (produce) and extracting
-// file N (an extract worker) now genuinely overlap, and this restores —
-// via a fixed worker pool rather than the bulk eager reader it replaces
-// — the concurrent read directive 017 traded away when it made content
-// lazy (017's own report named that as a trade-off, not a fix).
+// here.
 package index
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -31,20 +29,28 @@ import (
 
 // extractWorkers is the extract stage's fixed, small worker count (§3
 // C4: "fixed concurrency... peak open descriptors is therefore
-// computable in advance"). The same number scanner's own pre-017 bulk
-// reader used (its own former workers constant) — restored here as a
-// worker pool bounded the same way, not a number picked fresh.
+// computable in advance").
 const extractWorkers = 8
 
-// fileContext is the read-only facts every pipeline stage needs to
-// resolve one file's project, dispatch order and content — unchanged
-// for the whole Refresh call, and otherwise repeated across produce,
-// extractWorker and carryForward's own parameter lists (code-manners
-// M2: "things that change together live together"; patterns.md §9:
-// "extract a value object to replace a cluster of primitives passed
-// together"). Not every stage uses every field (produce and
-// carryForward never touch assignments or markersByDir), the same way
-// a shared config value is not always read by every consumer of it.
+// metaBuffer bounds metaCh, the channel enumerate's two concurrent
+// streams (tracked, untracked) both write to and classify reads from.
+// A FileMeta is a path, a blob hash and an int, not file content, so
+// this bound is about pacing, not memory — large enough that either
+// stream can race a little ahead of classify's own stat calls without
+// blocking on ordinary hardware, without letting an arbitrarily large
+// backlog of unclassified paths build up in memory (§3's own
+// bounded-resources ethos).
+const metaBuffer = 4 * extractWorkers
+
+// fileContext is the read-only facts extractWorker and carryForward
+// need to resolve one file's project and content — unchanged for the
+// whole call, and otherwise repeated across both functions' own
+// parameter lists (code-manners M2: "things that change together live
+// together"; patterns.md §9: "extract a value object to replace a
+// cluster of primitives passed together"). Built once runPipeline
+// knows markerDirs (directive 019 §2: that requires enumerate to have
+// completely finished — see runPipeline's own comment), and passed by
+// value from there on, since nothing mutates it again.
 type fileContext struct {
 	root            string
 	markerDirs      []string
@@ -54,13 +60,25 @@ type fileContext struct {
 	assignments     map[string]string
 }
 
-// produceItem is one file the produce stage has decided needs an actual
+// produceItem is one file classify has decided needs an actual
 // (re-)extraction. Everything an extract worker needs to process it
-// without going back to produce or to ro for anything else.
+// without going back to ro for anything else.
 type produceItem struct {
 	meta    scanner.FileMeta
 	modTime int64
 	size    int64
+}
+
+// unchangedCandidate is one file classify found content-unchanged
+// (its stat matches ro's stored record) — kept, not yet resolved,
+// since whether it needs carrying forward at all depends on
+// enumChanged, which is only known once enumerate finishes (see
+// runPipeline).
+type unchangedCandidate struct {
+	meta    scanner.FileMeta
+	modTime int64
+	size    int64
+	oldRec  Record
 }
 
 // extracted is one file's fully-processed contribution to the store —
@@ -68,9 +86,9 @@ type produceItem struct {
 // any diagnostic the module chain produced along the way (warnErr nil
 // when there was none). dispatched is true only for a result that came
 // from the extract stage (a file actually sent through lang.Extract
-// this run) — false for a file produce resolved directly with no
-// dispatch at all (see carryForward) — which is exactly what directive
-// 018 §4's Stats.Dispatched counts.
+// this run) — false for a file resolved via carryForward, with no
+// dispatch at all — which is exactly what directive 018 §4's
+// Stats.Dispatched counts.
 type extracted struct {
 	change     fileChange
 	warnPath   string
@@ -78,15 +96,31 @@ type extracted struct {
 	dispatched bool
 }
 
-// produceOutcome is produce's own findings, handed back once it has
-// finished. Reading it is only safe after runPipeline's WaitGroup
-// confirms produce has returned (see runPipeline) — a channel close and
-// a WaitGroup both establish happens-before per the Go memory model, so
-// this single write (by produce) / single later read (by runPipeline)
-// needs no separate lock.
+// produceOutcome is classify's own findings, handed back once it has
+// finished (metaCh closed). Reading it is only safe after that close
+// is observed — a channel close establishes happens-before per the Go
+// memory model, so this single write (by classify) / single later
+// read (by runPipeline) needs no separate lock.
 type produceOutcome struct {
-	currentPaths map[string]bool
+	currentPaths      map[string]bool
+	pending           []produceItem
+	possiblyUnchanged []unchangedCandidate
+}
+
+// pipelineResult is everything runPipeline resolves in one call —
+// bundled for the same reason fileContext is (patterns.md §9): every
+// field here was a separate return value before this directive, and
+// every caller wants the same handful together, not some now and some
+// later.
+type pipelineResult struct {
+	fileChanges  []fileChange
+	warnings     []string
+	dispatched   int
 	unchanged    int
+	currentPaths map[string]bool
+	enumBlob     []byte
+	enumChanged  bool
+	rootProject  string
 }
 
 // patchFileEntry sets Size and DeclCount on entries' own file entry
@@ -109,15 +143,56 @@ func patchFileEntry(entries []entry.Entry, size int64) {
 	}
 }
 
+// classify is the pipeline's freshness-classification stage (directive
+// 019 §2's own "paths flow to freshness classification as they
+// arrive"): for each meta enumerate sends, it stats the file and
+// compares against ro's last-known record — pure per-file stat data,
+// needing no project or marker information at all, which is exactly
+// what makes it safe to run concurrently with enumerate still
+// streaming later files (§20 C-2's own freshness-by-stat rule, applied
+// the same way regardless of what, if anything, produced the meta).
+//
+// What to DO with the result — dispatch for extraction, carry forward,
+// or count as reused — depends on facts only enumerate knows once it
+// has completely finished (enumChanged; and markerDirs itself, for
+// Project), so that decision is not made here: a file whose content
+// may have changed is queued into out.pending, one whose content is
+// unchanged into out.possiblyUnchanged, and runPipeline resolves both
+// once enumerate's outcome is ready.
+//
+// Terminates when metaCh is closed and drained — enumerate's own
+// termination signal for this stage (language-policy G10).
+func classify(root string, ro *Store, metaCh <-chan scanner.FileMeta, out *produceOutcome) {
+	currentPaths := make(map[string]bool)
+	for m := range metaCh {
+		oldRec, known := ro.fileRecord(m.Path)
+		info, statErr := os.Stat(filepath.Join(root, m.Path))
+		if statErr != nil {
+			// Gone between enumerate and stat (e.g. a race with an
+			// editor's save-as-rename): left out of currentPaths, so
+			// the deletion diff in Refresh removes any entries it
+			// already owned.
+			continue
+		}
+		currentPaths[m.Path] = true
+		modTime, size := info.ModTime().UnixNano(), info.Size()
+		contentSame := known && oldRec.ModTime == modTime && oldRec.Size == size
+		if contentSame {
+			out.possiblyUnchanged = append(out.possiblyUnchanged, unchangedCandidate{meta: m, modTime: modTime, size: size, oldRec: oldRec})
+		} else {
+			out.pending = append(out.pending, produceItem{meta: m, modTime: modTime, size: size})
+		}
+	}
+	out.currentPaths = currentPaths
+}
+
 // carryForward builds a changed file's contribution when its content is
 // known unchanged (no re-extraction needed) but enumChanged means its
 // Project may have moved (directive 015's own diagnosis, unchanged by
 // this directive): the declarations already stored under
 // oldRec.EntryIDs are read back and re-stamped with a freshly resolved
 // Project, the same way Size is refreshed for every changed file
-// elsewhere in this stage. No file content is read to do this, so it
-// runs directly in produce rather than being handed to an extract
-// worker (see produce).
+// elsewhere in this stage. No file content is read to do this.
 func carryForward(fc fileContext, m scanner.FileMeta, modTime, size int64, oldRec Record, ro *Store) extracted {
 	project := scanner.ProjectFor(m.Path, fc.markerDirs, fc.projectNames, fc.fallbackProject)
 	var entries []entry.Entry
@@ -129,71 +204,19 @@ func carryForward(fc fileContext, m scanner.FileMeta, modTime, size int64, oldRe
 	return extracted{change: fileChange{Path: m.Path, ModTime: modTime, Size: size, Entries: entries}}
 }
 
-// produce is the pipeline's first stage: it walks metas — the already-
-// resolved candidate set discover returned (§3 C2: "the file set is
-// resolved before reading begins... no file is opened twice") — stats
-// each one, and classifies it against ro's last-known record. A file
-// whose content may have changed is sent to extractCh for the extract
-// stage to actually open; a file whose declarations do not need
-// re-extraction but whose Project may have moved is resolved here
-// directly, with no file content ever read, and sent straight to
-// resultCh. This is walking an already-resolved candidate set, not
-// discovering files while reading them, so it satisfies C2 even though
-// it runs concurrently with the extract stage consuming extractCh (see
-// runPipeline) — produce decides, from a stat alone, which files need a
-// read; it never causes one itself.
+// extractWorker is the pipeline's extract stage: extractWorkers
+// instances run concurrently (runPipeline starts them, once fc is
+// fully resolved — see runPipeline), each taking one produceItem at a
+// time from extractCh and running it through lang.Extract.
+// scanner.Open here is what makes a module's own Content() call
+// actually read the file (directive 017 §1) — lazily, and only for
+// whichever module needs it. Files are independent of one another (no
+// shared mutable state between them; fc is read-only for the whole
+// call), which is what makes running several at once correct.
 //
-// produce owns extractCh (language-policy G21: "the goroutine that
-// writes to a channel owns closing it") and closes it once every meta
-// has been visited — the only signal the extract stage needs to know no
-// more work is coming. out is filled in just before returning; see
-// produceOutcome's own comment for why that is safe with no lock.
-func produce(fc fileContext, metas []scanner.FileMeta, ro *Store, enumChanged bool, extractCh chan<- produceItem, resultCh chan<- extracted, out *produceOutcome) {
-	defer close(extractCh)
-	currentPaths := make(map[string]bool, len(metas))
-	unchanged := 0
-	for _, m := range metas {
-		// §20 C-2 puts freshness on stat over the whole candidate set:
-		// every file is stat'd and compared against its own last-known
-		// fingerprint the same way, regardless of what, if anything,
-		// ends up extracting from it.
-		oldRec, known := ro.fileRecord(m.Path)
-		info, statErr := os.Stat(filepath.Join(fc.root, m.Path))
-		if statErr != nil {
-			// Gone between List and Stat (e.g. a race with an editor's
-			// save-as-rename): left out of currentPaths, so the deletion
-			// diff in Refresh removes any entries it already owned.
-			continue
-		}
-		currentPaths[m.Path] = true
-		modTime, size := info.ModTime().UnixNano(), info.Size()
-		contentSame := known && oldRec.ModTime == modTime && oldRec.Size == size
-		switch {
-		case !contentSame:
-			extractCh <- produceItem{meta: m, modTime: modTime, size: size}
-		case enumChanged:
-			resultCh <- carryForward(fc, m, modTime, size, oldRec, ro)
-		default:
-			unchanged++
-		}
-	}
-	out.currentPaths = currentPaths
-	out.unchanged = unchanged
-}
-
-// extractWorker is the pipeline's second stage: extractWorkers instances
-// run concurrently (runPipeline starts them), each taking one
-// produceItem at a time from extractCh and running it through
-// lang.Extract. scanner.Open here is what makes a module's own
-// Content() call actually read the file (directive 017 §1) — lazily,
-// and only for whichever module needs it. Files are independent of one
-// another (no shared mutable state between them; fc is read-only for
-// the whole call), which is what makes running several at once correct.
-//
-// Terminates when extractCh is closed and drained — produce's own
-// termination signal for this stage (language-policy G10). wg.Done() on
-// the way out is this worker's contribution to runPipeline's overall
-// completion signal.
+// Terminates when extractCh is closed and drained (language-policy
+// G10). wg.Done() on the way out is this worker's contribution to
+// runPipeline's overall completion signal for resultCh.
 func extractWorker(fc fileContext, extractCh <-chan produceItem, resultCh chan<- extracted, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for item := range extractCh {
@@ -213,64 +236,173 @@ func extractWorker(fc fileContext, extractCh <-chan produceItem, resultCh chan<-
 	}
 }
 
-// runPipeline runs the three stages and returns once every one of them
-// has finished: fileChanges ready for store.commit, warnings ready for
-// ## warnings, how many files were actually dispatched through
-// lang.Extract (directive 018 §4's Stats.Dispatched), how many were
-// found unchanged, and the full set of paths seen this call (for
-// Refresh's own deletion diff).
+// buildMarkersByDir is every marker directory's own set of marker
+// basenames — go.mod, Cargo.toml, whichever were actually found there
+// — derived from enumerate's own markerPaths. Looked up by a file's
+// owning directory to decide which extraction module's own marker
+// (directive 017 §3) that directory claims.
+func buildMarkersByDir(markerPaths []string) map[string]map[string]bool {
+	markersByDir := make(map[string]map[string]bool, len(markerPaths))
+	for _, mp := range markerPaths {
+		d := path.Dir(mp)
+		if markersByDir[d] == nil {
+			markersByDir[d] = make(map[string]bool)
+		}
+		markersByDir[d][path.Base(mp)] = true
+	}
+	return markersByDir
+}
+
+// runPipeline runs enumerate, classify, extract and the commit-
+// accumulating sink (this function's own return path), and returns
+// once every one of them has finished.
+//
+// Stages, their input/output, and why:
+//   - enumerate (enum.go; 2 internal goroutines, tracked and untracked):
+//     takes root, scope, assignments and ro; sends scanner.FileMeta to
+//     metaCh as git streams each path, and returns markerPaths/enumBlob/
+//     err via enumOut once both streams finish.
+//   - classify (1 goroutine — this call itself, since runPipeline has
+//     nothing else to do until it finishes anyway): takes metaCh and ro;
+//     stats each meta and buffers it into produceOutcome.pending
+//     (content changed) or .possiblyUnchanged (content same), needing
+//     no marker information to do so.
+//   - extract (extractWorkers=8 fixed goroutines, §3 C4): takes
+//     produceItem from extractCh, fc (markerDirs now resolved) and
+//     produces extracted values on resultCh.
+//   - a dedicated dispatch goroutine feeds extractCh from
+//     prodOut.pending and owns closing it; a dedicated carry-forward
+//     goroutine sends resultCh a value for every possiblyUnchanged file
+//     when enumChanged, so resultCh's writers are extractWorkers plus
+//     this one — no single one of them can own closing it alone (G21),
+//     so a WaitGroup-driven goroutine closes it once every writer is
+//     done, the same coordination 018 already used for two writer
+//     kinds, extended here to three (dispatch itself writes nothing to
+//     resultCh but is included in the same WaitGroup for simplicity).
 //
 // Channel bounds:
-//   - extractCh (produceItem, bound 2×extractWorkers): a produceItem is a
-//     few strings and two ints, not file content, so this bound is about
-//     pacing, not memory — large enough that a worker finishing one item
-//     always has another ready, without letting produce race arbitrarily
-//     far ahead of what the extract stage can actually consume.
-//   - resultCh (extracted, bound extractWorkers): one slot per worker, so
-//     a worker that finishes handing off its result is never blocked on
-//     ordinary hardware, but the sink below cannot fall arbitrarily far
-//     behind either — bounded, not unbounded, buildup of finished-but-
-//     uncommitted entries (§3's own bounded-resources ethos, applied to
-//     this in-memory queue the same way it already applies to file
-//     descriptors and worker count).
+//   - metaCh (scanner.FileMeta, bound metaBuffer=32): see metaBuffer's
+//     own comment.
+//   - extractCh (produceItem, bound 2×extractWorkers=16): a produceItem
+//     is a few strings and two ints, not file content, so this bound is
+//     about pacing, not memory — large enough that a worker finishing
+//     one item always has another ready.
+//   - resultCh (extracted, bound extractWorkers=8): one slot per
+//     worker, so a worker handing off a finished result is never
+//     blocked on ordinary hardware, but the sink below cannot fall
+//     arbitrarily far behind either.
+//
+// Why enumeration streams into classify but not into extract or
+// carryForward (directive 019 §2's own question, answered precisely):
+// every entry this call produces is stamped with a Project, and
+// Project resolution needs markerDirs — the complete set of marker
+// directories found anywhere in the tree. A marker file can sort
+// anywhere in git's own output relative to the files it governs (git's
+// index is sorted lexicographically by path, not by directory depth or
+// discovery order), so seeing a file gives no assurance every marker
+// that will turn out to be its ancestor has already been seen.
+// Filtering (inclusion/exclusion) is genuinely stateless per path and
+// streams correctly; classify's stat comparison is genuinely stateless
+// per path too, and streams correctly; project resolution is not, and
+// does not. This is why extraction (and carryForward, which also
+// stamps Project) still wait for enumerate to finish completely, while
+// classify's own stat calls do not.
 //
 // Termination and errors (language-policy G10, applied to every
-// goroutine this function starts): produce owns extractCh and closes it
-// once every meta is visited. A dedicated goroutine waits on a
-// WaitGroup covering produce and every extract worker, then closes
-// resultCh — resultCh has two kinds of writer (produce, for a carried-
-// forward file; every extract worker, for a re-extracted one), so no
-// single one of them can close it alone (G21); closing is coordinated
-// by the WaitGroup instead, not guessed at by any one writer. This
-// function is resultCh's sink, and ranges over it — concurrently with
-// produce and the extract workers still running, not after them — until
-// it closes; that loop ending is this function's own termination path.
-// Nothing here produces a hard error: a module declining a file is a
+// goroutine this function starts): enumerate's two internal streams
+// each own metaCh jointly (see enum.go) and it closes once both
+// finish. classify terminates when metaCh closes. The dispatch
+// goroutine owns extractCh and closes it once every pending item is
+// sent. A WaitGroup covering dispatch, every extract worker and the
+// carry-forward goroutine drives resultCh's close. This function is
+// resultCh's sink and ranges over it until it closes; that loop ending
+// is this function's own termination path. Nothing here produces a
+// hard error except enumerate's own (a git subprocess failing, checked
+// immediately after enumerate finishes, before anything depending on
+// markerDirs is even computed) — a module declining a file remains a
 // diagnostic (warnErr, surfaced in ## warnings), never a reason to fail
-// Refresh, exactly as before this directive.
+// the call.
 //
 // A concurrency-specific correctness point (§3 C5, "the same tree
-// produces byte-identical index output"): extract workers finish in
-// whatever order the scheduler happens to pick, so warnings arrive at
-// resultCh in a nondeterministic order — sorted by path below before
-// being returned, so C5 holds regardless of goroutine scheduling.
-// fileChanges needs no equivalent sort: store.commit already sorts its
-// own input by path before writing (store.go), a pre-existing
-// invariant this directive does not disturb.
-func runPipeline(fc fileContext, metas []scanner.FileMeta, ro *Store, enumChanged bool) (fileChanges []fileChange, warnings []string, dispatched, unchanged int, currentPaths map[string]bool) {
+// produces byte-identical index output"): extract workers and the
+// carry-forward goroutine finish in whatever order the scheduler picks,
+// so warnings arrive at resultCh in a nondeterministic order — sorted
+// by path below before being returned, so C5 holds regardless of
+// scheduling. fileChanges needs no equivalent sort: store.commit
+// already sorts its own input by path before writing (store.go), a
+// pre-existing invariant this directive does not disturb.
+func runPipeline(ctx context.Context, root string, scope scanner.Scope, ro *Store, assignments map[string]string, fallbackProject string) (pipelineResult, error) {
+	metaCh := make(chan scanner.FileMeta, metaBuffer)
+	var enumOut enumerateOutcome
+	var enumWG sync.WaitGroup
+	enumWG.Add(1)
+	go func() {
+		defer enumWG.Done()
+		enumerate(ctx, root, scope, assignments, ro, metaCh, &enumOut)
+	}()
+
+	var prodOut produceOutcome
+	classify(root, ro, metaCh, &prodOut) // blocks until metaCh closes, i.e. until enumerate finishes
+
+	enumWG.Wait() // makes the happens-before this depends on explicit, rather than merely relied upon
+	if enumOut.err != nil {
+		return pipelineResult{}, enumOut.err
+	}
+
+	markerDirs := scanner.MarkerDirs(enumOut.markerPaths)
+	markersByDir := buildMarkersByDir(enumOut.markerPaths)
+	projectNames := scanner.ProjectNames(markerDirs, fallbackProject)
+	// §21 C-8: nested marker directories sharing a name is the same
+	// failure as two configured roots sharing one — checked here, over
+	// the marker directories this call found.
+	if err := scanner.CheckNameCollisions(projectNames); err != nil {
+		return pipelineResult{}, err
+	}
+	rootProject := scanner.ProjectFor(".", markerDirs, projectNames, fallbackProject)
+
+	fc := fileContext{
+		root:            root,
+		markerDirs:      markerDirs,
+		projectNames:    projectNames,
+		fallbackProject: fallbackProject,
+		markersByDir:    markersByDir,
+		assignments:     assignments,
+	}
+
+	// A changed enum blob means the tracked file set (or the
+	// configuration it was filtered against) was actually
+	// re-enumerated, which can move marker directories and therefore
+	// project assignments even when every already-known file's own
+	// stat is untouched.
+	enumChanged := ro != nil && func() bool {
+		old, _ := ro.enumBlob()
+		return string(old) != string(enumOut.enumBlob)
+	}()
+
 	extractCh := make(chan produceItem, 2*extractWorkers)
 	resultCh := make(chan extracted, extractWorkers)
 
 	var wg sync.WaitGroup
-	wg.Add(1 + extractWorkers)
-	var out produceOutcome
+	wg.Add(1 + extractWorkers + 1) // dispatch, extractWorkers, carry-forward
 	go func() {
 		defer wg.Done()
-		produce(fc, metas, ro, enumChanged, extractCh, resultCh, &out)
+		defer close(extractCh)
+		for _, it := range prodOut.pending {
+			extractCh <- it
+		}
 	}()
 	for i := 0; i < extractWorkers; i++ {
 		go extractWorker(fc, extractCh, resultCh, &wg)
 	}
+	go func() {
+		defer wg.Done()
+		if !enumChanged {
+			return
+		}
+		for _, u := range prodOut.possiblyUnchanged {
+			resultCh <- carryForward(fc, u.meta, u.modTime, u.size, u.oldRec, ro)
+		}
+	}()
 	go func() {
 		wg.Wait()
 		close(resultCh)
@@ -278,6 +410,8 @@ func runPipeline(fc fileContext, metas []scanner.FileMeta, ro *Store, enumChange
 
 	type pathWarning struct{ path, msg string }
 	var warns []pathWarning
+	var fileChanges []fileChange
+	var dispatched int
 	for r := range resultCh {
 		fileChanges = append(fileChanges, r.change)
 		if r.warnErr != nil {
@@ -289,10 +423,28 @@ func runPipeline(fc fileContext, metas []scanner.FileMeta, ro *Store, enumChange
 	}
 
 	sort.Slice(warns, func(i, j int) bool { return warns[i].path < warns[j].path })
-	warnings = make([]string, len(warns))
+	warnings := make([]string, len(warns))
 	for i, w := range warns {
 		warnings[i] = fmt.Sprintf("%s: %s", w.path, w.msg)
 	}
 
-	return fileChanges, warnings, dispatched, out.unchanged, out.currentPaths
+	// enumChanged files never reach "unchanged": they are always
+	// carried forward instead (see the goroutine above), so this count
+	// is exactly the possiblyUnchanged set when nothing about the
+	// enumeration moved, and zero when it did.
+	unchanged := 0
+	if !enumChanged {
+		unchanged = len(prodOut.possiblyUnchanged)
+	}
+
+	return pipelineResult{
+		fileChanges:  fileChanges,
+		warnings:     warnings,
+		dispatched:   dispatched,
+		unchanged:    unchanged,
+		currentPaths: prodOut.currentPaths,
+		enumBlob:     enumOut.enumBlob,
+		enumChanged:  enumChanged,
+		rootProject:  rootProject,
+	}, nil
 }

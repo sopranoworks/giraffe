@@ -501,6 +501,114 @@ func untrackedFiles(ctx context.Context, root string) ([]string, error) {
 	return files, nil
 }
 
+// streamGitLines runs git with args under root and calls onLine for
+// each line of stdout as it is read from the pipe, rather than
+// waiting for the whole process to exit before anything is available
+// — the streaming counterpart to runGit (directive 019 §2: "a
+// subprocess's stdout is a pipe and can be read incrementally").
+// onLine returning a non-nil error (a malformed line, the same
+// condition trackedFiles/untrackedFiles already treat as fatal) stops
+// the read and kills the subprocess, rather than leaving it blocked
+// writing into a pipe nothing is draining anymore.
+func streamGitLines(ctx context.Context, root string, onLine func(line string) error, args ...string) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = root
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+
+	sc := bufio.NewScanner(stdout)
+	var lineErr error
+	for sc.Scan() {
+		line := sc.Text()
+		if line == "" {
+			continue
+		}
+		if err := onLine(line); err != nil {
+			lineErr = err
+			cancel()
+			break
+		}
+	}
+	scanErr := sc.Err()
+	waitErr := cmd.Wait()
+
+	if lineErr != nil {
+		return lineErr
+	}
+	if scanErr != nil {
+		return fmt.Errorf("read git %s output: %w", strings.Join(args, " "), scanErr)
+	}
+	if waitErr != nil {
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), waitErr, bytes.TrimSpace(stderr.Bytes()))
+	}
+	return nil
+}
+
+// StreamTracked runs `git ls-files -s`, filtering and marking each
+// path against scope as it is read from git's own output — the same
+// per-path decision FilterTracked makes over an already-complete map
+// — rather than waiting for the whole tracked set before filtering
+// anything (directive 019 §2: filtering needs nothing but the one
+// path in front of it, so there is nothing to wait for). onMeta is
+// called for every path scope keeps, in whatever order git prints
+// them (git's own index order, not a guarantee of this function's);
+// onMarker for every path that is also a marker basename, filtered or
+// not (§20 C-3, unaffected by this directive). Neither callback runs
+// concurrently with the other — both run on the goroutine that calls
+// this function.
+func StreamTracked(ctx context.Context, root string, scope Scope, onMeta func(FileMeta), onMarker func(path string)) error {
+	exclude := mergedExclude(scope)
+	markers := mergedMarkers(scope)
+	return streamGitLines(ctx, root, func(line string) error {
+		tab := strings.IndexByte(line, '\t')
+		if tab < 0 {
+			return fmt.Errorf("unexpected `git ls-files -s` line: %q", line)
+		}
+		fields := strings.Fields(line[:tab])
+		if len(fields) != 3 {
+			return fmt.Errorf("unexpected `git ls-files -s` line: %q", line)
+		}
+		relPath, hash := line[tab+1:], fields[1]
+		if included(relPath, exclude) {
+			onMeta(FileMeta{Path: relPath, BlobHash: hash, Size: statSize(root, relPath)})
+		}
+		if isMarker(relPath, markers) {
+			onMarker(relPath)
+		}
+		return nil
+	}, "ls-files", "-s")
+}
+
+// StreamUntracked is StreamTracked's counterpart for `git ls-files
+// --others --exclude-standard` — the untracked half, which has no
+// comparably cheap freshness signal and so is never cached (§26
+// C-28/item 5, §27 C-34), meaning it streams on every call, cache hit
+// or miss, not only a cold one.
+func StreamUntracked(ctx context.Context, root string, scope Scope, onMeta func(FileMeta), onMarker func(path string)) error {
+	exclude := mergedExclude(scope)
+	markers := mergedMarkers(scope)
+	return streamGitLines(ctx, root, func(line string) error {
+		relPath := line
+		if included(relPath, exclude) {
+			onMeta(FileMeta{Path: relPath, BlobHash: "", Size: statSize(root, relPath)})
+		}
+		if isMarker(relPath, markers) {
+			onMarker(relPath)
+		}
+		return nil
+	}, "ls-files", "--others", "--exclude-standard")
+}
+
 func runGit(ctx context.Context, root string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = root

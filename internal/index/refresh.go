@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 
@@ -72,84 +71,32 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 			}
 		}()
 	}
-	var roForDiscover *Store
+	var roForPipeline *Store
 	if roOK {
-		roForDiscover = ro
+		roForPipeline = ro
 	}
 
-	metas, markerPaths, enumBlob, err := discover(ctx, root, scope, roForDiscover)
+	// The pipeline (directive 018 §1, extended by directive 019 §2; see
+	// pipeline.go) is Refresh's own concurrency boundary: it enumerates,
+	// classifies, dispatches whatever actually needs (re-)extraction
+	// through a fixed pool of extract workers, and resolves markerDirs
+	// and this root's own project name — all of which now happen inside
+	// the pipeline itself, since project resolution needs enumeration
+	// completely finished (see runPipeline's own comment on why that
+	// boundary sits where it does). ro may be nil (first run);
+	// runPipeline and everything it calls tolerate that the same way the
+	// code it replaced did.
+	fallbackProject := filepath.Base(root)
+	result, err := runPipeline(ctx, root, scope, roForPipeline, assignments, fallbackProject)
 	if err != nil {
 		return nil, Stats{}, err
 	}
-	// A changed enum blob means the tracked file set (or the exclude
-	// fingerprint it was filtered against) was actually re-enumerated,
-	// which can move marker directories and therefore project
-	// assignments even when every already-known file's own stat is
-	// untouched — e.g. a project marker's content changing without any
-	// file being added or removed. Persisted file entries would
-	// otherwise carry a stale Project forward on the fast path below,
-	// since that path never recomputes them. Forcing a full rebuild here
-	// is conservative — most enum-cache misses already force one via a
-	// changed or new file too — but this is the one case that would not
-	// otherwise be caught, and differentially reconciling exactly which
-	// files' Project actually moved is left for the next directive (see
-	// the completion report).
-	enumChanged := roOK && func() bool {
-		old, _ := ro.enumBlob()
-		return string(old) != string(enumBlob)
-	}()
-
-	markerDirs := scanner.MarkerDirs(markerPaths)
-	// markersByDir is every marker directory's own set of marker
-	// basenames — go.mod, Cargo.toml, whichever were actually found
-	// there — derived from the same markerPaths root discovery already
-	// resolved. dirMarkersFor below looks a file's owning directory up
-	// in this map to decide which extraction module's own marker
-	// (directive 017 §3) that directory claims; computed once per
-	// Refresh call, not per file, since it depends only on where the
-	// markers are, never on the file being dispatched.
-	markersByDir := make(map[string]map[string]bool, len(markerDirs))
-	for _, mp := range markerPaths {
-		d := path.Dir(mp)
-		if markersByDir[d] == nil {
-			markersByDir[d] = make(map[string]bool)
-		}
-		markersByDir[d][path.Base(mp)] = true
-	}
-	fallbackProject := filepath.Base(root)
-	projectNames := scanner.ProjectNames(markerDirs, fallbackProject)
-	// §21 C-8: nested marker directories sharing a name is the same
-	// failure as two configured roots sharing one (checked by main, over
-	// a different names map) — one detection, both call sites.
-	if err := scanner.CheckNameCollisions(projectNames); err != nil {
-		return nil, Stats{}, err
-	}
-	rootProject := scanner.ProjectFor(".", markerDirs, projectNames, fallbackProject)
 
 	var stats Stats
-	stats.RootProject = rootProject
-
-	fc := fileContext{
-		root:            root,
-		markerDirs:      markerDirs,
-		projectNames:    projectNames,
-		fallbackProject: fallbackProject,
-		markersByDir:    markersByDir,
-		assignments:     assignments,
-	}
-	// The pipeline (directive 018 §1; see pipeline.go) is Refresh's own
-	// concurrency boundary: it stats and classifies every candidate,
-	// dispatches whatever actually needs (re-)extraction through a fixed
-	// pool of extract workers, and returns fileChanges ready for
-	// store.commit below, warnings ready for ## warnings, how many files
-	// were dispatched, how many were found unchanged, and every path
-	// seen this call (for the deletion diff that follows). ro may be nil
-	// (first run); runPipeline and everything it calls tolerate that the
-	// same way the code it replaced did.
-	fileChanges, warnings, dispatched, unchanged, currentPaths := runPipeline(fc, metas, ro, enumChanged)
-	stats.Warnings = warnings
-	stats.Dispatched = dispatched
-	stats.Reused = unchanged
+	stats.RootProject = result.rootProject
+	stats.Warnings = result.warnings
+	stats.Dispatched = result.dispatched
+	stats.Reused = result.unchanged
 
 	// Every path the store already knows about that this call did not
 	// see at all is gone — deleted, or newly excluded (directive 013:
@@ -157,7 +104,7 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	var deletes []string
 	if roOK {
 		for _, p := range ro.filePaths() {
-			if !currentPaths[p] {
+			if !result.currentPaths[p] {
 				deletes = append(deletes, p)
 			}
 		}
@@ -168,13 +115,13 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	// all"): nothing about any file, or the enumeration cache, needs to
 	// change, so the existing store is returned exactly as it was
 	// opened.
-	if roOK && len(fileChanges) == 0 && len(deletes) == 0 {
-		result := ro
+	if roOK && len(result.fileChanges) == 0 && len(deletes) == 0 {
+		r := ro
 		ro = nil // ownership transferred to the caller; the deferred Close above must not also close it
-		return result, stats, nil
+		return r, stats, nil
 	}
 
-	writeEnum := !roOK || enumChanged
+	writeEnum := !roOK || result.enumChanged
 	var target *Store
 	if roOK {
 		_ = ro.Close()
@@ -186,7 +133,7 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	if err != nil {
 		return nil, Stats{}, err
 	}
-	keysWritten, err := target.commit(fileChanges, deletes, enumBlob, writeEnum)
+	keysWritten, err := target.commit(result.fileChanges, deletes, result.enumBlob, writeEnum)
 	if err != nil {
 		_ = target.Close()
 		return nil, Stats{}, err
@@ -228,22 +175,40 @@ func readLines(root, name string) (lines []string, lineNos []int, err error) {
 
 // LoadExclude reads the per-project scope configuration in
 // .giraffe/exclude: exclusion patterns (and negations, §24 C-19) plus,
-// since §25 C-26, operator language assignments — the only tier that
-// can know a project's own convention (".inc" is C here, assembler
-// there). A missing file means no project-level exclusions or
-// assignments beyond the scanner's own defaults.
+// since §25 C-26, operator assignments — the only tier that can know a
+// project's own convention (".inc" is C here, assembler there), and,
+// since directive 019 §4, the only tier that can say "index this"
+// without also having to say what it is. A missing file means no
+// project-level exclusions or assignments beyond the scanner's own
+// defaults.
 //
-// A line is an assignment when it is exactly two whitespace-separated
-// tokens "ext:<value>" and "lang:<value>", in either order — the same
+// A line is an assignment when it is either one whitespace-separated
+// token "ext:<value>" alone — index files with this extension, with no
+// language claim, overriding the exclusion module's deny list without
+// asserting a value for lang (directive 019 §4: "lang is absent when
+// unknown by design [§25 C-24]; being forced to invent a value in
+// order to index a file contradicts that directly") — or exactly two
+// tokens "ext:<value>" and "lang:<value>", in either order — index
+// files with this extension and label them langName. This is the same
 // name:value shape --query already uses, so the mental model transfers
-// without pulling this package's two-token grammar through query's
-// tokenizer (built for arbitrary filters, quoting, validation against
-// an index — heavier than this fixed shape needs). Anything else is an
-// exclusion pattern, as before — except a line that starts with "ext:"
-// or "lang:" but does not parse as a well-formed assignment, which is a
-// hard error (§26 C-29): no real path starts that way, so a line
-// shaped like a typoed assignment is never a plausible exclusion
-// pattern either.
+// without pulling this package's small, fixed grammar through query's
+// own tokenizer (built for arbitrary filters, quoting, validation
+// against an index — heavier than this fixed shape needs). Anything
+// else is an exclusion pattern, as before — except a line that starts
+// with "ext:" or "lang:" but does not parse as a well-formed
+// assignment, which is a hard error (§26 C-29): no real path starts
+// that way, so a line shaped like a typoed assignment is never a
+// plausible exclusion pattern either.
+//
+// Per-file granularity — the capability 017 §2 removed when it took
+// deniedExtensions out of scanner.Pattern's reach (a negated
+// `!logo.png` could no longer pull one specific denied file back in,
+// only every file of an extension) — does not return here either:
+// directive 018 §2 already chose the assignments route over restoring
+// Pattern negation, and this directive's own item 4 only separates what
+// that route can say (index vs. index-and-label), not who it can say it
+// about. See the completion report for why per-extension remains the
+// granularity, not per-file.
 //
 // Hand-written, unlike everything under cacheDir: authored by the
 // operator, and theirs to commit or not — and now, per §25 C-27,
@@ -277,32 +242,50 @@ func looksLikeAssignment(line string) bool {
 	return strings.HasPrefix(line, "ext:") || strings.HasPrefix(line, "lang:")
 }
 
-// parseAssignment recognises an operator language assignment line
-// (§25 C-26): exactly "ext:<value> lang:<value>", in either order,
+// parseAssignment recognises an operator assignment line: either
+// "ext:<value>" alone (directive 019 §4 — index this extension, no
+// language claim) or "ext:<value> lang:<value>" (§25 C-26 — index this
+// extension and label it), in either order for the two-token form,
 // neither value empty. Anything else — including a bare pattern, or a
 // pattern that happens to contain a colon — is not an assignment; the
 // caller (LoadExclude) decides whether that makes it an ordinary
-// pattern or an error.
+// pattern or an error. ok=true and langName=="" together are how
+// LoadExclude's assignments map distinguishes "not assigned at all"
+// (the key absent) from "assigned, no language" (the key present with
+// an empty value) — see exclude.Extract, which checks presence, not
+// non-emptiness.
 func parseAssignment(line string) (ext, langName string, ok bool) {
 	fields := strings.Fields(line)
-	if len(fields) != 2 {
-		return "", "", false
-	}
-	var haveExt, haveLang bool
-	for _, f := range fields {
-		switch {
-		case strings.HasPrefix(f, "ext:"):
-			ext, haveExt = strings.TrimPrefix(f, "ext:"), true
-		case strings.HasPrefix(f, "lang:"):
-			langName, haveLang = strings.TrimPrefix(f, "lang:"), true
-		default:
+	switch len(fields) {
+	case 1:
+		f := fields[0]
+		if !strings.HasPrefix(f, "ext:") {
 			return "", "", false
 		}
-	}
-	if !haveExt || !haveLang || ext == "" || langName == "" {
+		ext = strings.TrimPrefix(f, "ext:")
+		if ext == "" {
+			return "", "", false
+		}
+		return ext, "", true
+	case 2:
+		var haveExt, haveLang bool
+		for _, f := range fields {
+			switch {
+			case strings.HasPrefix(f, "ext:"):
+				ext, haveExt = strings.TrimPrefix(f, "ext:"), true
+			case strings.HasPrefix(f, "lang:"):
+				langName, haveLang = strings.TrimPrefix(f, "lang:"), true
+			default:
+				return "", "", false
+			}
+		}
+		if !haveExt || !haveLang || ext == "" || langName == "" {
+			return "", "", false
+		}
+		return ext, langName, true
+	default:
 		return "", "", false
 	}
-	return ext, langName, true
 }
 
 // LoadRoots reads .giraffe/roots: paths to other project roots to

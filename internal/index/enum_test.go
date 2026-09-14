@@ -3,6 +3,7 @@ package index
 import (
 	"context"
 	"os/exec"
+	"sort"
 	"testing"
 
 	"giraffe/internal/scanner"
@@ -44,8 +45,8 @@ func TestEnumCache_EncodeDecodeRoundTrip(t *testing.T) {
 	if got.IndexModTime != 123 || got.IndexSize != 456 {
 		t.Errorf("fingerprint = %d/%d, want 123/456", got.IndexModTime, got.IndexSize)
 	}
-	if got.Exclude != "vendor/" {
-		t.Errorf("exclude fingerprint = %q, want %q", got.Exclude, "vendor/")
+	if got.Config != "vendor/" {
+		t.Errorf("config fingerprint = %q, want %q", got.Config, "vendor/")
 	}
 	if len(got.TrackedMetas) != 2 || got.TrackedMetas[0].Path != "a.go" || got.TrackedMetas[0].BlobHash != "hash-a" {
 		t.Errorf("trackedMetas = %#v", got.TrackedMetas)
@@ -221,5 +222,147 @@ func TestFilterTracked_MatchesFilterMetasAndMarkersOfCombined(t *testing.T) {
 	}
 	if len(markersViaDiscover) != len(markersViaSplit) {
 		t.Fatalf("markers differ in count: Discover=%v split=%v", markersViaDiscover, markersViaSplit)
+	}
+}
+
+// TestStreamTracked_MatchesFilterTracked confirms the streaming path
+// (directive 019 §2) accepts and marks exactly the same paths as the
+// batch path (FilterTracked) it replaces inside enumerate — the two
+// must never quietly diverge on what "included" and "marker" mean,
+// since nothing else would catch it before ranking or output.
+func TestStreamTracked_MatchesFilterTracked(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, "a.go", "package p\n\nfunc A() {}\n")
+	writeFile(t, root, "vendor/dep/dep.go", "package dep\n")
+	writeFile(t, root, "go.mod", "module example\n")
+	gitCommit(t, root, "a.go", "vendor/dep/dep.go", "go.mod")
+
+	sc := scope()
+	tracked, err := scanner.EnumerateTracked(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMetas, wantMarkers := scanner.FilterTracked(root, tracked, sc)
+
+	var gotMetas []scanner.FileMeta
+	var gotMarkers []string
+	if err := scanner.StreamTracked(context.Background(), root, sc,
+		func(m scanner.FileMeta) { gotMetas = append(gotMetas, m) },
+		func(p string) { gotMarkers = append(gotMarkers, p) },
+	); err != nil {
+		t.Fatal(err)
+	}
+	sort.Slice(gotMetas, func(i, j int) bool { return gotMetas[i].Path < gotMetas[j].Path })
+	sort.Strings(gotMarkers)
+
+	if len(gotMetas) != len(wantMetas) {
+		t.Fatalf("metas differ in count: stream=%d batch=%d", len(gotMetas), len(wantMetas))
+	}
+	for i := range wantMetas {
+		if gotMetas[i] != wantMetas[i] {
+			t.Errorf("meta %d: stream=%#v batch=%#v", i, gotMetas[i], wantMetas[i])
+		}
+	}
+	if len(gotMarkers) != len(wantMarkers) {
+		t.Fatalf("markers differ: stream=%v batch=%v", gotMarkers, wantMarkers)
+	}
+}
+
+// TestStreamUntracked_MatchesFilterUntracked is StreamTracked's own
+// equivalence test for the untracked half.
+func TestStreamUntracked_MatchesFilterUntracked(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, "wip.go", "package p\n\nfunc WIP() {}\n")
+	writeFile(t, root, "vendor/dep/dep.go", "package dep\n")
+
+	sc := scope()
+	untracked, err := scanner.EnumerateUntracked(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMetas, wantMarkers := scanner.FilterUntracked(root, untracked, sc)
+
+	var gotMetas []scanner.FileMeta
+	var gotMarkers []string
+	if err := scanner.StreamUntracked(context.Background(), root, sc,
+		func(m scanner.FileMeta) { gotMetas = append(gotMetas, m) },
+		func(p string) { gotMarkers = append(gotMarkers, p) },
+	); err != nil {
+		t.Fatal(err)
+	}
+	sort.Slice(gotMetas, func(i, j int) bool { return gotMetas[i].Path < gotMetas[j].Path })
+	sort.Strings(gotMarkers)
+
+	if len(gotMetas) != len(wantMetas) {
+		t.Fatalf("metas differ in count: stream=%d batch=%d", len(gotMetas), len(wantMetas))
+	}
+	for i := range wantMetas {
+		if gotMetas[i] != wantMetas[i] {
+			t.Errorf("meta %d: stream=%#v batch=%#v", i, gotMetas[i], wantMetas[i])
+		}
+	}
+	if len(gotMarkers) != len(wantMarkers) {
+		t.Fatalf("markers differ: stream=%v batch=%v", gotMarkers, wantMarkers)
+	}
+}
+
+// TestFingerprintConfig_ChangesWithAssignments (directive 019 §3):
+// 017 already put the exclude-pattern list into the enum cache's
+// fingerprint; this directive adds the assignments map, so an
+// operator adding or changing an ext:/lang: line — with the pattern
+// list byte-for-byte unchanged — still invalidates the cached tracked
+// enumeration.
+func TestFingerprintConfig_ChangesWithAssignments(t *testing.T) {
+	patterns := []scanner.Pattern{"vendor/"}
+	base := fingerprintConfig(patterns, nil)
+	withAssignment := fingerprintConfig(patterns, map[string]string{".png": "image"})
+	if base == withAssignment {
+		t.Fatal("expected fingerprintConfig to differ once an assignment is added, with patterns unchanged")
+	}
+	changedLang := fingerprintConfig(patterns, map[string]string{".png": "raster"})
+	if withAssignment == changedLang {
+		t.Fatal("expected fingerprintConfig to differ when an assignment's language changes")
+	}
+	indexOnly := fingerprintConfig(patterns, map[string]string{".png": ""})
+	if indexOnly == base || indexOnly == withAssignment {
+		t.Fatal("expected an index-only assignment's fingerprint to differ from both no-assignment and a labelled one")
+	}
+	// Order must not matter (map iteration is not deterministic, §3 C5).
+	multi1 := fingerprintConfig(patterns, map[string]string{".png": "image", ".inc": "c"})
+	multi2 := fingerprintConfig(patterns, map[string]string{".inc": "c", ".png": "image"})
+	if multi1 != multi2 {
+		t.Errorf("fingerprintConfig is sensitive to map iteration order: %q vs %q", multi1, multi2)
+	}
+}
+
+// TestRefresh_EnumCacheInvalidatedByAssignmentChangeAlone confirms the
+// same fact end to end through Refresh, with the exclude pattern list
+// held fixed across both calls: only the assignments map changes.
+func TestRefresh_EnumCacheInvalidatedByAssignmentChangeAlone(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, "a.go", "package p\n\nfunc A() {}\n")
+	gitCommit(t, root, "a.go")
+
+	s1, _, err := Refresh(context.Background(), root, scope(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeStore(t, s1)
+	before, ok := loadEnumCacheForTest(t, root)
+	if !ok {
+		t.Fatal("expected the enum cache to be warm after the first Refresh")
+	}
+
+	s2, _, err := Refresh(context.Background(), root, scope(), map[string]string{".png": "image"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeStore(t, s2)
+	after, ok := loadEnumCacheForTest(t, root)
+	if !ok {
+		t.Fatal("expected the enum cache to still be present")
+	}
+	if before.Config == after.Config {
+		t.Error("expected the enum cache's own config fingerprint to change once an assignment is added, even with .git/index untouched")
 	}
 }

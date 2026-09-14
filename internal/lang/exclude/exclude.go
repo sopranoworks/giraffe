@@ -54,15 +54,21 @@ var knownExtensionless = []string{
 // continues.
 //
 // An operator assignment for f's own extension (assignments, from
-// .giraffe/exclude's "ext:<x> lang:<y>" lines, §25 C-26) always wins
-// over the deny list (directive 018 §2: "a project that wants a .png
-// indexed by name must be able to say so") — checked first, and
-// answered handled=false so a later module, in practice file.Extract,
-// still produces a labelled entry for it. This is the same
-// assignments map file.Extract already reads to label Lang; no new
-// coupling to scanner.Pattern is introduced to get it.
+// .giraffe/exclude's "ext:<x>" or "ext:<x> lang:<y>" lines, §25 C-26,
+// directive 019 §4) always wins over the deny list (directive 018 §2:
+// "a project that wants a .png indexed by name must be able to say
+// so") — checked first, by presence in the map, not by whether its
+// value is non-empty: an assignment can say "index this" with no
+// language claim at all (directive 019 §4 — lang is absent when
+// unknown by design, §25 C-24, and an index-only assignment must not
+// be forced to invent one), which the map represents as the key
+// present with an empty value, not the key absent. Answered
+// handled=false so a later module, in practice file.Extract, still
+// produces a labelled (or deliberately unlabelled) entry for it. This
+// is the same assignments map file.Extract already reads to label
+// Lang; no new coupling to scanner.Pattern is introduced to get it.
 func Extract(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, handled bool, err error) {
-	if assignments[path.Ext(f.Path)] != "" {
+	if _, indexed := assignments[path.Ext(f.Path)]; indexed {
 		return nil, false, nil
 	}
 	if excluded(f.Path) {
