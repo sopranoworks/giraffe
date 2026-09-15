@@ -52,6 +52,7 @@ var (
 	bucketNameTrigrams = []byte("name_trigrams")
 	keySchemaVersion   = []byte("schema_version")
 	keyEnumBlob        = []byte("blob")
+	keyWalkBlob        = []byte("walk")
 	keyNextID          = []byte("next_id")
 )
 
@@ -366,6 +367,24 @@ func (s *Store) enumBlob() ([]byte, error) {
 	return v, err
 }
 
+// walkBlob returns the raw incremental-walk cache blob (directive 021
+// item 2), or nil if none has been written yet — the same "no cache
+// yet" contract enumBlob has, in the same bucket, under its own key.
+func (s *Store) walkBlob() ([]byte, error) {
+	var v []byte
+	err := s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketEnum)
+		if b == nil {
+			return nil
+		}
+		if raw := b.Get(keyWalkBlob); raw != nil {
+			v = append([]byte(nil), raw...)
+		}
+		return nil
+	})
+	return v, err
+}
+
 // fileRecord looks up path's extraction-cache entry: its freshness
 // fingerprint and the ids of the entries extracted from it last time.
 // ok is false when path has no record at all (never seen, or the store
@@ -478,6 +497,14 @@ type fileChange struct {
 	Entries []entry.Entry
 }
 
+// cacheBlobs bundles commit's two cache-blob parameters — see commit's
+// own doc comment for why they are one value, not two parameter pairs.
+type cacheBlobs struct {
+	enum      []byte
+	writeEnum bool
+	walk      []byte
+}
+
 // commitMode selects how commit fills bbolt's pages while writing —
 // see commit's own doc comment for why this is a named fork, not a
 // bool.
@@ -543,9 +570,19 @@ const (
 // An enumerated mode, not a second bool parameter (code-manners M5:
 // "no boolean parameter that selects behavior... one enumerated mode")
 // — bulk-vs-differential is a named behavior fork this call makes, not
-// a data flag like writeEnum above, which says only whether a value is
+// a data flag like caches.writeEnum, which says only whether a value is
 // present to write, not how the write itself behaves.
-func (s *Store) commit(changes []fileChange, deletes []string, enumBlob []byte, writeEnum bool, mode commitMode) (keysWritten int, err error) {
+//
+// caches bundles the enum cache blob (directive 019) and the
+// incremental walk cache blob (directive 021 item 2) — two parallel
+// (blob []byte, write bool)-shaped facts that already had to change
+// together (both come from the same enumerate call, in refresh.go) and
+// so are one value, not two more parameters on top of the four already
+// here (code-manners M2; patterns.md §9). The walk blob has no write
+// flag of its own: Walk always runs and always produces a fresh cache
+// to persist, unlike the enum blob, whose cache-hit replay path can
+// leave nothing new to write.
+func (s *Store) commit(changes []fileChange, deletes []string, caches cacheBlobs, mode commitMode) (keysWritten int, err error) {
 	err = s.db.Update(func(tx *bolt.Tx) error {
 		eb := tx.Bucket(bucketEntries)
 		fb := tx.Bucket(bucketFiles)
@@ -662,15 +699,25 @@ func (s *Store) commit(changes []fileChange, deletes []string, enumBlob []byte, 
 			touch('t', []byte(g))
 		}
 
-		if writeEnum && enumBlob != nil {
+		if caches.writeEnum && caches.enum != nil {
 			eb2, err := tx.CreateBucketIfNotExists(bucketEnum)
 			if err != nil {
 				return err
 			}
-			if err := eb2.Put(keyEnumBlob, enumBlob); err != nil {
+			if err := eb2.Put(keyEnumBlob, caches.enum); err != nil {
 				return err
 			}
 			touch('u', keyEnumBlob)
+		}
+		if caches.walk != nil {
+			wb, err := tx.CreateBucketIfNotExists(bucketEnum)
+			if err != nil {
+				return err
+			}
+			if err := wb.Put(keyWalkBlob, caches.walk); err != nil {
+				return err
+			}
+			touch('u', keyWalkBlob)
 		}
 
 		if len(sortedChanges) > 0 {

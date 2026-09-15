@@ -40,7 +40,7 @@ func TestStore_BuildAndQuery_RoundTrip(t *testing.T) {
 			Entries: []entry.Entry{{Path: "main.go", Name: "main", Kind: "func", Project: "giraffe"}},
 		},
 	}
-	if _, err := s.commit(changes, nil, nil, false, commitBulk); err != nil {
+	if _, err := s.commit(changes, nil, cacheBlobs{}, commitBulk); err != nil {
 		t.Fatal(err)
 	}
 
@@ -174,7 +174,8 @@ func TestStore_DeterministicOutput(t *testing.T) {
 			{Path: "a.go", ModTime: 1, Size: 10, Entries: []entry.Entry{{Path: "a.go", Name: "A", Kind: "func"}}},
 			{Path: "c.go", ModTime: 3, Size: 30, Entries: []entry.Entry{{Path: "c.go", Name: "Cluster", Kind: "type"}}},
 		}
-		if _, err := s.commit(changes, nil, []byte("enum-blob"), true, commitBulk); err != nil {
+		caches := cacheBlobs{enum: []byte("enum-blob"), writeEnum: true}
+		if _, err := s.commit(changes, nil, caches, commitBulk); err != nil {
 			t.Fatal(err)
 		}
 		closeStore(t, s)
@@ -234,7 +235,7 @@ func TestStore_BulkFillPercent_FewerLeafPages(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.commit(changes, nil, nil, false, mode); err != nil {
+		if _, err := s.commit(changes, nil, cacheBlobs{}, mode); err != nil {
 			t.Fatal(err)
 		}
 		defer closeStore(t, s)
@@ -265,7 +266,7 @@ func TestStore_BulkFillPercent_SameContent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.commit(changes, nil, nil, false, mode); err != nil {
+		if _, err := s.commit(changes, nil, cacheBlobs{}, mode); err != nil {
 			t.Fatal(err)
 		}
 		defer closeStore(t, s)

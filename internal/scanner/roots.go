@@ -1,7 +1,6 @@
 package scanner
 
 import (
-	"context"
 	"fmt"
 	"path"
 	"sort"
@@ -33,42 +32,6 @@ func isMarker(relPath string, markers []string) bool {
 		}
 	}
 	return false
-}
-
-// MarkerFiles returns every marker file's path in the repository,
-// regardless of scope. Root discovery must see a marker even though an
-// exclude pattern could otherwise drop it — a marker is not itself an
-// extraction input (§20 C-3), so it needs its own, unfiltered
-// enumeration rather than reusing List's scoped result. extra names a
-// registered language module's own marker on top of markerNames, the
-// same way Scope.Markers does for FilterTracked/FilterUntracked.
-//
-// Called on its own, this pays for `git ls-files` (tracked and
-// untracked) a second time on top of whatever already called List — see
-// Discover for the single-enumeration path a caller needing both should
-// use instead.
-func MarkerFiles(ctx context.Context, root string, extra []string) ([]string, error) {
-	tracked, untracked, err := enumerate(ctx, root)
-	if err != nil {
-		return nil, err
-	}
-	markers := append(append([]string(nil), markerNames...), extra...)
-	return markersOf(tracked, untracked, markers), nil
-}
-
-func markersOf(tracked map[string]string, untracked []string, markers []string) []string {
-	var out []string
-	for p := range tracked {
-		if isMarker(p, markers) {
-			out = append(out, p)
-		}
-	}
-	for _, p := range untracked {
-		if isMarker(p, markers) {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // MarkerDirs returns every directory that contains a marker file —

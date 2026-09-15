@@ -143,7 +143,8 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	if err != nil {
 		return nil, Stats{}, err
 	}
-	keysWritten, err := target.commit(result.fileChanges, deletes, result.enumBlob, writeEnum, mode)
+	caches := cacheBlobs{enum: result.enumBlob, writeEnum: writeEnum, walk: result.walkBlob}
+	keysWritten, err := target.commit(result.fileChanges, deletes, caches, mode)
 	if err != nil {
 		_ = target.Close()
 		return nil, Stats{}, err

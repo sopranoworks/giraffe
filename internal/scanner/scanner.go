@@ -1,12 +1,17 @@
 // Package scanner owns all file access (specifications/giraffe.md §18).
-// List resolves the file set once — tracked paths and blob hashes from
-// `git ls-files -s`, untracked paths from `git ls-files --others
-// --exclude-standard` — without opening anything, so a caller can decide,
-// from blob hashes alone, which files are already indexed and can be left
-// unread (§9: "unchanged blob → file is not reopened"). Open then returns
-// a File whose content is read from disk only when a caller actually asks
-// for it (directive 017 §1). Language modules never open a file
-// themselves; they receive File values.
+// The file set is resolved once — StreamTracked's tracked paths and
+// blob hashes from `git ls-files -s` where a root has its own .git
+// (HasGitDir), Walk's own incremental directory read for everything
+// else (directive 021: no git at all, or the untracked remainder of an
+// ordinary repository) — without opening anything, so a caller can
+// decide, from blob hashes alone, which files are already indexed and
+// can be left unread (§9: "unchanged blob → file is not reopened").
+// Which route a call takes is this package's own decision, invisible to
+// a caller: enumeration returns a set of paths, and how it obtained
+// them is an implementation choice. Open then returns a File whose
+// content is read from disk only when a caller actually asks for it
+// (directive 017 §1). Language modules never open a file themselves;
+// they receive File values.
 package scanner
 
 import (
@@ -18,23 +23,22 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
 // FileMeta is one candidate file's identity, without its contents.
 type FileMeta struct {
 	Path     string // repo-relative, normalised
-	BlobHash string // git blob hash; "" for untracked files
+	BlobHash string // git blob hash; "" for untracked or walked files
 
 	// Size is the file's byte size, stat'd once when this FileMeta is
-	// produced (FilterTracked/FilterUntracked/filterMetas, below) — a
-	// declaration search never needed it, but a filename result on a
-	// corpus with no extractor has nothing else to tell a caller
-	// deciding whether to open the file directly or narrow it first
-	// (directive 009 item 3). 0 if the stat failed (gone between
-	// enumeration and filtering); callers already tolerate that race
-	// elsewhere (index.Refresh's own extraction stat).
+	// produced (StreamTracked/FilterWalked, below) — a declaration
+	// search never needed it, but a filename result on a corpus with no
+	// extractor has nothing else to tell a caller deciding whether to
+	// open the file directly or narrow it first (directive 009 item 3).
+	// 0 if the stat failed (gone between enumeration and filtering);
+	// callers already tolerate that race elsewhere (index.Refresh's own
+	// extraction stat).
 	//
 	// Not a freshness signal: on an enum-cache hit (index.discover),
 	// the tracked half's metas — this field included — come back from
@@ -166,14 +170,14 @@ var defaultExclude = []Pattern{
 	"*.pb.go",
 }
 
-// Scope selects what List considers: the paths left out. Extension —
-// or extensionless shape — no longer gates the candidate set itself
-// (§24 C-18, extended by directive 017 §2): List returns every path
-// exclusion leaves standing, full stop. Which of those a language
-// module actually wants, including whether to exclude it from the
-// index entirely, is decided downstream, per file, by the registered
-// chain (giraffe/internal/lang) — the scanner names no extension and
-// no filename shape anywhere in this package.
+// Scope selects what enumeration considers: the paths left out.
+// Extension — or extensionless shape — no longer gates the candidate
+// set itself (§24 C-18, extended by directive 017 §2): every path
+// exclusion leaves standing is a candidate, full stop. Which of those a
+// language module actually wants, including whether to exclude it from
+// the index entirely, is decided downstream, per file, by the
+// registered chain (giraffe/internal/lang) — the scanner names no
+// extension and no filename shape anywhere in this package.
 type Scope struct {
 	Exclude []Pattern
 
@@ -198,78 +202,26 @@ func Root(root string) (string, error) {
 	return resolved, nil
 }
 
-// List resolves the current file set — tracked and untracked, filtered
-// only by scope's exclusion patterns (§19; directive 017 §2 removed
-// the coverage-by-extension default this doc comment used to also
-// describe) — without reading any of it. Order is deterministic (path
-// order), independent of anything about how the files were produced.
-func List(ctx context.Context, root string, scope Scope) ([]FileMeta, error) {
-	tracked, untracked, err := enumerate(ctx, root)
-	if err != nil {
-		return nil, err
-	}
-	return filterMetas(root, tracked, untracked, scope), nil
-}
-
-// enumerate is git's two-call file enumeration (tracked with blob hashes,
-// then untracked), factored out so a caller needing both List's
-// scope-filtered result and MarkerFiles' unfiltered one in the same
-// invocation pays for it once — see Discover, below.
-func enumerate(ctx context.Context, root string) (tracked map[string]string, untracked []string, err error) {
-	tracked, err = trackedFiles(ctx, root)
-	if err != nil {
-		return nil, nil, err
-	}
-	untracked, err = untrackedFiles(ctx, root)
-	if err != nil {
-		return nil, nil, err
-	}
-	return tracked, untracked, nil
-}
-
-// EnumerateTracked runs only the tracked half of enumerate: `git
-// ls-files -s`. Exposed so a caller can cache this half across calls
-// (index.Refresh, keyed on GitIndexFingerprint below) while always
-// re-running the untracked half fresh, which has no comparably cheap
-// freshness signal (§26 C-28/item 5).
-func EnumerateTracked(ctx context.Context, root string) (map[string]string, error) {
-	return trackedFiles(ctx, root)
-}
-
-// EnumerateUntracked runs only the untracked half of enumerate: `git
-// ls-files --others --exclude-standard`.
-func EnumerateUntracked(ctx context.Context, root string) ([]string, error) {
-	return untrackedFiles(ctx, root)
-}
-
-// Combine builds the same (metas, markerPaths) result Discover would,
-// from an already-known tracked and untracked file set. This is the
-// seam a persistent enumeration cache uses (index.Refresh) to skip
-// re-running git for the tracked half without duplicating filterMetas
-// or markersOf.
-func Combine(root string, tracked map[string]string, untracked []string, scope Scope) (metas []FileMeta, markerPaths []string) {
-	return filterMetas(root, tracked, untracked, scope), markersOf(tracked, untracked, mergedMarkers(scope))
-}
-
 // GitIndexFingerprint reports the mtime and size of root's .git/index —
 // git's own record of the tracked file set and staged changes. Any
-// operation that can change what EnumerateTracked returns (add, rm,
+// operation that can change what StreamTracked returns (add, rm,
 // checkout, merge, reset, commit, stash) rewrites this file, so it is a
 // correct freshness signal for the tracked half of enumeration and,
 // unlike HEAD, catches a staged-but-uncommitted add or remove too.
 //
-// It says nothing about untracked files: a file created or deleted in
-// the working tree without ever being staged changes neither this
-// fingerprint nor HEAD (§26 C-28/item 5 — "a working tree that has
-// moved without HEAD moving"). There is no comparably cheap fingerprint
-// for that half; EnumerateUntracked must always be re-run, never cached
-// against this or any other signal.
+// It says nothing about anything Walk resolves: a file created or
+// deleted in the working tree without ever being staged changes neither
+// this fingerprint nor HEAD (§26 C-28/item 5 — "a working tree that has
+// moved without HEAD moving"). Walk has its own, different freshness
+// mechanism (WalkCache, directive 021 item 2) — directory mtimes, not
+// this file at all.
 //
 // ok is false if .git/index cannot be stat'd at all (a linked worktree
-// or submodule whose .git is a file pointing elsewhere, or a repository
-// state with no index yet) — the caller's only correct response is to
-// skip the cache, not to treat this as an error: an enumeration that
-// always re-runs git is still correct, only slower.
+// or submodule whose .git is a file pointing elsewhere, a repository
+// with no commits and nothing ever staged, or no .git at all) — the
+// caller's only correct response is to skip the cache, not to treat
+// this as an error: enumeration that always re-runs git is still
+// correct, only slower.
 func GitIndexFingerprint(root string) (modTime, size int64, ok bool) {
 	info, err := os.Stat(filepath.Join(root, ".git", "index"))
 	if err != nil {
@@ -279,9 +231,8 @@ func GitIndexFingerprint(root string) (modTime, size int64, ok bool) {
 }
 
 // mergedExclude is the one place default and project-level exclusion
-// patterns are combined (§19). Factored out so FilterTracked and
-// FilterUntracked, below, build the same list filterMetas always has,
-// without restating the append twice.
+// patterns are combined (§19). Factored out so every enumeration route
+// builds the same list, without restating the append in each one.
 func mergedExclude(scope Scope) []Pattern {
 	exclude := make([]Pattern, 0, len(defaultExclude)+len(scope.Exclude))
 	exclude = append(exclude, defaultExclude...)
@@ -302,31 +253,6 @@ func mergedMarkers(scope Scope) []string {
 	return markers
 }
 
-func filterMetas(root string, tracked map[string]string, untracked []string, scope Scope) []FileMeta {
-	exclude := mergedExclude(scope)
-
-	files := make(map[string]string, len(tracked)+len(untracked)) // path -> blob hash ("" if untracked)
-	for relPath, hash := range tracked {
-		if included(relPath, exclude) {
-			files[relPath] = hash
-		}
-	}
-	for _, relPath := range untracked {
-		if included(relPath, exclude) {
-			if _, seen := files[relPath]; !seen {
-				files[relPath] = ""
-			}
-		}
-	}
-
-	metas := make([]FileMeta, 0, len(files))
-	for p, hash := range files {
-		metas = append(metas, FileMeta{Path: p, BlobHash: hash, Size: statSize(root, p)})
-	}
-	sort.Slice(metas, func(i, j int) bool { return metas[i].Path < metas[j].Path })
-	return metas
-}
-
 // statSize is FileMeta.Size's one source: a best-effort stat, never an
 // error — a file gone between enumeration and filtering (e.g. a race
 // with an editor's save-as-rename) just gets Size 0, the same
@@ -338,76 +264,6 @@ func statSize(root, relPath string) int64 {
 		return 0
 	}
 	return info.Size()
-}
-
-// FilterTracked filters tracked's paths through scope's exclusion rules
-// (§19), and separately finds every marker file among them regardless
-// of exclusion (§20 C-3: root discovery must see go.mod even where an
-// exclude pattern would otherwise drop it — markersOf's own rule,
-// reproduced here since a cached tracked half needs both without
-// re-deriving one from the other).
-//
-// Exposed so a persistent enumeration cache (index.Refresh) can filter
-// and mark the tracked half once and reuse both results across calls:
-// measured on llvm-project (184181 tracked files), this — not the git
-// subprocess calls themselves — is the larger remaining cost once
-// enumeration is cached (§26 C-28/item 5).
-func FilterTracked(root string, tracked map[string]string, scope Scope) (metas []FileMeta, markerPaths []string) {
-	exclude := mergedExclude(scope)
-	markers := mergedMarkers(scope)
-	for relPath, hash := range tracked {
-		if included(relPath, exclude) {
-			metas = append(metas, FileMeta{Path: relPath, BlobHash: hash, Size: statSize(root, relPath)})
-		}
-		if isMarker(relPath, markers) {
-			markerPaths = append(markerPaths, relPath)
-		}
-	}
-	sort.Slice(metas, func(i, j int) bool { return metas[i].Path < metas[j].Path })
-	return metas, markerPaths
-}
-
-// FilterUntracked is FilterTracked's counterpart for the untracked
-// half, which is never cached (§26 C-28/item 5) but still needs
-// filtering and marker detection on every call.
-func FilterUntracked(root string, untracked []string, scope Scope) (metas []FileMeta, markerPaths []string) {
-	exclude := mergedExclude(scope)
-	markers := mergedMarkers(scope)
-	for _, relPath := range untracked {
-		if included(relPath, exclude) {
-			metas = append(metas, FileMeta{Path: relPath, BlobHash: "", Size: statSize(root, relPath)})
-		}
-		if isMarker(relPath, markers) {
-			markerPaths = append(markerPaths, relPath)
-		}
-	}
-	sort.Slice(metas, func(i, j int) bool { return metas[i].Path < metas[j].Path })
-	return metas, markerPaths
-}
-
-// MergeSortedMetas merges a and b — each already sorted by Path, which
-// FilterTracked and FilterUntracked both guarantee — into one sorted
-// slice in O(n+m), rather than concatenating and re-sorting the
-// combined result. Tracked and untracked paths never overlap (git lists
-// a path as one or the other, never both), so this is a plain merge,
-// not a dedup. This matters once the cached half alone is in the
-// hundreds of thousands of entries (§26 C-28/item 5): re-sorting it on
-// every call it is reused would give back most of what caching it saved.
-func MergeSortedMetas(a, b []FileMeta) []FileMeta {
-	out := make([]FileMeta, 0, len(a)+len(b))
-	i, j := 0, 0
-	for i < len(a) && j < len(b) {
-		if a[i].Path <= b[j].Path {
-			out = append(out, a[i])
-			i++
-		} else {
-			out = append(out, b[j])
-			j++
-		}
-	}
-	out = append(out, a[i:]...)
-	out = append(out, b[j:]...)
-	return out
 }
 
 // included reports whether relPath survives scanning: everything is a
@@ -434,82 +290,14 @@ func included(relPath string, exclude []Pattern) bool {
 	return keep
 }
 
-// Discover resolves, from one git-based enumeration, both the
-// scope-filtered candidate set List alone would return and every marker
-// file path MarkerFiles alone would return.
-//
-// Measured against a Go corpus two orders of magnitude past gekka (§23
-// Step 1): Refresh calling List and MarkerFiles independently paid for
-// `git ls-files` (tracked and untracked) twice, at roughly the combined
-// cost of everything else Refresh does. Both need the same two lists —
-// List filters them by exclusion pattern, MarkerFiles filters them by
-// marker name — so fetching once and deriving both removes the duplication
-// structurally rather than by remembering to call one before the other.
-func Discover(ctx context.Context, root string, scope Scope) (metas []FileMeta, markerPaths []string, err error) {
-	tracked, untracked, err := enumerate(ctx, root)
-	if err != nil {
-		return nil, nil, err
-	}
-	metas, markerPaths = Combine(root, tracked, untracked, scope)
-	return metas, markerPaths, nil
-}
-
-func trackedFiles(ctx context.Context, root string) (map[string]string, error) {
-	out, err := runGit(ctx, root, "ls-files", "-s")
-	if err != nil {
-		return nil, err
-	}
-	files := make(map[string]string)
-	sc := bufio.NewScanner(bytes.NewReader(out))
-	for sc.Scan() {
-		line := sc.Text()
-		if line == "" {
-			continue
-		}
-		// "<mode> <blob> <stage>\t<path>"
-		tab := strings.IndexByte(line, '\t')
-		if tab < 0 {
-			return nil, fmt.Errorf("unexpected `git ls-files -s` line: %q", line)
-		}
-		fields := strings.Fields(line[:tab])
-		if len(fields) != 3 {
-			return nil, fmt.Errorf("unexpected `git ls-files -s` line: %q", line)
-		}
-		files[line[tab+1:]] = fields[1]
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("read `git ls-files -s` output: %w", err)
-	}
-	return files, nil
-}
-
-func untrackedFiles(ctx context.Context, root string) ([]string, error) {
-	out, err := runGit(ctx, root, "ls-files", "--others", "--exclude-standard")
-	if err != nil {
-		return nil, err
-	}
-	var files []string
-	sc := bufio.NewScanner(bytes.NewReader(out))
-	for sc.Scan() {
-		if line := sc.Text(); line != "" {
-			files = append(files, line)
-		}
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("read `git ls-files --others` output: %w", err)
-	}
-	return files, nil
-}
-
 // streamGitLines runs git with args under root and calls onLine for
 // each line of stdout as it is read from the pipe, rather than
 // waiting for the whole process to exit before anything is available
-// — the streaming counterpart to runGit (directive 019 §2: "a
-// subprocess's stdout is a pipe and can be read incrementally").
-// onLine returning a non-nil error (a malformed line, the same
-// condition trackedFiles/untrackedFiles already treat as fatal) stops
-// the read and kills the subprocess, rather than leaving it blocked
-// writing into a pipe nothing is draining anymore.
+// — the streaming counterpart to a buffered git call (directive 019
+// §2: "a subprocess's stdout is a pipe and can be read incrementally").
+// onLine returning a non-nil error (a malformed line) stops the read
+// and kills the subprocess, rather than leaving it blocked writing
+// into a pipe nothing is draining anymore.
 func streamGitLines(ctx context.Context, root string, onLine func(line string) error, args ...string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -555,17 +343,17 @@ func streamGitLines(ctx context.Context, root string, onLine func(line string) e
 }
 
 // StreamTracked runs `git ls-files -s`, filtering and marking each
-// path against scope as it is read from git's own output — the same
-// per-path decision FilterTracked makes over an already-complete map
-// — rather than waiting for the whole tracked set before filtering
-// anything (directive 019 §2: filtering needs nothing but the one
-// path in front of it, so there is nothing to wait for). onMeta is
-// called for every path scope keeps, in whatever order git prints
-// them (git's own index order, not a guarantee of this function's);
-// onMarker for every path that is also a marker basename, filtered or
-// not (§20 C-3, unaffected by this directive). Neither callback runs
-// concurrently with the other — both run on the goroutine that calls
-// this function.
+// path against scope as it is read from git's own output, rather than
+// waiting for the whole tracked set before filtering anything
+// (directive 019 §2: filtering needs nothing but the one path in front
+// of it, so there is nothing to wait for). Only meaningful where
+// HasGitDir(root) — a caller checks that first, since a root with no
+// .git has no tracked half at all. onMeta is called for every path
+// scope keeps, in whatever order git prints them (git's own index
+// order, not a guarantee of this function's); onMarker for every path
+// that is also a marker basename, filtered or not (§20 C-3, unaffected
+// by this directive). Neither callback runs concurrently with the
+// other — both run on the goroutine that calls this function.
 func StreamTracked(ctx context.Context, root string, scope Scope, onMeta func(FileMeta), onMarker func(path string)) error {
 	exclude := mergedExclude(scope)
 	markers := mergedMarkers(scope)
@@ -589,34 +377,28 @@ func StreamTracked(ctx context.Context, root string, scope Scope, onMeta func(Fi
 	}, "ls-files", "-s")
 }
 
-// StreamUntracked is StreamTracked's counterpart for `git ls-files
-// --others --exclude-standard` — the untracked half, which has no
-// comparably cheap freshness signal and so is never cached (§26
-// C-28/item 5, §27 C-34), meaning it streams on every call, cache hit
-// or miss, not only a cold one.
-func StreamUntracked(ctx context.Context, root string, scope Scope, onMeta func(FileMeta), onMarker func(path string)) error {
+// FilterWalked applies scope's exclusion rules and marker detection to
+// paths Walk found — the filtering step "one walker, two callers"
+// shares (directive 021), the same per-path decision StreamTracked
+// makes for its own git-sourced paths, over Walk's output instead of
+// git's. skip is checked first: the tracked path set a git repository's
+// own StreamTracked half already covered, so a path `git ls-files -s`
+// already reported is never reconsidered here (a git repository's
+// tracked and walked halves must never emit the same path — nothing
+// downstream de-duplicates). nil or empty for a root with no tracked
+// half at all (item 1's no-git case, where Walk covers everything).
+func FilterWalked(root string, paths []string, skip map[string]bool, scope Scope, onMeta func(FileMeta), onMarker func(path string)) {
 	exclude := mergedExclude(scope)
 	markers := mergedMarkers(scope)
-	return streamGitLines(ctx, root, func(line string) error {
-		relPath := line
-		if included(relPath, exclude) {
-			onMeta(FileMeta{Path: relPath, BlobHash: "", Size: statSize(root, relPath)})
+	for _, p := range paths {
+		if skip[p] {
+			continue
 		}
-		if isMarker(relPath, markers) {
-			onMarker(relPath)
+		if included(p, exclude) {
+			onMeta(FileMeta{Path: p, BlobHash: "", Size: statSize(root, p)})
 		}
-		return nil
-	}, "ls-files", "--others", "--exclude-standard")
-}
-
-func runGit(ctx context.Context, root string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = root
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, bytes.TrimSpace(stderr.Bytes()))
+		if isMarker(p, markers) {
+			onMarker(p)
+		}
 	}
-	return out, nil
 }

@@ -3,7 +3,6 @@ package index
 import (
 	"context"
 	"os/exec"
-	"sort"
 	"testing"
 
 	"giraffe/internal/scanner"
@@ -180,129 +179,129 @@ func TestRefresh_EnumCacheReusedWhenNothingChanges(t *testing.T) {
 	}
 }
 
-// TestFilterTracked_MatchesFilterMetasAndMarkersOfCombined confirms
-// FilterTracked/FilterUntracked (used only by the enum cache) agree
-// with filterMetas/markersOf (used by the uncached scanner.Discover
-// path) on the same input — the two must never quietly diverge, since
-// nothing else would catch it before ranking or output.
-func TestFilterTracked_MatchesFilterMetasAndMarkersOfCombined(t *testing.T) {
-	root := gitRepo(t)
-	writeFile(t, root, "a.go", "package p\n\nfunc A() {}\n")
-	writeFile(t, root, "vendor/dep/dep.go", "package dep\n")
-	writeFile(t, root, "go.mod", "module example\n")
-	gitCommit(t, root, "a.go", "vendor/dep/dep.go", "go.mod")
-	writeFile(t, root, "wip.go", "package p\n\nfunc WIP() {}\n") // untracked
-
-	sc := scope()
-	viaDiscover, markersViaDiscover, err := scanner.Discover(context.Background(), root, sc)
+// loadWalkCacheForTest is loadEnumCacheForTest's counterpart for the
+// walk cache (directive 021 item 2).
+func loadWalkCacheForTest(t *testing.T, root string) (scanner.WalkCache, bool) {
+	t.Helper()
+	s, ok, err := openStore(root, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	tracked, err := scanner.EnumerateTracked(context.Background(), root)
+	if !ok {
+		return scanner.WalkCache{}, false
+	}
+	defer s.Close()
+	blob, err := s.walkBlob()
 	if err != nil {
 		t.Fatal(err)
 	}
-	untracked, err := scanner.EnumerateUntracked(context.Background(), root)
-	if err != nil {
-		t.Fatal(err)
+	if blob == nil {
+		return scanner.WalkCache{}, false
 	}
-	trackedMetas, trackedMarkers := scanner.FilterTracked(root, tracked, sc)
-	untrackedMetas, untrackedMarkers := scanner.FilterUntracked(root, untracked, sc)
-	viaSplit := scanner.MergeSortedMetas(trackedMetas, untrackedMetas)
-	markersViaSplit := append(append([]string{}, trackedMarkers...), untrackedMarkers...)
+	return decodeWalkCache(blob)
+}
 
-	if len(viaDiscover) != len(viaSplit) {
-		t.Fatalf("metas differ in count: Discover=%d split=%d", len(viaDiscover), len(viaSplit))
+func TestWalkCache_EncodeDecodeRoundTrip(t *testing.T) {
+	w := scanner.WalkCache{Dirs: map[string]scanner.WalkDirEntry{
+		".":   {ModTime: 111, Files: []string{"a.go"}, Subdirs: []string{"pkg"}},
+		"pkg": {ModTime: 222, Files: []string{"b.go", "c.go"}},
+	}}
+	got, ok := decodeWalkCache(encodeWalkCache(w))
+	if !ok {
+		t.Fatal("expected decodeWalkCache to succeed after encodeWalkCache")
 	}
-	for i := range viaDiscover {
-		if viaDiscover[i] != viaSplit[i] {
-			t.Fatalf("metas differ at %d: Discover=%#v split=%#v", i, viaDiscover[i], viaSplit[i])
-		}
+	if len(got.Dirs) != 2 {
+		t.Fatalf("Dirs = %#v, want 2 entries", got.Dirs)
 	}
-	if len(markersViaDiscover) != len(markersViaSplit) {
-		t.Fatalf("markers differ in count: Discover=%v split=%v", markersViaDiscover, markersViaSplit)
+	if got.Dirs["."].ModTime != 111 || len(got.Dirs["."].Files) != 1 || got.Dirs["."].Files[0] != "a.go" {
+		t.Errorf(". entry = %#v", got.Dirs["."])
+	}
+	if got.Dirs["pkg"].ModTime != 222 || len(got.Dirs["pkg"].Files) != 2 {
+		t.Errorf("pkg entry = %#v", got.Dirs["pkg"])
 	}
 }
 
-// TestStreamTracked_MatchesFilterTracked confirms the streaming path
-// (directive 019 §2) accepts and marks exactly the same paths as the
-// batch path (FilterTracked) it replaces inside enumerate — the two
-// must never quietly diverge on what "included" and "marker" mean,
-// since nothing else would catch it before ranking or output.
-func TestStreamTracked_MatchesFilterTracked(t *testing.T) {
-	root := gitRepo(t)
-	writeFile(t, root, "a.go", "package p\n\nfunc A() {}\n")
-	writeFile(t, root, "vendor/dep/dep.go", "package dep\n")
-	writeFile(t, root, "go.mod", "module example\n")
-	gitCommit(t, root, "a.go", "vendor/dep/dep.go", "go.mod")
-
-	sc := scope()
-	tracked, err := scanner.EnumerateTracked(context.Background(), root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantMetas, wantMarkers := scanner.FilterTracked(root, tracked, sc)
-
-	var gotMetas []scanner.FileMeta
-	var gotMarkers []string
-	if err := scanner.StreamTracked(context.Background(), root, sc,
-		func(m scanner.FileMeta) { gotMetas = append(gotMetas, m) },
-		func(p string) { gotMarkers = append(gotMarkers, p) },
-	); err != nil {
-		t.Fatal(err)
-	}
-	sort.Slice(gotMetas, func(i, j int) bool { return gotMetas[i].Path < gotMetas[j].Path })
-	sort.Strings(gotMarkers)
-
-	if len(gotMetas) != len(wantMetas) {
-		t.Fatalf("metas differ in count: stream=%d batch=%d", len(gotMetas), len(wantMetas))
-	}
-	for i := range wantMetas {
-		if gotMetas[i] != wantMetas[i] {
-			t.Errorf("meta %d: stream=%#v batch=%#v", i, gotMetas[i], wantMetas[i])
-		}
-	}
-	if len(gotMarkers) != len(wantMarkers) {
-		t.Fatalf("markers differ: stream=%v batch=%v", gotMarkers, wantMarkers)
+func TestWalkCache_MalformedShapeIsDiscarded(t *testing.T) {
+	if _, ok := decodeWalkCache([]byte("garbage\n")); ok {
+		t.Fatal("expected ok=false for a blob whose line shape does not parse")
 	}
 }
 
-// TestStreamUntracked_MatchesFilterUntracked is StreamTracked's own
-// equivalence test for the untracked half.
-func TestStreamUntracked_MatchesFilterUntracked(t *testing.T) {
+// TestRefresh_NoGitRoot_ProducesAnIndex is directive 021 item 1's own
+// completion condition, end to end: before this directive, a root with
+// no .git at all made every enumeration call fail outright ("fatal: not
+// a git repository") — Refresh now indexes it via Walk alone.
+func TestRefresh_NoGitRoot_ProducesAnIndex(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.go", "package p\n\nfunc NoGit() {}\n")
+	if scanner.HasGitDir(root) {
+		t.Fatal("test setup: expected no .git in a fresh temp dir")
+	}
+
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
+	found := false
+	for e := range s.All() {
+		if e.Name == "NoGit" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected a no-git root to still be indexed via Walk alone")
+	}
+}
+
+// TestRefresh_TrackedAndWalkedFilesBothAppearOnce confirms the two
+// enumeration routes a git repository combines (StreamTracked, Walk)
+// never emit the same path twice and never lose either half's own
+// file — the invariant scanner.FilterWalked's skip set exists to
+// guarantee.
+func TestRefresh_TrackedAndWalkedFilesBothAppearOnce(t *testing.T) {
 	root := gitRepo(t)
+	writeFile(t, root, "tracked.go", "package p\n\nfunc Tracked() {}\n")
+	gitCommit(t, root, "tracked.go")
+	writeFile(t, root, "walked.go", "package p\n\nfunc Walked() {}\n") // untracked
+
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
+	counts := map[string]int{}
+	for e := range s.All() {
+		counts[e.Name]++
+	}
+	if counts["Tracked"] != 1 {
+		t.Errorf("Tracked appeared %d times, want 1", counts["Tracked"])
+	}
+	if counts["Walked"] != 1 {
+		t.Errorf("Walked appeared %d times, want 1", counts["Walked"])
+	}
+}
+
+// TestRefresh_WalkCacheWarmsAndPersists (directive 021 item 2): a
+// store's walk cache is written on the first Refresh and still present
+// — not merely non-empty, but still describing the root directory — on
+// a second, unchanged call.
+func TestRefresh_WalkCacheWarmsAndPersists(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, "a.go", "package p\n\nfunc A() {}\n")
+	gitCommit(t, root, "a.go")
 	writeFile(t, root, "wip.go", "package p\n\nfunc WIP() {}\n")
-	writeFile(t, root, "vendor/dep/dep.go", "package dep\n")
 
-	sc := scope()
-	untracked, err := scanner.EnumerateUntracked(context.Background(), root)
-	if err != nil {
-		t.Fatal(err)
+	closeStore(t, mustRefresh(t, root))
+	first, ok := loadWalkCacheForTest(t, root)
+	if !ok {
+		t.Fatal("expected the walk cache to be warm after the first Refresh")
 	}
-	wantMetas, wantMarkers := scanner.FilterUntracked(root, untracked, sc)
+	if _, ok := first.Dirs["."]; !ok {
+		t.Fatalf("expected the walk cache to describe the root directory, got %#v", first.Dirs)
+	}
 
-	var gotMetas []scanner.FileMeta
-	var gotMarkers []string
-	if err := scanner.StreamUntracked(context.Background(), root, sc,
-		func(m scanner.FileMeta) { gotMetas = append(gotMetas, m) },
-		func(p string) { gotMarkers = append(gotMarkers, p) },
-	); err != nil {
-		t.Fatal(err)
+	closeStore(t, mustRefresh(t, root))
+	second, ok := loadWalkCacheForTest(t, root)
+	if !ok {
+		t.Fatal("expected the walk cache to still be present after a second Refresh")
 	}
-	sort.Slice(gotMetas, func(i, j int) bool { return gotMetas[i].Path < gotMetas[j].Path })
-	sort.Strings(gotMarkers)
-
-	if len(gotMetas) != len(wantMetas) {
-		t.Fatalf("metas differ in count: stream=%d batch=%d", len(gotMetas), len(wantMetas))
-	}
-	for i := range wantMetas {
-		if gotMetas[i] != wantMetas[i] {
-			t.Errorf("meta %d: stream=%#v batch=%#v", i, gotMetas[i], wantMetas[i])
-		}
-	}
-	if len(gotMarkers) != len(wantMarkers) {
-		t.Fatalf("markers differ: stream=%v batch=%v", gotMarkers, wantMarkers)
+	if second.Dirs["."].ModTime != first.Dirs["."].ModTime {
+		t.Error("expected the root directory's cached mtime to stay the same across two no-op Refresh calls")
 	}
 }
 

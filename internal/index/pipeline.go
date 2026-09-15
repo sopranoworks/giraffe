@@ -127,6 +127,7 @@ type pipelineResult struct {
 	unchanged    int
 	currentPaths map[string]bool
 	enumBlob     []byte
+	walkBlob     []byte
 	enumChanged  bool
 	rootProject  string
 }
@@ -504,6 +505,7 @@ func runPipeline(ctx context.Context, root string, scope scanner.Scope, ro *Stor
 		unchanged:    unchanged,
 		currentPaths: prodOut.currentPaths,
 		enumBlob:     enumOut.enumBlob,
+		walkBlob:     enumOut.walkBlob,
 		enumChanged:  enumChanged,
 		rootProject:  rootProject,
 	}, nil
