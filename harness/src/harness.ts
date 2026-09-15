@@ -62,14 +62,22 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
   let resultText: string | null = null;
 
   let messageCount = 0;
+  // Directive 029 §3: counted from the SDK's own assistant messages as
+  // they stream by, not asked of the agent and not read off a bare field
+  // on the result message (there isn't one — see types.ts).
+  let toolUseCount = 0;
 
   for await (const message of query({
     prompt: config.prompt,
     options: {
       cwd: config.cwd,
       model: config.model,
+      tools: config.tools as string[] | undefined,
       allowedTools: config.allowedTools as string[] | undefined,
       disallowedTools: config.disallowedTools as string[] | undefined,
+      permissionMode: config.permissionMode as never,
+      settingSources: config.settingSources as never,
+      strictMcpConfig: config.strictMcpConfig,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       sandbox: config.sandbox as any,
       maxTurns: config.maxTurns,
@@ -90,6 +98,17 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
       apiKeySource = message.apiKeySource as unknown as string;
     }
 
+    if (message.type === "assistant") {
+      // O9: a boundary type-dispatch against the SDK's own externally-owned
+      // content-block union, not a closed set this module owns.
+      const content = (message as { message?: { content?: unknown } }).message?.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if ((block as { type?: string }).type === "tool_use") toolUseCount++;
+        }
+      }
+    }
+
     if (message.type === "result") {
       numTurns = message.num_turns;
       durationMs = message.duration_ms;
@@ -102,6 +121,14 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
       resultText = message.subtype === "success" ? message.result : null;
     }
   }
+
+  const u = rawUsage as
+    | { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number | null; cache_read_input_tokens?: number | null }
+    | null;
+  const totalTokens =
+    u == null
+      ? null
+      : (u.input_tokens ?? 0) + (u.output_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
 
   const endedAt = new Date().toISOString();
 
@@ -117,8 +144,12 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
       prompt: config.prompt,
       cwd: config.cwd,
       model: config.model,
+      tools: config.tools,
       allowedTools: config.allowedTools,
       disallowedTools: config.disallowedTools,
+      permissionMode: config.permissionMode,
+      settingSources: config.settingSources,
+      strictMcpConfig: config.strictMcpConfig,
       sandbox: config.sandbox,
       corpus: config.corpus,
     },
@@ -133,6 +164,8 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
       durationMs,
       durationApiMs,
       totalCostUsd,
+      totalTokens,
+      toolUseCount,
       rawUsage,
       permissionDenials,
       subtype: resultSubtype,

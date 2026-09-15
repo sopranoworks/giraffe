@@ -3,10 +3,12 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
-  "description": "Directive 028: a cost-to-arrive measurement harness built on the Claude Agent SDK. Not giraffe. Not published.",
+  "description": "Directives 028-029: a cost-to-arrive measurement harness built on the Claude Agent SDK. Not giraffe. Not published.",
   "scripts": {
     "smoke:basic": "tsx src/smoke-basic.ts",
     "smoke:guard": "tsx src/smoke-guard.ts",
+    "smoke:control": "tsx src/smoke-control.ts",
+    "smoke:absence": "tsx src/smoke-absence.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
