@@ -1,1 +1,4 @@
 .giraffe/
+harness/node_modules/
+harness/dist/
+harness/runs/
