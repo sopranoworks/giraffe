@@ -34,6 +34,26 @@ export const CLOSED_TOOLS: readonly string[] = ["Read", "Bash"];
 export const CLOSED_SETTING_SOURCES: readonly string[] = [];
 export const STRICT_MCP_CONFIG = true;
 
+// Directive 030 §1: 029's own excursion run had bare "Read" in
+// allowedTools — an allow rule with no path scope, matching any Read call
+// regardless of target. That left Read as the one tool distinguishing the
+// arms only in Bash, not in itself: whatever kept it from reading
+// /home/takahashi was the container's absence guarantee alone, not a
+// permission rule, unlike Bash's own subcommand allow-list. Read has no
+// subcommand axis to scope the way Bash does; the equivalent restriction
+// for Read is a path pattern. Docs (queried this directive, "Allow and
+// deny rules"): a rule written as `Read(/**)` — single leading slash, not
+// `//` — "anchors at the rule's source. For rules passed through
+// allowed_tools ... that means the session's working directory." So
+// `Read(/**)` in allowedTools approves reads under cwd and nothing above
+// or beside it; anything else falls through unmatched and is denied under
+// permissionMode: "dontAsk", the same shape Bash's own scoped patterns
+// already have. (The docs name "four anchor forms" total; only this one
+// and the `//absolute` form used by smoke-control.ts's deny rules were
+// confirmed by the queries run this directive — stated plainly rather
+// than assuming the other two behave a particular way.)
+export const SCOPED_READ_PATTERN = "Read(/**)";
+
 // Unaided: grep/find/ls/sed -n/cat/wc, and nothing else — the directive's
 // own list, verbatim.
 export const UNAIDED_BASH_PATTERNS: readonly string[] = [

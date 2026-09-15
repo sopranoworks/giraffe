@@ -22,6 +22,12 @@
 // Read-tool fallback attempts on the same paths, each returning "File
 // does not exist" — the target is not there, not merely denied.
 //
+// Directive 030 §1: Read is now scoped too, not just Bash — allowedTools
+// carries `Read(/**)` (anchored at cwd, per the docs) rather than a bare
+// "Read" that would approve a read of any path regardless of target. Read
+// calls outside cwd are denied by the permission layer directly now, not
+// only by the container's own absence guarantee.
+//
 // ARM=unaided|aided selects the tool list (029 §1). For "aided", the
 // corpus also contains bin/giraffe, and the run additionally invokes it
 // once against the corpus to confirm the binary itself runs inside the
@@ -42,6 +48,7 @@ import {
   UNAIDED_BASH_PATTERNS,
   aidedBashPatterns,
   PERMISSION_MODE,
+  SCOPED_READ_PATTERN,
 } from "./tool-lists.js";
 
 const cwd = process.env.CWD ?? "/corpus";
@@ -82,7 +89,7 @@ async function main() {
         steps.join("\n"),
       cwd,
       tools: CLOSED_TOOLS,
-      allowedTools: ["Read", ...bashPatterns, "Bash(cd *)"],
+      allowedTools: [SCOPED_READ_PATTERN, ...bashPatterns, "Bash(cd *)"],
       permissionMode: PERMISSION_MODE,
       settingSources: CLOSED_SETTING_SOURCES,
       strictMcpConfig: STRICT_MCP_CONFIG,
