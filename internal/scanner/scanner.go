@@ -138,6 +138,17 @@ var defaultExclude = []string{
 type GitignoreRule struct {
 	dir     string
 	pattern Pattern
+
+	// fromGitignore is true only for a rule loadGitignore produced —
+	// this is what makes it a rule that must respect a submodule
+	// boundary (directive 025: "a submodule is a separate repository...
+	// the outer repository's .gitignore does not apply inside it").
+	// defaultExclude and scope.Exclude rules leave this false: they are
+	// giraffe's own policy, not git's, and apply uniformly regardless of
+	// any submodule crossing — the same way baseRules (StreamTracked)
+	// already applies them fresh, unscoped by any boundary, inside
+	// every submodule runTrackedTree recurses into.
+	fromGitignore bool
 }
 
 // scopedTo reports the part of relPath below dir, and whether relPath
@@ -312,11 +323,27 @@ func statSize(root, relPath string) int64 {
 // descend into; false from StreamTracked and FilterWalked, which only
 // ever hand this a file (Pattern.excludes' own doc comment on why a
 // dirOnly rule needs to know).
-func included(relPath string, rules []GitignoreRule, isDir bool) bool {
+//
+// boundaries is every submodule root Walk found on the way to relPath
+// (walk.go's own accumulator) — a .gitignore-sourced rule (fromGitignore)
+// declared at or above one of them is skipped for any relPath strictly
+// inside it (crossesBoundary, below): a submodule is a gitignore
+// boundary (directive 025), so an outer or sibling-submodule .gitignore
+// must not reach into it, the same way git's own check-ignore, run
+// inside a submodule, consults only that submodule's own rules. A rule
+// not sourced from .gitignore (defaultExclude, scope.Exclude) is never
+// checked against boundaries — see fromGitignore's own doc comment for
+// why. nil is a valid, common boundaries value: StreamTracked's own
+// rules (baseRules) never include a fromGitignore rule, so the check
+// never fires there regardless.
+func included(relPath string, rules []GitignoreRule, isDir bool, boundaries []string) bool {
 	keep := true
 	for _, r := range rules {
 		suffix, ok := scopedTo(relPath, r.dir)
 		if !ok {
+			continue
+		}
+		if r.fromGitignore && crossesBoundary(r.dir, relPath, boundaries) {
 			continue
 		}
 		if neg, plain := r.pattern.negation(); neg {
@@ -330,6 +357,43 @@ func included(relPath string, rules []GitignoreRule, isDir bool) bool {
 		}
 	}
 	return keep
+}
+
+// crossesBoundary reports whether some submodule root in boundaries lies
+// strictly between dir (a rule's own declaring directory) and relPath —
+// meaning the rule would have to reach across a submodule's own
+// repository boundary to apply to relPath. dir itself, and any boundary
+// at or above dir, is never "between": a submodule's own .gitignore
+// (dir equal to the boundary) still governs its own subtree, exactly as
+// before this check existed. Only a boundary strictly below dir, that
+// relPath is strictly inside, blocks the rule — relPath equal to the
+// boundary itself (the submodule's own path, seen from outside it) is
+// still a plain path in the declaring repository's own namespace, not
+// yet across the boundary (real git still applies the outer .gitignore
+// to decide whether the gitlink's own name matches; it just cannot see
+// inside it).
+func crossesBoundary(dir, relPath string, boundaries []string) bool {
+	for _, b := range boundaries {
+		if !isStrictlyUnder(b, dir) {
+			continue
+		}
+		if isStrictlyUnder(relPath, b) {
+			return true
+		}
+	}
+	return false
+}
+
+// isStrictlyUnder reports whether path is strictly inside dir — dir
+// itself does not count, matching crossesBoundary's own use (a
+// boundary equal to dir, or relPath equal to a boundary, is not
+// "strictly under" anything). dir "." is the scan root: every non-"."
+// path is strictly under it.
+func isStrictlyUnder(path, dir string) bool {
+	if dir == "." {
+		return path != "."
+	}
+	return strings.HasPrefix(path, dir+"/")
 }
 
 // streamGitLines runs git with args under root and calls onLine for
@@ -433,7 +497,11 @@ func StreamTracked(ctx context.Context, root, prefix string, scope Scope, onMeta
 			onGitlink(fullPath)
 			return nil
 		}
-		if included(fullPath, rules, false) {
+		// baseRules never includes a fromGitignore rule (its own doc
+		// comment: ".gitignore is deliberately not part of it") — no
+		// boundaries value could ever change this call's outcome, so
+		// there is nothing to pass.
+		if included(fullPath, rules, false, nil) {
 			onMeta(FileMeta{Path: fullPath, BlobHash: hash, Size: statSize(root, relPath)})
 		}
 		if isMarker(fullPath, markers) {
@@ -455,15 +523,18 @@ func StreamTracked(ctx context.Context, root, prefix string, scope Scope, onMeta
 // reconsidered here (a git repository's tracked and walked halves must
 // never emit the same path — nothing downstream de-duplicates). skip
 // is nil or empty for a root with no tracked half at all (item 1's
-// no-git case, where Walk covers everything).
-func FilterWalked(root string, paths []string, skip map[string]bool, scope Scope, gitignore []GitignoreRule, onMeta func(FileMeta), onMarker func(path string)) {
+// no-git case, where Walk covers everything). boundaries is Walk's own
+// other return value — every submodule root it found — threaded
+// through to included so a .gitignore rule declared outside a
+// submodule is not applied to a path inside it (directive 025).
+func FilterWalked(root string, paths []string, skip map[string]bool, scope Scope, gitignore []GitignoreRule, boundaries []string, onMeta func(FileMeta), onMarker func(path string)) {
 	rules := walkedRules(scope, gitignore)
 	markers := mergedMarkers(scope)
 	for _, p := range paths {
 		if skip[p] {
 			continue
 		}
-		if included(p, rules, false) {
+		if included(p, rules, false, boundaries) {
 			onMeta(FileMeta{Path: p, BlobHash: "", Size: statSize(root, p)})
 		}
 		if isMarker(p, markers) {

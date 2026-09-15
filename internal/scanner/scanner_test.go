@@ -68,11 +68,11 @@ func scanAll(t *testing.T, dir string, scope Scope) []FileMeta {
 			t.Fatal(err)
 		}
 	}
-	walked, gitignore, _, err := Walk(context.Background(), dir, WalkCache{})
+	walked, gitignore, boundaries, _, err := Walk(context.Background(), dir, WalkCache{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	FilterWalked(dir, walked, trackedPaths, scope, gitignore, func(m FileMeta) { metas = append(metas, m) }, func(string) {})
+	FilterWalked(dir, walked, trackedPaths, scope, gitignore, boundaries, func(m FileMeta) { metas = append(metas, m) }, func(string) {})
 	return metas
 }
 
@@ -285,7 +285,7 @@ func TestWalk_NoGitRoot_FindsEverything(t *testing.T) {
 	if HasGitDir(dir) {
 		t.Fatal("test setup: expected no .git in a fresh temp dir")
 	}
-	files, _, _, err := Walk(context.Background(), dir, WalkCache{})
+	files, _, _, _, err := Walk(context.Background(), dir, WalkCache{})
 	if err != nil {
 		t.Fatalf("Walk on a directory with no .git: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestWalk_PrunesDefaultExcludeDirsAndGit(t *testing.T) {
 		}
 	}
 
-	files, _, cache, err := Walk(context.Background(), dir, WalkCache{})
+	files, _, _, cache, err := Walk(context.Background(), dir, WalkCache{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func TestWalk_ReusesCachedDirectoryWhenMtimeUnchanged(t *testing.T) {
 	prev := WalkCache{Dirs: map[string]WalkDirEntry{
 		".": {ModTime: info.ModTime().UnixNano(), Files: []string{"cached-only.go"}},
 	}}
-	files, _, _, err := Walk(context.Background(), dir, prev)
+	files, _, _, _, err := Walk(context.Background(), dir, prev)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +376,7 @@ func TestWalk_RereadsDirectoryWhenMtimeMoved(t *testing.T) {
 	prev := WalkCache{Dirs: map[string]WalkDirEntry{
 		".": {ModTime: 1, Files: []string{"stale-cached.go"}}, // an mtime that cannot match disk
 	}}
-	files, _, _, err := Walk(context.Background(), dir, prev)
+	files, _, _, _, err := Walk(context.Background(), dir, prev)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +393,7 @@ func TestWalk_RereadsDirectoryWhenMtimeMoved(t *testing.T) {
 func TestFilterWalked_SkipsTrackedPaths(t *testing.T) {
 	dir := t.TempDir()
 	var got []FileMeta
-	FilterWalked(dir, []string{"a.go", "b.go"}, map[string]bool{"a.go": true}, Scope{}, nil,
+	FilterWalked(dir, []string{"a.go", "b.go"}, map[string]bool{"a.go": true}, Scope{}, nil, nil,
 		func(m FileMeta) { got = append(got, m) },
 		func(string) {},
 	)
@@ -429,7 +429,7 @@ func TestWalk_HonorsGitignore_NoGitRoot(t *testing.T) {
 	writeFile(t, dir, "target/debug/build/output.o", "x")
 	writeFile(t, dir, "build.log", "x")
 
-	files, gitignore, cache, err := Walk(context.Background(), dir, WalkCache{})
+	files, gitignore, _, cache, err := Walk(context.Background(), dir, WalkCache{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +445,7 @@ func TestWalk_HonorsGitignore_NoGitRoot(t *testing.T) {
 	}
 
 	var got []FileMeta
-	FilterWalked(dir, files, nil, Scope{}, gitignore, func(m FileMeta) { got = append(got, m) }, func(string) {})
+	FilterWalked(dir, files, nil, Scope{}, gitignore, nil, func(m FileMeta) { got = append(got, m) }, func(string) {})
 	byPath := make(map[string]bool, len(got))
 	for _, m := range got {
 		byPath[m.Path] = true
@@ -468,7 +468,7 @@ func TestWalk_GitignoreScopedToOwnSubtree(t *testing.T) {
 	writeFile(t, dir, "pkg/a/gen/x.go", "x")
 	writeFile(t, dir, "pkg/b/gen/keep.go", "x")
 
-	files, _, _, err := Walk(context.Background(), dir, WalkCache{})
+	files, _, _, _, err := Walk(context.Background(), dir, WalkCache{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +497,7 @@ func TestWalk_GitignoreNegationCannotReachIntoPrunedDir(t *testing.T) {
 	writeFile(t, dir, "build/keep.txt", "x")
 	writeFile(t, dir, "build/other.txt", "x")
 
-	files, _, _, err := Walk(context.Background(), dir, WalkCache{})
+	files, _, _, _, err := Walk(context.Background(), dir, WalkCache{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -518,7 +518,7 @@ func TestWalk_PrunesDefaultExcludeDirs_AtAnyDepth(t *testing.T) {
 	writeFile(t, dir, "modules/sub/vendor/dep/dep.go", "x")
 	writeFile(t, dir, "modules/sub/keep.go", "x")
 
-	files, _, cache, err := Walk(context.Background(), dir, WalkCache{})
+	files, _, _, cache, err := Walk(context.Background(), dir, WalkCache{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,11 +562,17 @@ func submoduleRepo(t *testing.T) string {
 
 	run(outer, "init", "-q")
 	writeFile(t, outer, "outer.go", "package outer\n")
-	run(outer, "add", "outer.go")
+	writeFile(t, outer, ".gitignore", "leaked.go\n")
+	run(outer, "add", "outer.go", ".gitignore")
 	run(outer, "commit", "-q", "-m", "init")
 	run(outer, "-c", "protocol.file.allow=always", "submodule", "add", inner, "sub")
 	run(outer, "add", ".gitmodules", "sub")
 	run(outer, "commit", "-q", "-m", "add submodule")
+	// Untracked, matching the outer .gitignore's own "leaked.go" pattern
+	// only — a submodule is a gitignore boundary (directive 025), so this
+	// must survive filtering even though the outer .gitignore would
+	// otherwise exclude it at any depth.
+	writeFile(t, outer, "sub/leaked.go", "package inner\n")
 
 	dir, err := Root(outer)
 	if err != nil {
@@ -609,9 +615,16 @@ func TestStreamTracked_SkipsSubmoduleGitlink(t *testing.T) {
 // not a directory: directive 022 item 3, confirmed via `stat`) is
 // never indexed; and its own .gitignore applies to its own subtree,
 // the same as any other directory's.
+//
+// Extended, directive 025: a submodule is also a gitignore boundary —
+// the OUTER .gitignore's own "leaked.go" pattern (submoduleRepo's own
+// fixture) must not reach sub/leaked.go, even though a bare pattern
+// with no slash ordinarily matches at any depth. Before this directive
+// it did: Walk carried the outer .gitignore's rule down into the
+// submodule with no boundary to stop it.
 func TestWalk_DescendsIntoSubmodule_PrunesItsGitFile_HonorsItsGitignore(t *testing.T) {
 	dir := submoduleRepo(t)
-	files, gitignore, _, err := Walk(context.Background(), dir, WalkCache{})
+	files, gitignore, boundaries, _, err := Walk(context.Background(), dir, WalkCache{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -625,12 +638,20 @@ func TestWalk_DescendsIntoSubmodule_PrunesItsGitFile_HonorsItsGitignore(t *testi
 	if got["sub/.git"] {
 		t.Error("expected the submodule's own gitdir pointer file never to be indexed")
 	}
+	if len(boundaries) != 1 || boundaries[0] != "sub" {
+		t.Errorf("boundaries = %v, want [sub]", boundaries)
+	}
 
 	var filtered []FileMeta
-	FilterWalked(dir, files, nil, Scope{}, gitignore, func(m FileMeta) { filtered = append(filtered, m) }, func(string) {})
+	FilterWalked(dir, files, nil, Scope{}, gitignore, boundaries, func(m FileMeta) { filtered = append(filtered, m) }, func(string) {})
+	byPath := make(map[string]bool, len(filtered))
 	for _, m := range filtered {
-		if m.Path == "sub/ignored.go" {
-			t.Error("expected the submodule's own .gitignore to exclude sub/ignored.go")
-		}
+		byPath[m.Path] = true
+	}
+	if byPath["sub/ignored.go"] {
+		t.Error("expected the submodule's own .gitignore to exclude sub/ignored.go")
+	}
+	if !byPath["sub/leaked.go"] {
+		t.Error("expected sub/leaked.go to survive: a submodule is a gitignore boundary, so the outer .gitignore's leaked.go pattern must not reach inside it")
 	}
 }

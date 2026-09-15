@@ -28,6 +28,12 @@ import (
 // directory-only patterns, negation, and their precedence are all
 // implemented there, not partially here. See ParsePattern's own doc
 // comment for exactly what is and is not recognised.
+//
+// Every rule this produces is marked fromGitignore: true — a submodule
+// is a gitignore boundary (directive 025), and included's own
+// crossesBoundary check needs to tell a genuine .gitignore rule apart
+// from defaultExclude/scope.Exclude, which are not git's concept and
+// cross a submodule boundary freely by design.
 func loadGitignore(absRoot, relDir string) []GitignoreRule {
 	data, err := os.ReadFile(filepath.Join(absRoot, relDir, ".gitignore"))
 	if err != nil {
@@ -40,7 +46,7 @@ func loadGitignore(absRoot, relDir string) []GitignoreRule {
 		if !ok {
 			continue
 		}
-		rules = append(rules, GitignoreRule{dir: relDir, pattern: p})
+		rules = append(rules, GitignoreRule{dir: relDir, pattern: p, fromGitignore: true})
 	}
 	return rules
 }

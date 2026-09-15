@@ -230,10 +230,11 @@ func runTrackedTree(ctx context.Context, root, absSubRoot, prefix string, scope 
 
 // walkedHalfResult is runWalkedHalf's own findings.
 type walkedHalfResult struct {
-	paths     []string
-	gitignore []scanner.GitignoreRule
-	cache     scanner.WalkCache
-	err       error
+	paths      []string
+	gitignore  []scanner.GitignoreRule
+	boundaries []string
+	cache      scanner.WalkCache
+	err        error
 }
 
 // runWalkedHalf is enumerate's other goroutine body: scanner.Walk's
@@ -251,8 +252,8 @@ type walkedHalfResult struct {
 // runTrackedHalf (the expensive, I/O-bound part overlaps exactly as
 // before); only its own filtering, in finishEnumeration, waits.
 func runWalkedHalf(ctx context.Context, root string, oldWalkCache scanner.WalkCache) walkedHalfResult {
-	paths, gitignore, cache, err := scanner.Walk(ctx, root, oldWalkCache)
-	return walkedHalfResult{paths: paths, gitignore: gitignore, cache: cache, err: err}
+	paths, gitignore, boundaries, cache, err := scanner.Walk(ctx, root, oldWalkCache)
+	return walkedHalfResult{paths: paths, gitignore: gitignore, boundaries: boundaries, cache: cache, err: err}
 }
 
 // finishEnumeration runs once both halves have completely finished
@@ -274,7 +275,7 @@ func finishEnumeration(root string, scope scanner.Scope, hasGit, fpOK bool, modT
 		trackedPaths[m.Path] = true
 	}
 	var walkedMarkers []string
-	scanner.FilterWalked(root, walked.paths, trackedPaths, scope, walked.gitignore,
+	scanner.FilterWalked(root, walked.paths, trackedPaths, scope, walked.gitignore, walked.boundaries,
 		func(m scanner.FileMeta) { metaCh <- m },
 		func(p string) { walkedMarkers = append(walkedMarkers, p) },
 	)

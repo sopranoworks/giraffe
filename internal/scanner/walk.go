@@ -106,11 +106,19 @@ type WalkDirEntry struct {
 // this package (§3 C3) — checked once per directory visited, so a
 // pathological tree is interrupted rather than run to completion
 // regardless of the caller's own timeout.
-func Walk(ctx context.Context, root string, prev WalkCache) (files []string, gitignore []GitignoreRule, next WalkCache, err error) {
+//
+// boundaries is every submodule root found along the way — any
+// descendant of root, at any depth, with its own .git (HasGitDir),
+// root itself excluded (directive 025: a submodule is a separate
+// repository, and root is never "inside" itself). A caller's own
+// filtering pass (FilterWalked) needs it for the same reason it needs
+// gitignore: a rule discovered above a boundary must not be applied to
+// a path below it.
+func Walk(ctx context.Context, root string, prev WalkCache) (files []string, gitignore []GitignoreRule, boundaries []string, next WalkCache, err error) {
 	next = WalkCache{Dirs: make(map[string]WalkDirEntry)}
-	err = walkDir(ctx, root, ".", defaultExcludeRules(), prev, &next, &files, &gitignore)
+	err = walkDir(ctx, root, ".", defaultExcludeRules(), prev, &next, &files, &gitignore, &boundaries)
 	sort.Strings(files) // deterministic regardless of directory read order (§3 C5)
-	return files, gitignore, next, err
+	return files, gitignore, boundaries, next, err
 }
 
 // walkDir visits relDir, then recurses into whichever of its own
@@ -128,7 +136,7 @@ func Walk(ctx context.Context, root string, prev WalkCache) (files []string, git
 // the cached listing the way defaultExclude-only pruning safely could
 // (021) would let a stale decision survive a rule change indefinitely
 // whenever the surrounding directory itself happened not to change.
-func walkDir(ctx context.Context, absRoot, relDir string, ancestorRules []GitignoreRule, prev WalkCache, next *WalkCache, files *[]string, gitignore *[]GitignoreRule) error {
+func walkDir(ctx context.Context, absRoot, relDir string, ancestorRules []GitignoreRule, prev WalkCache, next *WalkCache, files *[]string, gitignore *[]GitignoreRule, boundaries *[]string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -146,6 +154,18 @@ func walkDir(ctx context.Context, absRoot, relDir string, ancestorRules []Gitign
 		return err
 	}
 	mtime := info.ModTime().UnixNano()
+
+	// relDir's own .git makes it a submodule (or any other nested
+	// repository) root — recorded before rules are computed below, so
+	// included's own crossesBoundary check (scanner.go) can see it for
+	// every path this call and its recursive children go on to find,
+	// not only ones found after some later directory (directive 025).
+	// root itself (relDir == ".") is never a boundary of itself, even
+	// when it has its own .git (the ordinary hasGit case) — there is
+	// nothing "outside" root within this one Walk call.
+	if relDir != "." && HasGitDir(absDir) {
+		*boundaries = append(*boundaries, relDir)
+	}
 
 	ownRules := loadGitignore(absRoot, relDir)
 	*gitignore = append(*gitignore, ownRules...)
@@ -191,10 +211,10 @@ func walkDir(ctx context.Context, absRoot, relDir string, ancestorRules []Gitign
 	}
 	for _, d := range subdirNames {
 		childRel := path.Join(relDir, d)
-		if prunes(childRel, rules) {
+		if prunes(childRel, rules, *boundaries) {
 			continue
 		}
-		if err := walkDir(ctx, absRoot, childRel, rules, prev, next, files, gitignore); err != nil {
+		if err := walkDir(ctx, absRoot, childRel, rules, prev, next, files, gitignore, boundaries); err != nil {
 			return err
 		}
 	}
@@ -221,6 +241,12 @@ func walkDir(ctx context.Context, absRoot, relDir string, ancestorRules []Gitign
 // therefore never diverges from what git itself would already do;
 // only .giraffe/exclude's own, more permissive negation (021's own
 // discovery) needs the deferred, post-hoc treatment.
-func prunes(childRel string, rules []GitignoreRule) bool {
-	return !included(childRel, rules, true)
+//
+// boundaries is every submodule root found so far, on the way down to
+// childRel — sufficient for included's own crossesBoundary check
+// (scanner.go), which only ever needs to know about a boundary at or
+// above the path being decided, never one still undiscovered below it
+// (directive 025).
+func prunes(childRel string, rules []GitignoreRule, boundaries []string) bool {
+	return !included(childRel, rules, true, boundaries)
 }
