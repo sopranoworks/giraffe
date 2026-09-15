@@ -2,9 +2,11 @@ package index
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"testing"
 
+	"giraffe/internal/entry"
 	"giraffe/internal/scanner"
 )
 
@@ -331,6 +333,139 @@ func TestFingerprintConfig_ChangesWithAssignments(t *testing.T) {
 	multi2 := fingerprintConfig(patterns, map[string]string{".inc": "c", ".png": "image"})
 	if multi1 != multi2 {
 		t.Errorf("fingerprintConfig is sensitive to map iteration order: %q vs %q", multi1, multi2)
+	}
+}
+
+// TestRefresh_NoGitRoot_HonorsGitignore (directive 022 item 1, end to
+// end): the gap named precisely against 021's own completion report —
+// a no-git root now produces an index (021), but nothing read
+// .gitignore, so a bare build-output directory would have been walked
+// and indexed in full.
+func TestRefresh_NoGitRoot_HonorsGitignore(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".gitignore", "target/\n")
+	writeFile(t, root, "src.go", "package p\n\nfunc Kept() {}\n")
+	writeFile(t, root, "target/generated.go", "package p\n\nfunc Generated() {}\n")
+
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
+	names := map[string]bool{}
+	for e := range s.All() {
+		names[e.Name] = true
+	}
+	if !names["Kept"] {
+		t.Error("expected src.go's declaration to be indexed")
+	}
+	if names["Generated"] {
+		t.Error("expected target/'s declaration to be excluded by .gitignore")
+	}
+}
+
+// TestRefresh_GitRoot_UntrackedHalfHonorsGitignore is
+// TestRefresh_NoGitRoot_HonorsGitignore's counterpart for an ordinary
+// git repository's own untracked half — the condition directive 022's
+// own item 2 names precisely: every measurement before this directive
+// used a fresh, artifact-free clone, so a real build-output directory
+// was never actually present during a walked-half test.
+func TestRefresh_GitRoot_UntrackedHalfHonorsGitignore(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, "tracked.go", "package p\n\nfunc Tracked() {}\n")
+	gitCommit(t, root, "tracked.go")
+	writeFile(t, root, ".gitignore", "target/\n") // untracked, same as most real repos
+	writeFile(t, root, "target/generated.go", "package p\n\nfunc Generated() {}\n")
+
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
+	names := map[string]bool{}
+	for e := range s.All() {
+		names[e.Name] = true
+	}
+	if !names["Tracked"] {
+		t.Error("expected tracked.go's declaration to be indexed")
+	}
+	if names["Generated"] {
+		t.Error("expected target/'s declaration to be excluded by the untracked .gitignore")
+	}
+}
+
+// submoduleRepo is enum_test.go's own copy of
+// scanner_test.go's fixture of the same name (code-manners D6: a
+// second occurrence, noted here rather than extracted — a third would
+// force it) — index has no access to scanner's unexported test helpers
+// across a package boundary, and this directive's own submodule
+// questions need an index-level (project resolution, Refresh)
+// assertion the scanner-level fixture cannot give by itself.
+func submoduleRepo(t *testing.T) string {
+	t.Helper()
+	inner := t.TempDir()
+	outer := t.TempDir()
+	env := append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	run := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	run(inner, "init", "-q")
+	writeFile(t, inner, "inner.go", "package inner\n\nfunc InSubmodule() {}\n")
+	writeFile(t, inner, "go.mod", "module inner\ngo 1.21\n")
+	run(inner, "add", "inner.go", "go.mod")
+	run(inner, "commit", "-q", "-m", "init")
+
+	run(outer, "init", "-q")
+	writeFile(t, outer, "outer.go", "package outer\n\nfunc InOuter() {}\n")
+	run(outer, "add", "outer.go")
+	run(outer, "commit", "-q", "-m", "init")
+	run(outer, "-c", "protocol.file.allow=always", "submodule", "add", inner, "sub")
+	run(outer, "add", ".gitmodules", "sub")
+	run(outer, "commit", "-q", "-m", "add submodule")
+
+	dir, err := scanner.Root(outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestRefresh_SubmoduleContentsIndexedUnderTheirOwnProject (directive
+// 022 item 3): a submodule's own go.mod is discovered as its own
+// marker directory, the same as any other nested marker — no special
+// casing for submodules, decided and confirmed here rather than
+// assumed. The submodule's own gitlink entry must not itself produce a
+// bogus entry (the bug this directive fixes: before it, `sub` was
+// dispatched through extraction as if it were a file).
+func TestRefresh_SubmoduleContentsIndexedUnderTheirOwnProject(t *testing.T) {
+	root := submoduleRepo(t)
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
+
+	byName := map[string]entry.Entry{}
+	for e := range s.All() {
+		byName[e.Name] = e
+	}
+	inSub, ok := byName["InSubmodule"]
+	if !ok {
+		t.Fatal("expected the submodule's own declaration to be indexed")
+	}
+	if inSub.Project != "sub" {
+		t.Errorf("InSubmodule.Project = %q, want %q (the submodule's own marker directory)", inSub.Project, "sub")
+	}
+	inOuter, ok := byName["InOuter"]
+	if !ok {
+		t.Fatal("expected the outer repository's own declaration to be indexed")
+	}
+	if inOuter.Project == "sub" {
+		t.Errorf("InOuter.Project = %q, expected the outer project's own name, not the submodule's", inOuter.Project)
+	}
+
+	if _, ok := s.fileRecord("sub"); ok {
+		t.Error("expected the submodule's own gitlink entry not to become a file record")
 	}
 }
 

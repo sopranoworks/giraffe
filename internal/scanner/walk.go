@@ -6,7 +6,6 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
-	"strings"
 )
 
 // HasGitDir reports whether root has its own .git entry — a directory
@@ -36,46 +35,19 @@ type WalkCache struct {
 }
 
 // WalkDirEntry is one directory's own state as of the call that found
-// it: its mtime, and the file and subdirectory basenames it held. Read
-// again, unread, on a later call whose fresh stat of the same directory
-// still matches ModTime — see Walk's own doc comment for why that is a
-// sound thing to trust rather than merely a fast one.
+// it: its mtime, and the file and subdirectory basenames it held —
+// every subdirectory found, regardless of whether Walk went on to
+// prune it (directive 022: pruning is re-decided every call, from
+// current exclusion rules, not baked into what gets cached — see
+// walkDir's own comment on why). Read again, unread, on a later call
+// whose fresh stat of the same directory still matches ModTime — see
+// Walk's own doc comment for why that is a sound thing to trust rather
+// than merely a fast one.
 type WalkDirEntry struct {
 	ModTime int64
 	Files   []string
 	Subdirs []string
 }
-
-// walkPruneDirs are the top-level directory names Walk skips outright —
-// neither their own mtime nor their contents ever enter WalkCache or
-// the returned file list — derived from defaultExclude's own
-// directory-shaped entries (the trailing-"/" ones, which Pattern.excludes
-// already only matches at the root: "vendor/" matches relPath=="vendor",
-// never "sub/vendor"), so this pruning is always a strict subset of what
-// filtering would have removed anyway, never a second, independent
-// opinion about what to exclude.
-//
-// Not scope.Exclude — a project's own .giraffe/exclude — even though
-// pruning it too would save more: a negated pattern there
-// (Pattern.negation) can reach back into an otherwise-excluded
-// directory to re-include one specific path (§25 C-26 sits beside the
-// same mechanism), and pruning during the walk itself would make that
-// path unreachable regardless — a silent "does not exist" for exactly
-// the case an operator wrote the negation to prevent, which §3 rules
-// out everywhere. defaultExclude is a fixed literal list with no
-// negation of its own, so pruning by it alone is unconditionally safe.
-// ".git" is pruned at every depth, not just the root, unconditionally:
-// no legitimate content ever lives in a directory of that name.
-var walkPruneDirs = func() map[string]bool {
-	m := make(map[string]bool)
-	for _, p := range defaultExclude {
-		s := string(p)
-		if trimmed, ok := strings.CutSuffix(s, "/"); ok && !strings.Contains(trimmed, "/") {
-			m[trimmed] = true
-		}
-	}
-	return m
-}()
 
 // Walk resolves every regular file (and symlink — never followed, so a
 // symlink to a directory cannot create a cycle) under root by reading
@@ -87,6 +59,11 @@ var walkPruneDirs = func() map[string]bool {
 // prev is the previous call's own returned WalkCache — the zero value
 // on a first call, or whenever no prior cache is available. next is
 // what the caller should persist for the call after this one.
+// gitignore is every .gitignore-sourced GitignoreRule discovered along
+// the way, each scoped to the directory that declared it (directive
+// 022 item 1) — a caller's own post-hoc filtering pass (FilterWalked)
+// needs it to reproduce the same exclusion decisions Walk itself used
+// to prune, over files Walk did not prune outright.
 //
 // A directory whose fresh stat mtime still matches prev's own record
 // for it is not re-read (os.ReadDir) — its cached file and subdirectory
@@ -115,7 +92,10 @@ var walkPruneDirs = func() map[string]bool {
 //     mtime at all. Not this cache's job: classify's own per-file stat
 //     comparison (directive 013, §20 C-2) runs over every path this
 //     function returns exactly as it would over any other, and catches
-//     it there.
+//     it there. The same is true of a .gitignore file modified in
+//     place — see loadGitignore's own comment for why that is read
+//     fresh regardless of this cache, rather than inheriting this same
+//     blind spot.
 //   - a filesystem that does not update a directory's mtime on
 //     add/remove/rename inside it at all (some FAT variants, some
 //     network mounts). Degrades silently to a full read of that subtree
@@ -126,14 +106,29 @@ var walkPruneDirs = func() map[string]bool {
 // this package (§3 C3) — checked once per directory visited, so a
 // pathological tree is interrupted rather than run to completion
 // regardless of the caller's own timeout.
-func Walk(ctx context.Context, root string, prev WalkCache) (files []string, next WalkCache, err error) {
+func Walk(ctx context.Context, root string, prev WalkCache) (files []string, gitignore []GitignoreRule, next WalkCache, err error) {
 	next = WalkCache{Dirs: make(map[string]WalkDirEntry)}
-	err = walkDir(ctx, root, ".", prev, &next, &files)
+	err = walkDir(ctx, root, ".", defaultExcludeRules(), prev, &next, &files, &gitignore)
 	sort.Strings(files) // deterministic regardless of directory read order (§3 C5)
-	return files, next, err
+	return files, gitignore, next, err
 }
 
-func walkDir(ctx context.Context, absRoot, relDir string, prev WalkCache, next *WalkCache, files *[]string) error {
+// walkDir visits relDir, then recurses into whichever of its own
+// subdirectories rules — ancestorRules plus relDir's own .gitignore,
+// see below — do not exclude.
+//
+// rules is never baked into what gets cached: WalkDirEntry.Subdirs
+// always holds every subdirectory a fresh os.ReadDir found (bar
+// .git), and the decision to prune a given child is re-made from the
+// current rules on every call, in the loop below, whether that child
+// list came from a fresh read or from prev's own cache. This is
+// deliberate, not an oversight — a directory's own mtime does not move
+// when its .gitignore's *content* changes in place (the same miss
+// loadGitignore's own comment names), so baking a prune decision into
+// the cached listing the way defaultExclude-only pruning safely could
+// (021) would let a stale decision survive a rule change indefinitely
+// whenever the surrounding directory itself happened not to change.
+func walkDir(ctx context.Context, absRoot, relDir string, ancestorRules []GitignoreRule, prev WalkCache, next *WalkCache, files *[]string, gitignore *[]GitignoreRule) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -152,6 +147,15 @@ func walkDir(ctx context.Context, absRoot, relDir string, prev WalkCache, next *
 	}
 	mtime := info.ModTime().UnixNano()
 
+	ownRules := loadGitignore(absRoot, relDir)
+	*gitignore = append(*gitignore, ownRules...)
+	rules := ancestorRules
+	if len(ownRules) > 0 {
+		rules = make([]GitignoreRule, 0, len(ancestorRules)+len(ownRules))
+		rules = append(rules, ancestorRules...)
+		rules = append(rules, ownRules...)
+	}
+
 	var fileNames, subdirNames []string
 	if cached, ok := prev.Dirs[relDir]; ok && cached.ModTime == mtime {
 		fileNames, subdirNames = cached.Files, cached.Subdirs
@@ -162,14 +166,18 @@ func walkDir(ctx context.Context, absRoot, relDir string, prev WalkCache, next *
 		}
 		for _, de := range entries {
 			name := de.Name()
+			if name == ".git" {
+				// An ordinary repository's own metadata directory, or
+				// — the same name, but a regular file — a linked
+				// worktree's or a submodule's own gitdir pointer
+				// (directive 022 item 3, confirmed against a real
+				// submodule fixture: `sub/.git` is a 28-byte text file
+				// containing "gitdir: ..."). Neither is ever content
+				// to index, at any depth, regardless of type.
+				continue
+			}
 			switch {
 			case de.IsDir():
-				if name == ".git" {
-					continue
-				}
-				if relDir == "." && walkPruneDirs[name] {
-					continue
-				}
 				subdirNames = append(subdirNames, name)
 			case de.Type().IsRegular(), de.Type()&os.ModeSymlink != 0:
 				fileNames = append(fileNames, name)
@@ -182,9 +190,37 @@ func walkDir(ctx context.Context, absRoot, relDir string, prev WalkCache, next *
 		*files = append(*files, path.Join(relDir, f))
 	}
 	for _, d := range subdirNames {
-		if err := walkDir(ctx, absRoot, path.Join(relDir, d), prev, next, files); err != nil {
+		childRel := path.Join(relDir, d)
+		if prunes(childRel, rules) {
+			continue
+		}
+		if err := walkDir(ctx, absRoot, childRel, rules, prev, next, files, gitignore); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// prunes reports whether childRel should be skipped entirely — never
+// stat'd, never gaining a WalkCache entry, never contributing a file to
+// the result — using only rules safe to prune by: defaultExclude and
+// whatever .gitignore rules have been discovered on the way down to
+// this point (rules, built up in walkDir). Never scope.Exclude
+// (.giraffe/exclude) — that stays a post-hoc filter only, applied in
+// FilterWalked: a negated pattern there can reach back into an
+// otherwise-excluded directory to re-include one specific path (021's
+// own reasoning, unchanged), and pruning during the walk itself would
+// make that path permanently unreachable regardless — a silent "does
+// not exist" §3 rules out everywhere.
+//
+// .gitignore's own negation has no equivalent need here — verified
+// against real git with `git check-ignore -v` against a fixture
+// containing "build/\n!build/keep.txt": the negated file stays
+// ignored, because real git itself cannot re-include a path whose
+// parent directory is excluded. Pruning by a .gitignore-sourced rule
+// therefore never diverges from what git itself would already do;
+// only .giraffe/exclude's own, more permissive negation (021's own
+// discovery) needs the deferred, post-hoc treatment.
+func prunes(childRel string, rules []GitignoreRule) bool {
+	return !included(childRel, rules)
 }

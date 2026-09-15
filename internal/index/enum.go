@@ -29,62 +29,18 @@ type enumerateOutcome struct {
 }
 
 // enumerate is the pipeline's own first stage (directive 019 §2,
-// extended by directive 021): the tracked half (`git ls-files -s`,
-// where root has its own .git — scanner.HasGitDir) and everything else
-// (scanner.Walk's own incremental directory read — every file where
-// there is no .git at all, or the untracked remainder of an ordinary
-// repository) run as two concurrent goroutines. The tracked half still
-// streams each path to metaCh as it arrives (scanner.StreamTracked),
-// unchanged from 019: filtering needs nothing but the one path in
-// front of it, so there is nothing to wait for there, and this is what
-// lets classify's own stat comparison (pipeline.go) begin on
-// early-arriving tracked files while the other half is still working.
-//
-// The walked half cannot stream the same way: unlike the git-only
-// design it replaces (where `git ls-files --others` used git's own
-// index internally and needed nothing from this call), Walk knows
-// nothing about which paths are tracked, so a path it finds cannot be
-// filtered against the tracked set until that set is completely known
-// — sending an already-tracked path to metaCh a second time would
-// dispatch that file through extraction twice, violating §3 C2 ("no
-// file is opened twice"). Walk still runs concurrently with the
-// tracked goroutine (the expensive, I/O-bound part overlaps exactly as
-// before), but its own filtering (scanner.FilterWalked) — and its
-// send to metaCh — waits until wg.Wait() below confirms the tracked
-// set is final. In practice this only defers the walked half's own
-// share, usually the minority in a real checkout; named here as a real
-// trade, not hidden.
-//
-// A cache hit (ro's stored enum blob still valid under root's current
-// .git/index fingerprint and configuration — see fingerprintConfig)
-// replays the tracked half straight from memory: there is no
-// subprocess to stream on that half at all. Walk has its own,
-// independent incremental cache (WalkCache, persisted as walkBlob) —
-// keyed on every directory's own mtime, not on a single fingerprint —
-// so it always runs, but an unchanged directory costs one stat, not a
-// re-read (see scanner.Walk's own doc comment for why that is sound,
-// not merely fast).
-//
-// Marker verification (a cached or freshly-read tracked marker must
-// still exist on disk — existingMarkers, below) and the enum-cache
-// blob both need the complete, sorted tracked set, so out is only
-// filled in once both goroutines finish, or one fails. This is a real
-// constraint, not an oversight: a marker file can sort anywhere in
-// git's own path order relative to the files it governs — nothing
-// about encountering one file proves every marker that will turn out
-// to be its ancestor has already been seen — so project resolution
-// (and therefore dispatch to extraction, which stamps every entry
-// with a Project) cannot safely begin before enumerate finishes. See
-// runPipeline's own comment for what this does and does not let
-// overlap.
-//
-// enumerate owns metaCh and closes it once both goroutines are fully
-// drained or one fails (language-policy G10, G21). If one fails
-// partway, the other is not cancelled: it runs to completion, and
-// whatever it already sent to metaCh is real but harmless wasted work
-// once out.err is checked — nothing is written to the store until
-// well after this returns (see runPipeline), so a failure here can
-// only waste CPU, never corrupt anything.
+// extended by directives 021 and 022): the tracked half (`git ls-files
+// -s`, where root has its own .git — scanner.HasGitDir) and everything
+// else (scanner.Walk's own incremental directory read — every file
+// where there is no .git at all, or the untracked remainder of an
+// ordinary repository, filtered by scanner.FilterWalked against
+// whatever .gitignore contributed too) run as two concurrent
+// goroutines, started here and read back once both finish. See
+// runTrackedHalf and runWalkedHalf for each half's own reasoning, and
+// finishEnumeration for why their results cannot be combined — the
+// enum-cache blob, the walk-cache blob, and marker verification all
+// need the complete, final state of both halves — until wg.Wait below
+// confirms both are done.
 func enumerate(ctx context.Context, root string, scope scanner.Scope, assignments map[string]string, ro *Store, metaCh chan<- scanner.FileMeta, out *enumerateOutcome) {
 	defer close(metaCh)
 
@@ -92,101 +48,174 @@ func enumerate(ctx context.Context, root string, scope scanner.Scope, assignment
 	modTime, size, fpOK := scanner.GitIndexFingerprint(root)
 	configFP := fingerprintConfig(scope.Exclude, assignments)
 
-	var oldEnumBlob []byte
-	var oldWalkBlob []byte
-	if ro != nil {
-		oldEnumBlob, _ = ro.enumBlob()
-		oldWalkBlob, _ = ro.walkBlob()
+	oldEnumBlob, oldWalkCache := loadPriorCaches(ro)
+	cached, cacheOK := tryEnumCache(root, hasGit, fpOK, oldEnumBlob, modTime, size, configFP)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	var tracked trackedHalfResult
+	go func() {
+		defer wg.Done()
+		tracked = runTrackedHalf(ctx, root, scope, hasGit, cacheOK, cached, metaCh)
+	}()
+	var walked walkedHalfResult
+	go func() {
+		defer wg.Done()
+		walked = runWalkedHalf(ctx, root, oldWalkCache)
+	}()
+	wg.Wait()
+
+	// If one half failed, the other is not cancelled: it runs to
+	// completion, and whatever it already sent to metaCh is real but
+	// harmless wasted work once out.err is checked — nothing is
+	// written to the store until well after this returns (see
+	// runPipeline), so a failure here can only waste CPU, never
+	// corrupt anything.
+	if tracked.err != nil {
+		out.err = tracked.err
+		return
 	}
-	var oldWalkCache scanner.WalkCache
+	if walked.err != nil {
+		out.err = walked.err
+		return
+	}
+
+	finishEnumeration(root, scope, hasGit, fpOK, modTime, size, configFP, cacheOK, oldEnumBlob, tracked, walked, metaCh, out)
+}
+
+// loadPriorCaches reads root's own persisted caches from ro — nil/zero
+// for a first run, or whenever ro is nil. Two independent blobs, two
+// independent mechanisms (enumCache is fingerprint-keyed, WalkCache is
+// per-directory-mtime-keyed — scanner.Walk's own doc comment), read
+// together only because both live in the same store.
+func loadPriorCaches(ro *Store) (oldEnumBlob []byte, oldWalkCache scanner.WalkCache) {
+	if ro == nil {
+		return nil, scanner.WalkCache{}
+	}
+	oldEnumBlob, _ = ro.enumBlob()
+	oldWalkBlob, _ := ro.walkBlob()
 	if oldWalkBlob != nil {
 		if c, ok := decodeWalkCache(oldWalkBlob); ok {
 			oldWalkCache = c
 		}
 	}
+	return oldEnumBlob, oldWalkCache
+}
 
-	var cached enumCache
-	cacheOK := false
-	if hasGit && fpOK && oldEnumBlob != nil {
-		if c, ok := decodeEnumCache(oldEnumBlob); ok &&
-			c.IndexModTime == modTime && c.IndexSize == size && c.Config == configFP {
-			verified := existingMarkers(root, c.TrackedMarkers)
-			if len(verified) == len(c.TrackedMarkers) {
-				cached = c
-				cached.TrackedMarkers = verified
-				cacheOK = true
-			}
-			// else: a cached tracked marker no longer exists on disk —
-			// `git ls-files -s` reports the index, not the working
-			// tree, so a marker removed without `git rm` changes
-			// neither GitIndexFingerprint nor a fresh `git ls-files
-			// -s` output. Fall through to a full re-enumeration so
-			// the corrected marker set is both returned and
-			// persisted below.
-		}
+// tryEnumCache reports whether root's persisted enum-cache blob is
+// still valid: a tracked half must exist at all (hasGit), its git-index
+// fingerprint and the operator's configuration must both still match
+// what the cache was built under, and every cached tracked marker must
+// still exist on disk. That last check is not redundant with the
+// fingerprint one: `git ls-files -s` reports the index, not the
+// working tree, so a marker removed from disk without `git rm` changes
+// neither GitIndexFingerprint nor a fresh `git ls-files -s` output —
+// only a stat catches it.
+func tryEnumCache(root string, hasGit, fpOK bool, oldEnumBlob []byte, modTime, size int64, configFP string) (enumCache, bool) {
+	if !hasGit || !fpOK || oldEnumBlob == nil {
+		return enumCache{}, false
 	}
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	var trackedMetas []scanner.FileMeta
-	var trackedMarkers []string
-	var trackedErr error
-	go func() {
-		defer wg.Done()
-		if !hasGit {
-			return // item 1: no .git at all — Walk covers everything
-		}
-		if cacheOK {
-			for _, m := range cached.TrackedMetas {
-				metaCh <- m
-			}
-			trackedMetas = cached.TrackedMetas
-			trackedMarkers = cached.TrackedMarkers
-			return
-		}
-		var candidates []string
-		trackedErr = scanner.StreamTracked(ctx, root, scope,
-			func(m scanner.FileMeta) {
-				metaCh <- m
-				trackedMetas = append(trackedMetas, m)
-			},
-			func(p string) { candidates = append(candidates, p) },
-		)
-		// trackedMarkers comes from `git ls-files -s`, which reports
-		// the index, not the working tree. Verifying by stat is what
-		// makes marker freshness independent of staged-vs-unstaged,
-		// the same way C-2 removed that distinction for everything
-		// else: markers are a handful of files, so stat is cheap
-		// regardless of corpus size.
-		trackedMarkers = existingMarkers(root, candidates)
-	}()
-
-	var walkedPaths []string
-	var newWalkCache scanner.WalkCache
-	var walkErr error
-	go func() {
-		defer wg.Done()
-		walkedPaths, newWalkCache, walkErr = scanner.Walk(ctx, root, oldWalkCache)
-	}()
-
-	wg.Wait()
-
-	if trackedErr != nil {
-		out.err = trackedErr
-		return
+	c, ok := decodeEnumCache(oldEnumBlob)
+	if !ok || c.IndexModTime != modTime || c.IndexSize != size || c.Config != configFP {
+		return enumCache{}, false
 	}
-	if walkErr != nil {
-		out.err = walkErr
-		return
+	verified := existingMarkers(root, c.TrackedMarkers)
+	if len(verified) != len(c.TrackedMarkers) {
+		// A cached tracked marker no longer exists on disk: fall
+		// through to a full re-enumeration so the corrected marker set
+		// is both returned this call and persisted for the next one.
+		return enumCache{}, false
 	}
+	c.TrackedMarkers = verified
+	return c, true
+}
 
-	trackedPaths := make(map[string]bool, len(trackedMetas))
-	for _, m := range trackedMetas {
+// trackedHalfResult is runTrackedHalf's own findings, handed back to
+// enumerate once its goroutine returns.
+type trackedHalfResult struct {
+	metas   []scanner.FileMeta
+	markers []string
+	err     error
+}
+
+// runTrackedHalf is enumerate's tracked-side goroutine body: replays a
+// still-valid enum cache straight from memory (no subprocess at all),
+// or streams `git ls-files -s` (scanner.StreamTracked), filtering and
+// marking each path as it arrives — directive 019 §2's own streaming
+// property, unchanged since. hasGit false (item 1: no .git at all) is
+// not an error, just an empty tracked half — enumerate always starts
+// this goroutine regardless, and this is simply what it finds.
+func runTrackedHalf(ctx context.Context, root string, scope scanner.Scope, hasGit bool, cacheOK bool, cached enumCache, metaCh chan<- scanner.FileMeta) trackedHalfResult {
+	if !hasGit {
+		return trackedHalfResult{}
+	}
+	if cacheOK {
+		for _, m := range cached.TrackedMetas {
+			metaCh <- m
+		}
+		return trackedHalfResult{metas: cached.TrackedMetas, markers: cached.TrackedMarkers}
+	}
+	var candidates []string
+	var metas []scanner.FileMeta
+	err := scanner.StreamTracked(ctx, root, scope,
+		func(m scanner.FileMeta) { metaCh <- m; metas = append(metas, m) },
+		func(p string) { candidates = append(candidates, p) },
+	)
+	// trackedMarkers comes from `git ls-files -s`, which reports the
+	// index, not the working tree. Verifying by stat is what makes
+	// marker freshness independent of staged-vs-unstaged, the same way
+	// C-2 removed that distinction for everything else: markers are a
+	// handful of files, so stat is cheap regardless of corpus size.
+	return trackedHalfResult{metas: metas, markers: existingMarkers(root, candidates), err: err}
+}
+
+// walkedHalfResult is runWalkedHalf's own findings.
+type walkedHalfResult struct {
+	paths     []string
+	gitignore []scanner.GitignoreRule
+	cache     scanner.WalkCache
+	err       error
+}
+
+// runWalkedHalf is enumerate's other goroutine body: scanner.Walk's
+// own incremental directory read, covering item 1's whole tree (no
+// .git at all) or item 2's untracked remainder (an ordinary
+// repository) — Walk itself has no notion of which case it is in; that
+// distinction lives entirely in what finishEnumeration does with its
+// raw, unfiltered output (skipping whatever the tracked half already
+// covered). Unlike the tracked half, this cannot stream into metaCh as
+// it goes: Walk knows nothing about which paths are tracked, so a path
+// it finds cannot be filtered against the tracked set until that set
+// is completely known — sending an already-tracked path a second time
+// would dispatch that file through extraction twice, violating §3 C2
+// ("no file is opened twice"). It still runs concurrently with
+// runTrackedHalf (the expensive, I/O-bound part overlaps exactly as
+// before); only its own filtering, in finishEnumeration, waits.
+func runWalkedHalf(ctx context.Context, root string, oldWalkCache scanner.WalkCache) walkedHalfResult {
+	paths, gitignore, cache, err := scanner.Walk(ctx, root, oldWalkCache)
+	return walkedHalfResult{paths: paths, gitignore: gitignore, cache: cache, err: err}
+}
+
+// finishEnumeration runs once both halves have completely finished
+// (enumerate's own wg.Wait, with neither having failed): it filters the
+// walked half against the now-final tracked path set
+// (scanner.FilterWalked), and builds both cache blobs this call's
+// result carries forward. Marker verification (existingMarkers, inside
+// runTrackedHalf/tryEnumCache above) and both cache blobs all need the
+// complete, sorted tracked set, and the walk cache needs Walk's own
+// complete output — a marker file can sort anywhere in git's own path
+// order relative to the files it governs, so nothing about encountering
+// one file proves every marker that will turn out to be its ancestor
+// has already been seen. This is why project resolution downstream
+// (pipeline.go) also waits for enumerate to finish entirely, not just
+// this function.
+func finishEnumeration(root string, scope scanner.Scope, hasGit, fpOK bool, modTime, size int64, configFP string, cacheOK bool, oldEnumBlob []byte, tracked trackedHalfResult, walked walkedHalfResult, metaCh chan<- scanner.FileMeta, out *enumerateOutcome) {
+	trackedPaths := make(map[string]bool, len(tracked.metas))
+	for _, m := range tracked.metas {
 		trackedPaths[m.Path] = true
 	}
 	var walkedMarkers []string
-	scanner.FilterWalked(root, walkedPaths, trackedPaths, scope,
+	scanner.FilterWalked(root, walked.paths, trackedPaths, scope, walked.gitignore,
 		func(m scanner.FileMeta) { metaCh <- m },
 		func(p string) { walkedMarkers = append(walkedMarkers, p) },
 	)
@@ -195,9 +224,8 @@ func enumerate(ctx context.Context, root string, scope scanner.Scope, assignment
 	// directory's own mtime still matches — scanner.Walk's own doc
 	// comment on why that needs no separate stat-based verification the
 	// way the tracked half's cache does).
-	out.walkBlob = encodeWalkCache(newWalkCache)
-
-	out.markerPaths = append(append([]string{}, trackedMarkers...), walkedMarkers...)
+	out.walkBlob = encodeWalkCache(walked.cache)
+	out.markerPaths = append(append([]string{}, tracked.markers...), walkedMarkers...)
 
 	if cacheOK {
 		out.enumBlob = oldEnumBlob
@@ -211,9 +239,9 @@ func enumerate(ctx context.Context, root string, scope scanner.Scope, assignment
 		// explicitly rather than trusted, since §3 C5 is a hard
 		// constraint and the cache blob's own byte layout depends on
 		// it directly.
-		sortedMetas := append([]scanner.FileMeta(nil), trackedMetas...)
+		sortedMetas := append([]scanner.FileMeta(nil), tracked.metas...)
 		sort.Slice(sortedMetas, func(i, j int) bool { return sortedMetas[i].Path < sortedMetas[j].Path })
-		out.enumBlob = encodeEnumCache(modTime, size, configFP, sortedMetas, trackedMarkers)
+		out.enumBlob = encodeEnumCache(modTime, size, configFP, sortedMetas, tracked.markers)
 	}
 }
 
@@ -238,7 +266,11 @@ func existingMarkers(root string, markers []string) []string {
 // not just the tracked set itself (directive 019 §3: 017 already put
 // the pattern list in; the assignments map was simply left out of it).
 // defaultExclude is a compile-time constant and needs no fingerprint
-// of its own, since it cannot change without a new binary.
+// of its own, since it cannot change without a new binary. .gitignore
+// is not part of it either: it only ever affects the walked half
+// (scanner.walkedRules), which has its own, separate cache
+// (WalkCache) — this fingerprint governs the tracked half's cache
+// alone.
 //
 // This alone does not make an assignment change retroactively
 // re-extract a content-unchanged file — see runPipeline's own comment
