@@ -67,6 +67,18 @@ func gitCommit(t *testing.T, root string, paths ...string) {
 	}
 }
 
+// mustPattern parses raw as a gitignore-syntax scanner.Pattern (directive
+// 023 item 1), failing the test if it does not parse — every literal
+// this test suite passes is meant to be valid.
+func mustPattern(t *testing.T, raw string) scanner.Pattern {
+	t.Helper()
+	p, ok := scanner.ParsePattern(raw)
+	if !ok {
+		t.Fatalf("scanner.ParsePattern(%q) = not ok, want a valid pattern", raw)
+	}
+	return p
+}
+
 // scope mirrors main.go's own scope construction (directive 017 §3:
 // scanner does not know go.mod on its own any more — a test calling
 // Refresh directly needs the same lang.RegisteredMarkers() wiring main
@@ -920,40 +932,69 @@ func writeExclude(t *testing.T, root, content string) {
 	}
 }
 
-// TestLoadExclude_SeparatesAssignmentsFromPatterns (§25 C-26): a line
-// shaped "ext:<x> lang:<y>" is an operator language assignment, not an
-// exclusion pattern — the two live in the same file (§25 C-27:
-// exclude is the portable, committable one) but are returned
-// separately, since scanner.Scope only ever wants patterns.
-func TestLoadExclude_SeparatesAssignmentsFromPatterns(t *testing.T) {
-	root := t.TempDir()
-	writeExclude(t, root, "vendor/\next:inc lang:c\n*.pb.go\nlang:cpp ext:hpp\n")
-
-	patterns, assignments, err := LoadExclude(root)
-	if err != nil {
+// writeExtensions writes root's own per-project extensions file
+// (directive 023 item 2's second layer — LoadExtensions' own doc
+// comment).
+func writeExtensions(t *testing.T, root, content string) {
+	t.Helper()
+	full := filepath.Join(root, Dir, "extensions")
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if len(patterns) != 2 || patterns[0] != "vendor/" || patterns[1] != "*.pb.go" {
-		t.Fatalf("patterns = %#v, want [vendor/ *.pb.go]", patterns)
-	}
-	if assignments[".inc"] != "c" {
-		t.Errorf("assignments[.inc] = %q, want %q", assignments[".inc"], "c")
-	}
-	if assignments[".hpp"] != "cpp" {
-		t.Errorf("assignments[.hpp] = %q, want %q (either token order)", assignments[".hpp"], "cpp")
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
-// TestLoadExclude_MissingFileYieldsEmptyAssignments mirrors the
-// existing "no exclude file" case: nothing configured is not an error.
-func TestLoadExclude_MissingFileYieldsEmptyAssignments(t *testing.T) {
+// withGlobalExtensions points $XDG_CONFIG_HOME at a fresh temp
+// directory for the duration of the test (t.Setenv, restored
+// automatically) and writes content to its own giraffe/extensions —
+// LoadExtensions' global layer, isolated from whatever the real host's
+// own ~/.config/giraffe/extensions might contain.
+func withGlobalExtensions(t *testing.T, content string) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	full := filepath.Join(dir, "giraffe", "extensions")
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLoadExclude_IsPureGitignoreSyntax (directive 023 item 1: "one
+// exclusion syntax, one complete parser") — exclude no longer recognises
+// "ext:"/"lang:" lines as anything special; they parse as ordinary
+// (here, inert — no real path contains a space) gitignore patterns, the
+// same as any other line.
+func TestLoadExclude_IsPureGitignoreSyntax(t *testing.T) {
 	root := t.TempDir()
-	patterns, assignments, err := LoadExclude(root)
+	writeExclude(t, root, "vendor/\next:inc lang:c\n*.pb.go\n")
+
+	patterns, err := LoadExclude(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(patterns) != 0 || len(assignments) != 0 {
-		t.Fatalf("patterns = %#v, assignments = %#v, want both empty", patterns, assignments)
+	if len(patterns) != 3 {
+		t.Fatalf("patterns = %#v, want 3 (vendor/, the ext:/lang: line as an ordinary pattern, *.pb.go)", patterns)
+	}
+	if patterns[0].String() != "vendor/" || patterns[2].String() != "*.pb.go" {
+		t.Errorf("patterns = %#v, want vendor/ ... *.pb.go", patterns)
+	}
+}
+
+// TestLoadExclude_MissingFileYieldsNoPatterns mirrors the existing "no
+// exclude file" case: nothing configured is not an error.
+func TestLoadExclude_MissingFileYieldsNoPatterns(t *testing.T) {
+	root := t.TempDir()
+	patterns, err := LoadExclude(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(patterns) != 0 {
+		t.Fatalf("patterns = %#v, want empty", patterns)
 	}
 }
 
@@ -974,8 +1015,8 @@ func TestParseAssignment_ExtAloneIsIndexOnly(t *testing.T) {
 }
 
 // TestParseAssignment_RequiresWellFormedTokens: anything short of a
-// well-formed "ext:_" or two-token "ext:_ lang:_" line is left for the
-// exclusion pattern path, not partially interpreted as an assignment.
+// well-formed "ext:_" or two-token "ext:_ lang:_" line is not an
+// assignment.
 func TestParseAssignment_RequiresWellFormedTokens(t *testing.T) {
 	cases := []string{
 		"ext:",                    // empty ext value, one token
@@ -994,50 +1035,73 @@ func TestParseAssignment_RequiresWellFormedTokens(t *testing.T) {
 	}
 }
 
-// TestLoadExclude_MalformedAssignmentIsAnError (§26 C-29): a line
-// beginning "ext:" or "lang:" that fails to parse as a well-formed
-// assignment is a hard error naming the file and the line, not a
-// silently-inert exclusion pattern. This is self-caused: the assignment
-// syntax did not exist before 007, so a typo in it could not either.
-func TestLoadExclude_MalformedAssignmentIsAnError(t *testing.T) {
+// TestLoadExtensions_GlobalAndPerProject_ProjectOverrides (directive 023
+// item 2): the global layer supplies every extension not named at the
+// project level; the project's own file overrides the global for one it
+// does name — a person's ".inc is C" default, overridden by a specific
+// project where it means something else.
+func TestLoadExtensions_GlobalAndPerProject_ProjectOverrides(t *testing.T) {
+	withGlobalExtensions(t, "ext:inc lang:c\next:hpp lang:cpp\n")
+	root := t.TempDir()
+	writeExtensions(t, root, "ext:inc lang:asm\n")
+
+	assignments, err := LoadExtensions(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignments[".inc"] != "asm" {
+		t.Errorf("assignments[.inc] = %q, want %q (project overrides global)", assignments[".inc"], "asm")
+	}
+	if assignments[".hpp"] != "cpp" {
+		t.Errorf("assignments[.hpp] = %q, want %q (from the global layer, unshadowed)", assignments[".hpp"], "cpp")
+	}
+}
+
+// TestLoadExtensions_MissingFilesYieldEmpty: neither layer existing is
+// not an error, the same "nothing configured yet" convention LoadExclude
+// and LoadRoots already have.
+func TestLoadExtensions_MissingFilesYieldEmpty(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // an empty config home: no global extensions file at all
+	root := t.TempDir()
+	assignments, err := LoadExtensions(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assignments) != 0 {
+		t.Fatalf("assignments = %#v, want empty", assignments)
+	}
+}
+
+// TestLoadExtensions_MalformedAssignmentIsAnError (relocated from §26
+// C-29, which named exclude specifically — the hard error now belongs
+// to extensions, the file whose entire grammar is this fixed shape, not
+// to exclude, which is gitignore syntax and now silently skips anything
+// it cannot parse instead).
+func TestLoadExtensions_MalformedAssignmentIsAnError(t *testing.T) {
+	withGlobalExtensions(t, "")
 	cases := []struct {
 		content  string
 		wantLine int
 	}{
-		{"ext:\n", 1},                 // empty ext value — "ext:inc" alone is now valid (§4), but this is not
-		{"lang:c\n", 1},               // ext: missing
-		{"vendor/\nlang:cpp\n", 2},    // error on the second line specifically
-		{"ext:inc lang:c extra\n", 1}, // three tokens
+		{"ext:\n", 1},                     // empty ext value — "ext:inc" alone is valid (§4), but this is not
+		{"lang:c\n", 1},                   // ext: missing
+		{"ext:inc lang:c\nlang:cpp\n", 2}, // error on the second line specifically
+		{"ext:inc lang:c extra\n", 1},     // three tokens
 	}
 	for _, c := range cases {
 		root := t.TempDir()
-		writeExclude(t, root, c.content)
-		_, _, err := LoadExclude(root)
+		writeExtensions(t, root, c.content)
+		_, err := LoadExtensions(root)
 		if err == nil {
-			t.Fatalf("LoadExclude(%q) = nil error, want an error for a malformed assignment", c.content)
+			t.Fatalf("LoadExtensions(%q) = nil error, want an error for a malformed assignment", c.content)
 		}
-		if !strings.Contains(err.Error(), "exclude") {
-			t.Errorf("error %v does not name the exclude file", err)
+		if !strings.Contains(err.Error(), "extensions") {
+			t.Errorf("error %v does not name the extensions file", err)
 		}
 		wantLineStr := fmt.Sprintf(":%d:", c.wantLine)
 		if !strings.Contains(err.Error(), wantLineStr) {
 			t.Errorf("error %v does not name line %d", err, c.wantLine)
 		}
-	}
-}
-
-// TestLoadExclude_OrdinaryPatternsAreNotMistakenForAssignments confirms
-// the error path is narrow: a normal pattern, even one that happens to
-// contain a colon, is unaffected.
-func TestLoadExclude_OrdinaryPatternsAreNotMistakenForAssignments(t *testing.T) {
-	root := t.TempDir()
-	writeExclude(t, root, "vendor/\n*.pb.go\nsome:weird:path\n")
-	patterns, _, err := LoadExclude(root)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(patterns) != 3 {
-		t.Fatalf("patterns = %#v, want 3 ordinary patterns", patterns)
 	}
 }
 

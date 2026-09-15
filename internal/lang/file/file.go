@@ -21,7 +21,8 @@ import (
 // declarations out of file content, so there are none to report — only
 // the fact that the file itself exists and is addressable by name.
 // lang is the operator's own assignment for f's extension
-// (.giraffe/exclude, §25 C-26) if one exists — the only tier that can
+// (index.LoadExtensions — its own file since directive 023 item 2,
+// .giraffe/exclude before it, §25 C-26) if one exists — the only tier that can
 // label a file giraffe has no extractor for at all — or "" when none
 // applies, including when the operator assigned the extension without
 // a language claim (directive 019 §4's "ext:<x>" alone): that case

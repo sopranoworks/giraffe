@@ -60,8 +60,9 @@ func scanAll(t *testing.T, dir string, scope Scope) []FileMeta {
 	var metas []FileMeta
 	trackedPaths := map[string]bool{}
 	if HasGitDir(dir) {
-		if err := StreamTracked(context.Background(), dir, scope,
+		if err := StreamTracked(context.Background(), dir, "", scope,
 			func(m FileMeta) { metas = append(metas, m); trackedPaths[m.Path] = true },
+			func(string) {},
 			func(string) {},
 		); err != nil {
 			t.Fatal(err)
@@ -73,6 +74,21 @@ func scanAll(t *testing.T, dir string, scope Scope) []FileMeta {
 	}
 	FilterWalked(dir, walked, trackedPaths, scope, gitignore, func(m FileMeta) { metas = append(metas, m) }, func(string) {})
 	return metas
+}
+
+// mustPattern parses raw as a gitignore-syntax Pattern (pattern.go),
+// failing the test if it does not parse — every literal this test suite
+// passes is meant to be valid, so a parse failure here is a test bug,
+// not a case to tolerate silently the way ParsePattern's own caller
+// (loadGitignore, index.LoadExclude) tolerates a genuinely unparseable
+// line.
+func mustPattern(t *testing.T, raw string) Pattern {
+	t.Helper()
+	p, ok := ParsePattern(raw)
+	if !ok {
+		t.Fatalf("ParsePattern(%q) = not ok, want a valid pattern", raw)
+	}
+	return p
 }
 
 // TestScan_ResolvesTrackedAndWalked_AppliesExclude (§24 C-18): every
@@ -125,7 +141,7 @@ func TestScan_NoDuplicatePaths(t *testing.T) {
 
 func TestScan_ScopeExcludeIsAdditional(t *testing.T) {
 	dir := gitRepo(t)
-	metas := scanAll(t, dir, Scope{Exclude: []Pattern{"pkg/"}})
+	metas := scanAll(t, dir, Scope{Exclude: []Pattern{mustPattern(t, "pkg/")}})
 	for _, m := range metas {
 		if m.Path == "pkg/new.go" {
 			t.Fatalf("expected pkg/ to be excluded by scope, but found %s", m.Path)
@@ -561,16 +577,23 @@ func submoduleRepo(t *testing.T) string {
 
 // TestStreamTracked_SkipsSubmoduleGitlink (directive 022 item 3,
 // answering "what does the tracked half do with that entry today":
-// before this directive, nothing skipped it, and the gitlink path was
-// treated as an ordinary tracked file — the entry is now recognised by
-// its mode (160000) and left out of both onMeta and onMarker.
+// before 022, nothing skipped it, and the gitlink path was treated as an
+// ordinary tracked file — the entry is recognised by its mode (160000),
+// left out of onMeta and onMarker, and (directive 023 item 3: "a
+// submodule is enumerated by git, inside itself") reported to onGitlink
+// instead of simply discarded, so a caller can recurse into it.
 func TestStreamTracked_SkipsSubmoduleGitlink(t *testing.T) {
 	dir := submoduleRepo(t)
 	var metas []FileMeta
-	if err := StreamTracked(context.Background(), dir, Scope{},
+	var gitlinks []string
+	if err := StreamTracked(context.Background(), dir, "", Scope{},
 		func(m FileMeta) { metas = append(metas, m) }, func(string) {},
+		func(p string) { gitlinks = append(gitlinks, p) },
 	); err != nil {
 		t.Fatal(err)
+	}
+	if len(gitlinks) != 1 || gitlinks[0] != "sub" {
+		t.Errorf("gitlinks = %v, want [sub] (the submodule entry, reported to the caller instead of skipped in silence)", gitlinks)
 	}
 	for _, m := range metas {
 		if m.Path == "sub" {

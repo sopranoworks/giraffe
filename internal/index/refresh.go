@@ -155,23 +155,33 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 
 // readLines reads root/Dir/name as a list of trimmed, non-empty lines
 // with "#" comments removed, alongside each line's 1-based source line
-// number (§26 C-29: a malformed assignment error names the file and the
-// line, which requires knowing it — blank lines and comments are not
-// renumbered away). A missing file returns no lines and no error —
-// nothing configured yet is not a failure.
+// number (LoadExtensions' own malformed-assignment error names the file
+// and the line, which requires knowing it — blank lines and comments are
+// not renumbered away). A missing file returns no lines and no error —
+// nothing configured yet is not a failure. A thin wrapper over
+// readLinesAt for the common case (a file under this root's own Dir);
+// LoadExtensions' global layer is not under any project root at all, so
+// it calls readLinesAt directly.
 //
-// Shared by LoadExclude and LoadRoots: both are "a small list of strings
-// in a .giraffe/ file, one per line" — found by running `giraffe find
-// exclude` before writing LoadRoots (code-manners D1) and factored out
-// per D5, rather than writing LoadRoots as a second near-identical
-// reader beside LoadExclude.
+// Shared by LoadExtensions and LoadRoots: both are "a small list of
+// strings in a .giraffe/ file, one per line" — found by running
+// `giraffe find exclude` before writing LoadRoots (code-manners D1) and
+// factored out per D5, rather than writing LoadRoots as a second
+// near-identical reader beside what was then LoadExclude. LoadExclude
+// itself (above) no longer uses this: gitignore syntax defines its own
+// blank/comment/trim rules, applied by ParsePattern, and pre-processing
+// its lines here would only diverge from them.
 func readLines(root, name string) (lines []string, lineNos []int, err error) {
-	data, err := os.ReadFile(filepath.Join(root, Dir, name))
+	return readLinesAt(filepath.Join(root, Dir, name))
+}
+
+func readLinesAt(path string) (lines []string, lineNos []int, err error) {
+	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("read %s/%s: %w", Dir, name, err)
+		return nil, nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	for i, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -185,118 +195,53 @@ func readLines(root, name string) (lines []string, lineNos []int, err error) {
 }
 
 // LoadExclude reads the per-project scope configuration in
-// .giraffe/exclude: exclusion patterns (and negations, §24 C-19) plus,
-// since §25 C-26, operator assignments — the only tier that can know a
-// project's own convention (".inc" is C here, assembler there), and,
-// since directive 019 §4, the only tier that can say "index this"
-// without also having to say what it is. A missing file means no
-// project-level exclusions or assignments beyond the scanner's own
-// defaults.
+// .giraffe/exclude: exclusion patterns, in gitignore syntax — the same
+// syntax and the same parser (scanner.ParsePattern) .gitignore itself
+// uses (directive 023 item 1: "there is one parser to write, not two").
+// A missing file means no project-level exclusions beyond the scanner's
+// own defaults. A line ParsePattern cannot make sense of is skipped
+// silently, exactly as an unrecognised .gitignore line is — the same
+// forward-compatibility guard, not a licence to leave anything gitignore
+// specifies today unimplemented (see ParsePattern's own doc comment).
 //
-// A line is an assignment when it is either one whitespace-separated
-// token "ext:<value>" alone — index files with this extension, with no
-// language claim, overriding the exclusion module's deny list without
-// asserting a value for lang (directive 019 §4: "lang is absent when
-// unknown by design [§25 C-24]; being forced to invent a value in
-// order to index a file contradicts that directly") — or exactly two
-// tokens "ext:<value>" and "lang:<value>", in either order — index
-// files with this extension and label them langName. This is the same
-// name:value shape --query already uses, so the mental model transfers
-// without pulling this package's small, fixed grammar through query's
-// own tokenizer (built for arbitrary filters, quoting, validation
-// against an index — heavier than this fixed shape needs). Anything
-// else is an exclusion pattern, as before — except a line that starts
-// with "ext:" or "lang:" but does not parse as a well-formed
-// assignment, which is a hard error (§26 C-29): no real path starts
-// that way, so a line shaped like a typoed assignment is never a
-// plausible exclusion pattern either.
+// Read as raw lines, not through readLines: readLines' own trimming and
+// blank/comment stripping is right for LoadRoots (a plain path list),
+// but gitignore syntax defines its own blank-line, comment, and
+// trailing-whitespace rules (ParsePattern), and this file must apply
+// them exactly the way .gitignore does — pre-trimming here would only
+// diverge from that, not simplify it.
 //
-// Per-file granularity — the capability 017 §2 removed when it took
-// deniedExtensions out of scanner.Pattern's reach (a negated
-// `!logo.png` could no longer pull one specific denied file back in,
-// only every file of an extension) — does not return here either:
-// directive 018 §2 already chose the assignments route over restoring
-// Pattern negation, and this directive's own item 4 only separates what
-// that route can say (index vs. index-and-label), not who it can say it
-// about. See the completion report for why per-extension remains the
-// granularity, not per-file.
+// Operator language assignments ("ext:<x>", "ext:<x> lang:<y>") no
+// longer live here (directive 023 item 2: "extension definitions are
+// not exclusion rules") — see LoadExtensions, extensions.go. Before this
+// directive they were distinguished from exclusion patterns by line
+// shape, which is exactly why exclude could not simply be gitignore
+// syntax; moving them out removes that conflict entirely, and with it
+// §26 C-29's hard-error path for exclude specifically (an assignment
+// mistyped in exclude is now just an ordinary, unparseable-or-not
+// gitignore line — LoadExtensions keeps its own hard error for its own
+// file, where the fixed assignment grammar is everything the file has).
 //
 // Hand-written, unlike everything under cacheDir: authored by the
-// operator, and theirs to commit or not — and now, per §25 C-27,
-// exclude specifically is the portable, committable one, so an
-// assignment written once serves everyone on the project.
-func LoadExclude(root string) (patterns []scanner.Pattern, assignments map[string]string, err error) {
-	lines, lineNos, err := readLines(root, "exclude")
-	if err != nil {
-		return nil, nil, err
+// operator, and theirs to commit or not — portable and committable
+// (§25 C-27).
+func LoadExclude(root string) (patterns []scanner.Pattern, err error) {
+	data, err := os.ReadFile(filepath.Join(root, Dir, "exclude"))
+	if os.IsNotExist(err) {
+		return nil, nil
 	}
-	assignments = make(map[string]string)
-	for i, l := range lines {
-		if ext, langName, ok := parseAssignment(l); ok {
-			assignments["."+ext] = langName
+	if err != nil {
+		return nil, fmt.Errorf("read %s/exclude: %w", Dir, err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		p, ok := scanner.ParsePattern(line)
+		if !ok {
 			continue
 		}
-		if looksLikeAssignment(l) {
-			return nil, nil, fmt.Errorf("%s/exclude:%d: malformed language assignment %q (want \"ext:<value> lang:<value>\", either order)", Dir, lineNos[i], l)
-		}
-		patterns = append(patterns, scanner.Pattern(l))
+		patterns = append(patterns, p)
 	}
-	return patterns, assignments, nil
-}
-
-// looksLikeAssignment reports whether line was meant as an operator
-// language assignment (§26 C-29) — it starts with "ext:" or "lang:" —
-// regardless of whether it actually parses as one. Used only to decide
-// whether a parseAssignment failure is a malformed assignment (an
-// error) or an ordinary exclusion pattern (not one).
-func looksLikeAssignment(line string) bool {
-	return strings.HasPrefix(line, "ext:") || strings.HasPrefix(line, "lang:")
-}
-
-// parseAssignment recognises an operator assignment line: either
-// "ext:<value>" alone (directive 019 §4 — index this extension, no
-// language claim) or "ext:<value> lang:<value>" (§25 C-26 — index this
-// extension and label it), in either order for the two-token form,
-// neither value empty. Anything else — including a bare pattern, or a
-// pattern that happens to contain a colon — is not an assignment; the
-// caller (LoadExclude) decides whether that makes it an ordinary
-// pattern or an error. ok=true and langName=="" together are how
-// LoadExclude's assignments map distinguishes "not assigned at all"
-// (the key absent) from "assigned, no language" (the key present with
-// an empty value) — see exclude.Extract, which checks presence, not
-// non-emptiness.
-func parseAssignment(line string) (ext, langName string, ok bool) {
-	fields := strings.Fields(line)
-	switch len(fields) {
-	case 1:
-		f := fields[0]
-		if !strings.HasPrefix(f, "ext:") {
-			return "", "", false
-		}
-		ext = strings.TrimPrefix(f, "ext:")
-		if ext == "" {
-			return "", "", false
-		}
-		return ext, "", true
-	case 2:
-		var haveExt, haveLang bool
-		for _, f := range fields {
-			switch {
-			case strings.HasPrefix(f, "ext:"):
-				ext, haveExt = strings.TrimPrefix(f, "ext:"), true
-			case strings.HasPrefix(f, "lang:"):
-				langName, haveLang = strings.TrimPrefix(f, "lang:"), true
-			default:
-				return "", "", false
-			}
-		}
-		if !haveExt || !haveLang || ext == "" || langName == "" {
-			return "", "", false
-		}
-		return ext, langName, true
-	default:
-		return "", "", false
-	}
+	return patterns, nil
 }
 
 // LoadRoots reads .giraffe/roots: paths to other project roots to

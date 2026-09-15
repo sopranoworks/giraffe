@@ -222,5 +222,5 @@ func walkDir(ctx context.Context, absRoot, relDir string, ancestorRules []Gitign
 // only .giraffe/exclude's own, more permissive negation (021's own
 // discovery) needs the deferred, post-hoc treatment.
 func prunes(childRel string, rules []GitignoreRule) bool {
-	return !included(childRel, rules)
+	return !included(childRel, rules, true)
 }

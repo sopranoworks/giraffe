@@ -99,90 +99,15 @@ func WithContent(path string, content []byte) File {
 	return File{Path: path, content: func() ([]byte, error) { return content, nil }}
 }
 
-// Pattern is one exclusion rule. A trailing "/" matches a directory and
-// everything under it. Otherwise it is a glob (path.Match) matched against
-// the full relative path. A pattern with no interior "/" — the common case,
-// "vendor/", "*.pb.go" — additionally matches at any depth, not only at
-// the root: "target/" excludes a directory named target wherever it
-// occurs, the same way real gitignore treats a pattern with no separator
-// at its own beginning or middle (directive 022 item 1 — this is what lets
-// a bare gitignored build-output name, "target/"/"dist/"/"__pycache__/",
-// stay excluded regardless of which nested crate or package it belongs
-// to). This is the common subset of .gitignore patterns, chosen because it
-// is already the mental model anyone using git has.
-type Pattern string
-
-func (p Pattern) excludes(relPath string) bool {
-	s := string(p)
-	dirOnly := strings.HasSuffix(s, "/")
-	pat := strings.TrimSuffix(s, "/")
-	// A separator anywhere but the very end anchors the pattern to
-	// this rule's own directory rather than letting it match at any
-	// depth — checked against pat as written, including a leading "/",
-	// before that leading "/" is stripped for the actual comparison
-	// below: "/build" and "sub/build" are both anchored (a separator
-	// at the beginning or middle, in real gitignore's own words) the
-	// same way "build" alone is not.
-	anyDepth := !strings.Contains(pat, "/")
-	matchPat := strings.TrimPrefix(pat, "/")
-
-	if dirOnly {
-		if anyDepth {
-			return pathHasSegment(relPath, matchPat)
-		}
-		return relPath == matchPat || strings.HasPrefix(relPath, matchPat+"/")
-	}
-	if ok, _ := path.Match(matchPat, relPath); ok {
-		return true
-	}
-	if anyDepth {
-		if ok, _ := path.Match(matchPat, path.Base(relPath)); ok {
-			return true
-		}
-	}
-	return false
-}
-
-// pathHasSegment reports whether name is a whole path segment of
-// relPath: relPath is name itself, starts with "name/", ends with
-// "/name", or contains "/name/". This is the "any depth" rule a bare,
-// directory-shaped pattern gets under real gitignore semantics —
-// matching the basename-glob fallback a non-directory pattern already
-// had, extended to the directory-shaped case (directive 022 item 1).
-func pathHasSegment(relPath, name string) bool {
-	return relPath == name ||
-		strings.HasPrefix(relPath, name+"/") ||
-		strings.HasSuffix(relPath, "/"+name) ||
-		strings.Contains(relPath, "/"+name+"/")
-}
-
-// negation reports whether p is a negated pattern (a leading "!", the
-// same mental model .gitignore already uses — Pattern's own doc
-// comment) and returns the pattern with that prefix stripped. A
-// negated pattern forces inclusion of whatever it matches, overriding
-// every other exclusion pattern below it in the merged list.
-//
-// It no longer overrides the exclusion module's deny list the way it
-// once overrode scanner's own coverage default (§24 C-19): that
-// default moved out of this package entirely (directive 017 §2), to a
-// module dispatch stage a scanner Pattern cannot reach. A denied
-// extension (logo.png) can no longer be pulled back in with
-// `!logo.png` in .giraffe/exclude — named here, and in the completion
-// report, as a real behaviour change this directive did not ask for
-// and does not restore.
-func (p Pattern) negation() (bool, Pattern) {
-	if strings.HasPrefix(string(p), "!") {
-		return true, Pattern(strings.TrimPrefix(string(p), "!"))
-	}
-	return false, p
-}
-
 // defaultExclude is the baseline every project starts with: dependency and
 // build-output trees a reuse search gets nothing from. It is the same set
 // specifications/giraffe.md §11 excludes from its sizing measurement, kept
 // here so a real run stays comparable to that evidence. Per-project
-// configuration adds to this; it does not replace it.
-var defaultExclude = []Pattern{
+// configuration adds to this; it does not replace it. Written in
+// gitignore syntax (directive 023 item 1: one syntax, one parser) —
+// parsed by defaultExcludeRules below exactly as any .gitignore or
+// .giraffe/exclude line is.
+var defaultExclude = []string{
 	// giraffe's own local cache and configuration (index.Dir — repeated
 	// as a literal here, not imported, since index already imports this
 	// package). A repository with no .gitignore entry for it — every
@@ -236,7 +161,16 @@ func scopedTo(relPath, dir string) (suffix string, ok bool) {
 
 func defaultExcludeRules() []GitignoreRule {
 	rules := make([]GitignoreRule, 0, len(defaultExclude))
-	for _, p := range defaultExclude {
+	for _, raw := range defaultExclude {
+		p, ok := ParsePattern(raw)
+		if !ok {
+			// Every entry in defaultExclude is a fixed literal, known
+			// valid gitignore syntax — this can only fire if a future
+			// edit to that list breaks it, which a test catches
+			// (TestDefaultExclude_AllPatternsParse) well before this
+			// would ever run against a real tree.
+			panic("scanner: defaultExclude entry does not parse: " + raw)
+		}
 		rules = append(rules, GitignoreRule{dir: ".", pattern: p})
 	}
 	return rules
@@ -373,8 +307,12 @@ func statSize(root, relPath string) int64 {
 // built-in patterns. rules is checked in order, each scoped to its own
 // dir (GitignoreRule's own doc comment) — this is the one algorithm
 // both file-level filtering and directory-level pruning (walk.go's
-// prunes) share.
-func included(relPath string, rules []GitignoreRule) bool {
+// prunes) share. isDir is relPath's own kind — true only from prunes,
+// which is only ever asked about a directory it is deciding whether to
+// descend into; false from StreamTracked and FilterWalked, which only
+// ever hand this a file (Pattern.excludes' own doc comment on why a
+// dirOnly rule needs to know).
+func included(relPath string, rules []GitignoreRule, isDir bool) bool {
 	keep := true
 	for _, r := range rules {
 		suffix, ok := scopedTo(relPath, r.dir)
@@ -382,12 +320,12 @@ func included(relPath string, rules []GitignoreRule) bool {
 			continue
 		}
 		if neg, plain := r.pattern.negation(); neg {
-			if plain.excludes(suffix) {
+			if plain.excludes(suffix, isDir) {
 				keep = true
 			}
 			continue
 		}
-		if r.pattern.excludes(suffix) {
+		if r.pattern.excludes(suffix, isDir) {
 			keep = false
 		}
 	}
@@ -446,26 +384,38 @@ func streamGitLines(ctx context.Context, root string, onLine func(line string) e
 	return nil
 }
 
-// StreamTracked runs `git ls-files -s`, filtering and marking each
-// path against scope as it is read from git's own output, rather than
-// waiting for the whole tracked set before filtering anything
+// StreamTracked runs `git ls-files -s` under root, filtering and marking
+// each path against scope as it is read from git's own output, rather
+// than waiting for the whole tracked set before filtering anything
 // (directive 019 §2: filtering needs nothing but the one path in front
 // of it, so there is nothing to wait for). Only meaningful where
 // HasGitDir(root) — a caller checks that first, since a root with no
-// .git has no tracked half at all. onMeta is called for every path
-// scope keeps, in whatever order git prints them (git's own index
-// order, not a guarantee of this function's); onMarker for every path
-// that is also a marker basename, filtered or not (§20 C-3, unaffected
-// by this directive). Neither callback runs concurrently with the
-// other — both run on the goroutine that calls this function.
-// gitlinkMode is the `git ls-files -s` mode field for a submodule
-// entry — a boundary to another repository, not file content
-// (directive 022 item 3, confirmed with `git ls-files -s` against a
-// real submodule fixture: a single line, this mode, a commit hash
-// rather than a blob hash, and the submodule's own directory path).
+// .git has no tracked half at all.
+//
+// prefix is prepended to every path this call reports — "" for a
+// top-level call, a submodule's own path (as reported by an outer call's
+// onGitlink) for a call made inside it (directive 023 item 3: "a
+// submodule is enumerated by git, inside itself" — the same function,
+// pointed at the submodule's own working tree, with its results folded
+// back under the path that names it). Every callback receives the
+// prefixed path; only the internal stat (statSize) uses root and the
+// unprefixed one, since root is the submodule's own filesystem directory
+// when prefix is not empty.
+//
+// onMeta is called for every path scope keeps; onMarker for every path
+// that is also a marker basename, filtered or not (§20 C-3); onGitlink
+// for a submodule boundary (gitlinkMode below) — never onMeta, since
+// there is nothing here to read (attempting to would try to open the
+// submodule's own directory as if it were a file's content), and no
+// blob hash comparable to any other tracked file's. Recursing into it,
+// if a caller chooses to, is index/enum.go's own decision (runTrackedHalf),
+// not this function's — scanner stays one file-access layer, unaware of
+// enumeration's own caching or concurrency shape. None of the three
+// callbacks runs concurrently with another — all run on the goroutine
+// that calls this function, in the order git prints its own output.
 const gitlinkMode = "160000"
 
-func StreamTracked(ctx context.Context, root string, scope Scope, onMeta func(FileMeta), onMarker func(path string)) error {
+func StreamTracked(ctx context.Context, root, prefix string, scope Scope, onMeta func(FileMeta), onMarker func(path string), onGitlink func(path string)) error {
 	rules := baseRules(scope)
 	markers := mergedMarkers(scope)
 	return streamGitLines(ctx, root, func(line string) error {
@@ -478,22 +428,16 @@ func StreamTracked(ctx context.Context, root string, scope Scope, onMeta func(Fi
 			return fmt.Errorf("unexpected `git ls-files -s` line: %q", line)
 		}
 		mode, hash, relPath := fields[0], fields[1], line[tab+1:]
+		fullPath := path.Join(prefix, relPath)
 		if mode == gitlinkMode {
-			// A submodule boundary, not a file: there is nothing here
-			// to read (attempting to would try to open the submodule's
-			// own directory as if it were a file's content), and no
-			// blob hash comparable to any other tracked file's. Left
-			// out of onMeta and onMarker entirely; its own contents,
-			// if any, are indexed the same way any other directory's
-			// are — through Walk, once this path is absent from the
-			// tracked set FilterWalked skips against.
+			onGitlink(fullPath)
 			return nil
 		}
-		if included(relPath, rules) {
-			onMeta(FileMeta{Path: relPath, BlobHash: hash, Size: statSize(root, relPath)})
+		if included(fullPath, rules, false) {
+			onMeta(FileMeta{Path: fullPath, BlobHash: hash, Size: statSize(root, relPath)})
 		}
-		if isMarker(relPath, markers) {
-			onMarker(relPath)
+		if isMarker(fullPath, markers) {
+			onMarker(fullPath)
 		}
 		return nil
 	}, "ls-files", "-s")
@@ -506,7 +450,8 @@ func StreamTracked(ctx context.Context, root string, scope Scope, onMeta func(Fi
 // per-path decision StreamTracked makes for its own git-sourced paths,
 // over Walk's output instead of git's. skip is checked first: the
 // tracked path set a git repository's own StreamTracked half already
-// covered, so a path `git ls-files -s` already reported is never
+// covered — at any depth, including every submodule it recursed into
+// (directive 023 item 3) — so a path already reported there is never
 // reconsidered here (a git repository's tracked and walked halves must
 // never emit the same path — nothing downstream de-duplicates). skip
 // is nil or empty for a root with no tracked half at all (item 1's
@@ -518,7 +463,7 @@ func FilterWalked(root string, paths []string, skip map[string]bool, scope Scope
 		if skip[p] {
 			continue
 		}
-		if included(p, rules) {
+		if included(p, rules, false) {
 			onMeta(FileMeta{Path: p, BlobHash: "", Size: statSize(root, p)})
 		}
 		if isMarker(p, markers) {

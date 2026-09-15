@@ -32,7 +32,9 @@ type Entry struct {
 	// Lang is the language's own name ("go", "c++", "python", unmapped
 	// per §6 — the same treatment kind and scope already get), present
 	// only when it is known: a registered extractor's own name, or an
-	// assignment the operator wrote in .giraffe/exclude (§25 C-26).
+	// assignment the operator wrote (index.LoadExtensions — its own
+	// file since directive 023 item 2, .giraffe/exclude before it, §25
+	// C-26).
 	// "" when neither applies — not a placeholder value. §24 shipped
 	// "none" as a placeholder; §25 C-24 withdrew it, since it delivered
 	// neither visibility nor a narrowing axis. Absence is itself

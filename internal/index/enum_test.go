@@ -314,7 +314,7 @@ func TestRefresh_WalkCacheWarmsAndPersists(t *testing.T) {
 // list byte-for-byte unchanged — still invalidates the cached tracked
 // enumeration.
 func TestFingerprintConfig_ChangesWithAssignments(t *testing.T) {
-	patterns := []scanner.Pattern{"vendor/"}
+	patterns := []scanner.Pattern{mustPattern(t, "vendor/")}
 	base := fingerprintConfig(patterns, nil)
 	withAssignment := fingerprintConfig(patterns, map[string]string{".png": "image"})
 	if base == withAssignment {
@@ -498,5 +498,186 @@ func TestRefresh_EnumCacheInvalidatedByAssignmentChangeAlone(t *testing.T) {
 	}
 	if before.Config == after.Config {
 		t.Error("expected the enum cache's own config fingerprint to change once an assignment is added, even with .git/index untouched")
+	}
+}
+
+// TestRunTrackedTree_RecursesIntoSubmodule_ReportsBlobHashes (directive
+// 023 item 3): "a submodule is enumerated by git, inside itself" — a
+// submodule's tracked files are resolved via its own `git ls-files -s`,
+// not the walker, and carry a real blob hash the way any other tracked
+// file does (022's own walked-file route always reported BlobHash "").
+func TestRunTrackedTree_RecursesIntoSubmodule_ReportsBlobHashes(t *testing.T) {
+	root := submoduleRepo(t)
+	metaCh := make(chan scanner.FileMeta, 64)
+	metas, candidates, err := runTrackedTree(context.Background(), root, root, "", scope(), metaCh)
+	close(metaCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got *scanner.FileMeta
+	for i := range metas {
+		if metas[i].Path == "sub/inner.go" {
+			m := metas[i]
+			got = &m
+		}
+	}
+	if got == nil {
+		t.Fatalf("expected sub/inner.go among the tracked tree's metas, got %#v", metas)
+	}
+	if got.BlobHash == "" {
+		t.Error("expected sub/inner.go to carry a real blob hash (resolved via the submodule's own git, not walked)")
+	}
+
+	hasGoMod := false
+	for _, c := range candidates {
+		if c == "sub/go.mod" {
+			hasGoMod = true
+		}
+	}
+	if !hasGoMod {
+		t.Errorf("expected sub/go.mod among the marker candidates, got %v", candidates)
+	}
+}
+
+// nestedSubmoduleRepo builds an outer repository whose submodule itself
+// contains a submodule — directive 023 item 3's "nested submodules are
+// the same case recursively" — three repositories deep.
+func nestedSubmoduleRepo(t *testing.T) string {
+	t.Helper()
+	leaf := t.TempDir()
+	mid := t.TempDir()
+	outer := t.TempDir()
+	env := append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	run := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	run(leaf, "init", "-q")
+	writeFile(t, leaf, "leaf.go", "package leaf\n\nfunc InLeaf() {}\n")
+	run(leaf, "add", "leaf.go")
+	run(leaf, "commit", "-q", "-m", "init")
+
+	run(mid, "init", "-q")
+	writeFile(t, mid, "mid.go", "package mid\n\nfunc InMid() {}\n")
+	run(mid, "add", "mid.go")
+	run(mid, "commit", "-q", "-m", "init")
+	run(mid, "-c", "protocol.file.allow=always", "submodule", "add", leaf, "leafsub")
+	run(mid, "add", ".gitmodules", "leafsub")
+	run(mid, "commit", "-q", "-m", "add leaf submodule")
+
+	run(outer, "init", "-q")
+	writeFile(t, outer, "outer.go", "package outer\n\nfunc InOuter() {}\n")
+	run(outer, "add", "outer.go")
+	run(outer, "commit", "-q", "-m", "init")
+	run(outer, "-c", "protocol.file.allow=always", "submodule", "add", mid, "midsub")
+	run(outer, "add", ".gitmodules", "midsub")
+	run(outer, "commit", "-q", "-m", "add mid submodule")
+	run(outer, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive")
+
+	dir, err := scanner.Root(outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestRunTrackedTree_NestedSubmodule_RecursesAgain(t *testing.T) {
+	root := nestedSubmoduleRepo(t)
+	metaCh := make(chan scanner.FileMeta, 64)
+	metas, _, err := runTrackedTree(context.Background(), root, root, "", scope(), metaCh)
+	close(metaCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPath := map[string]scanner.FileMeta{}
+	for _, m := range metas {
+		byPath[m.Path] = m
+	}
+	for _, want := range []string{"outer.go", "midsub/mid.go", "midsub/leafsub/leaf.go"} {
+		m, ok := byPath[want]
+		if !ok {
+			t.Errorf("expected %s among the tracked tree's metas, got %v", want, byPath)
+			continue
+		}
+		if m.BlobHash == "" {
+			t.Errorf("expected %s to carry a real blob hash", want)
+		}
+	}
+}
+
+// TestRefresh_SubmoduleFileAddedAfterEnumCacheWarm_StillIndexed
+// (directive 023 item 3's own measurement finding, locked in as a test):
+// the outer enum cache's own fingerprint is the outer root's .git/index
+// mtime and size (fingerprintConfig/tryEnumCache) — it says nothing
+// about a submodule's own, separate .git/index, so a file added inside
+// a submodule after the outer cache is warm does not invalidate it.
+// runTrackedHalf's cache-hit path therefore replays the old
+// TrackedMetas without ever calling runTrackedTree again — but the new
+// file is not silently lost (§3's own "does not exist" rule): Walk
+// re-reads the submodule's own directory unconditionally every call (its
+// mtime moved when the new file was added), finds it, and — since the
+// stale tracked skip-set does not name it — FilterWalked reports it
+// through the walked route instead of the tracked one. Correct in
+// outcome, not in mechanism: named here, and in the completion report,
+// as a real, disclosed nuance rather than claimed as a clean win.
+func TestRefresh_SubmoduleFileAddedAfterEnumCacheWarm_StillIndexed(t *testing.T) {
+	root := submoduleRepo(t)
+	closeStore(t, mustRefresh(t, root)) // warm the outer enum cache
+
+	subDir := root + "/sub"
+	writeFile(t, subDir, "newfile.go", "package inner\n\nfunc BrandNew() {}\n")
+	gitCommit(t, subDir, "newfile.go") // changes sub's own .git/index, not the outer one
+
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
+	found := false
+	for e := range s.All() {
+		if e.Name == "BrandNew" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected a file added inside the submodule after the outer enum cache warmed to still be indexed (via the walked route, since the tracked cache is not itself invalidated by a submodule-internal change)")
+	}
+}
+
+// TestRunTrackedTree_UncheckedOutSubmodule_ContributesNothing: a
+// submodule registered in the outer index (a gitlink entry exists) but
+// never `git submodule update`d has no .git of its own — HasGitDir is
+// false, so this recursion contributes nothing for it, exactly as the
+// directive names ("a submodule that is not checked out... contributes
+// nothing here"). Whatever the directory does contain on disk is still
+// reachable through the walked half, unchanged from directive 022 — not
+// this function's concern.
+func TestRunTrackedTree_UncheckedOutSubmodule_ContributesNothing(t *testing.T) {
+	root := submoduleRepo(t)
+	if err := os.Remove(root + "/sub/.git"); err != nil {
+		t.Fatal(err)
+	}
+
+	metaCh := make(chan scanner.FileMeta, 64)
+	metas, candidates, err := runTrackedTree(context.Background(), root, root, "", scope(), metaCh)
+	close(metaCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range metas {
+		if m.Path == "sub/inner.go" {
+			t.Errorf("expected no tracked entry for sub/inner.go once sub/.git is gone, got %+v", m)
+		}
+	}
+	for _, c := range candidates {
+		if c == "sub/go.mod" {
+			t.Error("expected no marker candidate from inside an uninitialised submodule")
+		}
 	}
 }

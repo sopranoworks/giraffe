@@ -139,12 +139,14 @@ type trackedHalfResult struct {
 }
 
 // runTrackedHalf is enumerate's tracked-side goroutine body: replays a
-// still-valid enum cache straight from memory (no subprocess at all),
-// or streams `git ls-files -s` (scanner.StreamTracked), filtering and
-// marking each path as it arrives — directive 019 §2's own streaming
-// property, unchanged since. hasGit false (item 1: no .git at all) is
-// not an error, just an empty tracked half — enumerate always starts
-// this goroutine regardless, and this is simply what it finds.
+// still-valid enum cache straight from memory (no subprocess at all), or
+// resolves the tracked tree from scratch (runTrackedTree) — streaming
+// `git ls-files -s` (scanner.StreamTracked), filtering and marking each
+// path as it arrives (directive 019 §2's own streaming property,
+// unchanged since), and recursing into every submodule it finds
+// (directive 023 item 3). hasGit false (item 1: no .git at all) is not
+// an error, just an empty tracked half — enumerate always starts this
+// goroutine regardless, and this is simply what it finds.
 func runTrackedHalf(ctx context.Context, root string, scope scanner.Scope, hasGit bool, cacheOK bool, cached enumCache, metaCh chan<- scanner.FileMeta) trackedHalfResult {
 	if !hasGit {
 		return trackedHalfResult{}
@@ -155,18 +157,75 @@ func runTrackedHalf(ctx context.Context, root string, scope scanner.Scope, hasGi
 		}
 		return trackedHalfResult{metas: cached.TrackedMetas, markers: cached.TrackedMarkers}
 	}
-	var candidates []string
-	var metas []scanner.FileMeta
-	err := scanner.StreamTracked(ctx, root, scope,
-		func(m scanner.FileMeta) { metaCh <- m; metas = append(metas, m) },
-		func(p string) { candidates = append(candidates, p) },
-	)
+	metas, candidates, err := runTrackedTree(ctx, root, root, "", scope, metaCh)
 	// trackedMarkers comes from `git ls-files -s`, which reports the
 	// index, not the working tree. Verifying by stat is what makes
 	// marker freshness independent of staged-vs-unstaged, the same way
 	// C-2 removed that distinction for everything else: markers are a
-	// handful of files, so stat is cheap regardless of corpus size.
+	// handful of files, so stat is cheap regardless of corpus size —
+	// including a submodule's own markers, folded into candidates below
+	// by runTrackedTree's own recursion, and verified here once, exactly
+	// like every other candidate.
 	return trackedHalfResult{metas: metas, markers: existingMarkers(root, candidates), err: err}
+}
+
+// runTrackedTree runs scanner.StreamTracked at absSubRoot — root itself
+// on the top-level call, a submodule's own working tree on every
+// recursive one — reporting every path under prefix ("" at the top, the
+// gitlink's own path for a submodule, accumulated further for a
+// submodule inside a submodule). A submodule is a complete repository:
+// "git ls-files works inside it and is cheaper than walking it.
+// Enumeration should use it there, for the same reason it uses it in the
+// outer repository" (directive 023 item 3) — replacing 022's own choice
+// to run no git inside a submodule at all, made on an assumption the
+// directive names as unmeasured and backwards for the common case (a
+// submodule is usually a library being consumed, often the larger tree).
+//
+// Every gitlink StreamTracked reports is one more level of this same
+// recursion, gated by scanner.HasGitDir before a subprocess is spent on
+// it: a submodule added but never `git submodule update`d has no .git of
+// its own to ask, and contributes nothing here — whatever its working
+// tree does or does not contain still reaches the index through the
+// walked half, unchanged from directive 022. Nested submodules are the
+// same case, recursively: a gitlink found while resolving one submodule
+// recurses again, under its own accumulated prefix.
+//
+// Not itself cached the way the top-level tracked half is (runTrackedHalf's
+// own cacheOK fast path, above): the outer enum-cache's fingerprint is
+// root's own .git/index mtime and size, which says nothing about a
+// change inside a submodule's own, separate .git/index. Giving a
+// submodule's own tracked half a persistent cache of its own is a larger
+// caching-architecture change — a new nested cache key, not just a
+// bigger fingerprint — outside what this directive asks for, which is to
+// measure cold/warm behaviour and decide the correctness question, not
+// to design that key format. Named here, and in the completion report,
+// as a disclosed scope limit: warm still benefits from the walked half's
+// own per-directory cache (scanner.WalkCache) inside the submodule too,
+// since Walk has always descended into it uniformly; only the
+// submodule's own git subprocess call re-runs on every call.
+func runTrackedTree(ctx context.Context, root, absSubRoot, prefix string, scope scanner.Scope, metaCh chan<- scanner.FileMeta) (metas []scanner.FileMeta, candidates []string, err error) {
+	var gitlinks []string
+	err = scanner.StreamTracked(ctx, absSubRoot, prefix, scope,
+		func(m scanner.FileMeta) { metaCh <- m; metas = append(metas, m) },
+		func(p string) { candidates = append(candidates, p) },
+		func(p string) { gitlinks = append(gitlinks, p) },
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, g := range gitlinks {
+		subAbs := filepath.Join(root, g)
+		if !scanner.HasGitDir(subAbs) {
+			continue
+		}
+		subMetas, subCandidates, subErr := runTrackedTree(ctx, root, subAbs, g, scope, metaCh)
+		if subErr != nil {
+			return nil, nil, subErr
+		}
+		metas = append(metas, subMetas...)
+		candidates = append(candidates, subCandidates...)
+	}
+	return metas, candidates, nil
 }
 
 // walkedHalfResult is runWalkedHalf's own findings.
@@ -280,7 +339,7 @@ func existingMarkers(root string, markers []string) []string {
 func fingerprintConfig(patterns []scanner.Pattern, assignments map[string]string) string {
 	parts := make([]string, len(patterns))
 	for i, p := range patterns {
-		parts[i] = string(p)
+		parts[i] = p.String()
 	}
 	keys := make([]string, 0, len(assignments))
 	for k := range assignments {

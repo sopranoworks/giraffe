@@ -22,25 +22,12 @@ import (
 // full directory listing, and never skipped for speed at correctness's
 // expense.
 //
-// Supported syntax, stated precisely (item 1's own requirement):
-//   - blank lines and "#" comments are ignored
-//   - a leading "!" negates, exactly as .giraffe/exclude already
-//     supports (Pattern.negation)
-//   - a pattern with no interior "/" matches at any depth under this
-//     .gitignore's own directory (Pattern.excludes, extended by this
-//     directive to match a whole path segment rather than only a
-//     root-level prefix)
-//   - a pattern with an interior "/", or a leading "/", is anchored to
-//     this .gitignore's own directory (Pattern.excludes strips a
-//     leading "/" for the actual comparison but still classifies the
-//     pattern as anchored from it — "/build" and "sub/build" behave
-//     the same as each other, and differently from bare "build")
-//
-// Not supported, named rather than handled silently:
-//   - "**" (globstar) is matched as a literal by path.Match, not as
-//     "zero or more path segments" the way real git interprets it
-//   - "\"-escaping of a leading "!" or "#", or of a pattern containing
-//     a literal space, is not recognised
+// Parsed by ParsePattern (pattern.go) — the one complete gitignore-syntax
+// parser directive 023 item 1 requires, shared verbatim with
+// .giraffe/exclude (index.LoadExclude): globstar, escaping, anchoring,
+// directory-only patterns, negation, and their precedence are all
+// implemented there, not partially here. See ParsePattern's own doc
+// comment for exactly what is and is not recognised.
 func loadGitignore(absRoot, relDir string) []GitignoreRule {
 	data, err := os.ReadFile(filepath.Join(absRoot, relDir, ".gitignore"))
 	if err != nil {
@@ -48,11 +35,12 @@ func loadGitignore(absRoot, relDir string) []GitignoreRule {
 	}
 	var rules []GitignoreRule
 	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		line = strings.TrimSuffix(line, "\r") // tolerate a CRLF file
+		p, ok := ParsePattern(line)
+		if !ok {
 			continue
 		}
-		rules = append(rules, GitignoreRule{dir: relDir, pattern: Pattern(line)})
+		rules = append(rules, GitignoreRule{dir: relDir, pattern: p})
 	}
 	return rules
 }

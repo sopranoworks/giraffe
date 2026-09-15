@@ -54,8 +54,9 @@ var knownExtensionless = []string{
 // continues.
 //
 // An operator assignment for f's own extension (assignments, from
-// .giraffe/exclude's "ext:<x>" or "ext:<x> lang:<y>" lines, §25 C-26,
-// directive 019 §4) always wins over the deny list (directive 018 §2:
+// LoadExtensions' own "ext:<x>" or "ext:<x> lang:<y>" lines — its own
+// file since directive 023 item 2, .giraffe/exclude before it, §25
+// C-26, directive 019 §4) always wins over the deny list (directive 018 §2:
 // "a project that wants a .png indexed by name must be able to say
 // so") — checked first, by presence in the map, not by whether its
 // value is non-empty: an assignment can say "index this" with no

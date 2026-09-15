@@ -145,7 +145,13 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 		knownLanguageSet[l] = true
 	}
 	for _, r := range rootPaths {
-		exclude, assignments, err := index.LoadExclude(r)
+		exclude, err := index.LoadExclude(r)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "giraffe:", err)
+			closeAll()
+			return searchState{}, 1
+		}
+		assignments, err := index.LoadExtensions(r)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "giraffe:", err)
 			closeAll()
@@ -219,7 +225,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 		warnings = append(warnings, r.stats.Warnings...)
 		commitParts = append(commitParts, fmt.Sprintf("%s@%s", filepath.Base(r.root), r.commit))
 		for _, p := range r.exclusion {
-			exclusionSet[string(p)] = true
+			exclusionSet[p.String()] = true
 		}
 	}
 	exclusions := make([]string, 0, len(exclusionSet))

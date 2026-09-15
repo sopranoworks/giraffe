@@ -98,8 +98,9 @@ type Summary struct {
 // Summarize computes a Summary from the full current entry set and the
 // stats of the Refresh that produced it. knownLanguages names every
 // language this build could possibly report (a registered extractor's
-// own name, or a name an operator assigned in .giraffe/exclude, from
-// every root) — used only to give the ## index breakdown visibility
+// own name, or a name an operator assigned via index.LoadExtensions —
+// its own file since directive 023 item 2, .giraffe/exclude before it —
+// from every root) — used only to give the ## index breakdown visibility
 // into a known language with zero matches (§25 C-24: "go 0, unknown
 // 181099" for llvm-project is accurate precisely because Go is known
 // and genuinely absent). A plain list of opaque names, the same
