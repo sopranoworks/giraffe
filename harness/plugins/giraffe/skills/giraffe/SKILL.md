@@ -78,12 +78,3 @@ knowing the name — if you know where it lives, say so and the answer
 gets short; if you only know roughly what it does, stay wide and use
 better words instead. A place is a directory, not a file you have
 already seen: copying a result's whole path narrows to that one file.
-
-## 5. When a search misses
-
-The index searches a declaration's name, the first line of its doc, and
-its path — nothing else. If you later discover something that your
-search should have found, the word you used is in none of those. Say
-so, and name the word: the fix is the doc comment, and a miss that is
-not reported will happen the same way for the next person, including
-you next week.
