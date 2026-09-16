@@ -119,6 +119,14 @@ type Summary struct {
 	// sourceBudget. Empty for a browse, a later page, or a word no name
 	// equals: the section is then omitted like any other empty one.
 	Sources []Source
+	// Seen is what the caller's session has already been shown of this
+	// answer's state lines (StateLines) — directive 046: FormatFrom omits
+	// a state line it holds, and the ## index or ## warnings header with
+	// it when nothing in that section is left. Empty (the zero value)
+	// prints everything, as every call did before 046. Which lines a
+	// session has seen is the caller's to know (internal/session); this
+	// package only renders what it is told.
+	Seen []string
 }
 
 // Summarize computes a Summary from the full current entry set and the
@@ -314,16 +322,14 @@ func FormatFrom(s Summary, matches []entry.Entry, page int) string {
 
 	var b strings.Builder
 
-	indexLine := fmt.Sprintf("commit %s | symbols %d | packages %d | undocumented %d exported, %d package | dispatched %d",
-		s.Commit, s.Symbols, s.Packages, s.UndocumentedExported, s.UndocumentedPackage, s.Dispatched)
-	b.WriteString("## index\n")
-	b.WriteString(indexLine)
-	b.WriteByte('\n')
-	if s.Languages != "" {
-		fmt.Fprintf(&b, "languages: %s\n", s.Languages)
-	}
-	if s.ByExt != "" {
-		fmt.Fprintf(&b, "by ext:    %s\n", s.ByExt)
+	// The ## index block prints what the session has not seen of it
+	// (directive 046): all of it on a session's first call, a line that
+	// changed after — the first line moves when the commit or the
+	// counts do — and nothing once nothing has. Without a session
+	// (Seen empty) it prints whole, as §7 first specified.
+	if lines := unseen(indexLines(s), s.Seen); len(lines) > 0 {
+		section(&b, "## index")
+		writeLines(&b, lines)
 	}
 
 	// §26 C-30: the byte budget is a safety limit, and a safety limit
@@ -335,26 +341,25 @@ func FormatFrom(s Summary, matches []entry.Entry, page int) string {
 	// only once shown turns out non-empty, so its length is added here
 	// too, conditional on there being anything to show.
 	preambleLen := b.Len()
-	const resultsHeader = "\n## results\n"
 	if len(matches) > 0 {
-		preambleLen += len(resultsHeader)
+		preambleLen += sectionLen(&b, "## results")
 	}
 	shown, remainder := fit(matches, s.ShowProject, s.ShowLang, s.ExtVaries, preambleLen, offset)
 
 	if len(shown) > 0 {
-		b.WriteString(resultsHeader)
+		section(&b, "## results")
 		for _, e := range shown {
 			b.WriteString(resultLine(e, s.ShowProject, s.ShowLang, s.ExtVaries))
 		}
 	}
 
 	if len(s.Sources) > 0 {
-		b.WriteString("\n## source\n")
+		section(&b, "## source")
 		b.WriteString(sourceSection(s.Sources))
 	}
 
 	if len(remainder) > 0 {
-		b.WriteString("\n## truncated\n")
+		section(&b, "## truncated")
 		b.WriteString(truncatedLine(remainder, page, totalPages))
 		b.WriteByte('\n')
 	}
@@ -366,26 +371,114 @@ func FormatFrom(s Summary, matches []entry.Entry, page int) string {
 	// evidence in the index (query.Suggest), never a fixed list, so an
 	// unfed empty search stays silent rather than inventing advice.
 	if len(matches) == 0 && len(s.TryNext) > 0 {
-		b.WriteString("\n## try next\n")
-		for _, line := range s.TryNext {
-			fmt.Fprintf(&b, "%s\n", line)
-		}
+		section(&b, "## try next")
+		writeLines(&b, s.TryNext)
 	}
 
-	if len(s.Warnings) > 0 || len(s.Notices) > 0 || len(s.Exclusions) > 0 {
-		b.WriteString("\n## warnings\n")
-		for _, w := range s.Warnings {
-			fmt.Fprintf(&b, "unparsed: %s\n", w)
-		}
-		for _, n := range s.Notices {
-			fmt.Fprintf(&b, "%s\n", n)
-		}
-		if len(s.Exclusions) > 0 {
-			fmt.Fprintf(&b, "active exclusions: %s\n", strings.Join(s.Exclusions, ", "))
-		}
+	// ## warnings is state too (directive 046): a warning the session
+	// has read once — an unparsed file, the cache not being ignored, the
+	// active exclusions — is not news on the next call. A new one is,
+	// and prints alone under its header.
+	if lines := unseen(warningLines(s), s.Seen); len(lines) > 0 {
+		section(&b, "## warnings")
+		writeLines(&b, lines)
+	}
+
+	// An answer is never empty: §7's index line is the evidence the
+	// command ran, and when a session has seen everything and there is
+	// nothing else to print — a miss with no direction — it prints
+	// anyway, seen or not, so that "no results" is never a blank.
+	if b.Len() == 0 {
+		section(&b, "## index")
+		writeLines(&b, indexLines(s)[:1])
 	}
 
 	return b.String()
+}
+
+// StateLines is the part of an answer that describes the index rather
+// than the query — the ## index lines and the ## warnings lines, as
+// FormatFrom prints them — which a session need see only once
+// (directive 046). The caller records what it printed and hands it
+// back as Seen next time.
+func (s Summary) StateLines() []string {
+	return append(indexLines(s), warningLines(s)...)
+}
+
+// indexLines renders the ## index block's lines: the index line first
+// (§7: commit, counts, the work this run did), then the languages and
+// by-ext breakdowns when the index is not empty (§25 C-24).
+func indexLines(s Summary) []string {
+	lines := []string{fmt.Sprintf("commit %s | symbols %d | packages %d | undocumented %d exported, %d package | dispatched %d",
+		s.Commit, s.Symbols, s.Packages, s.UndocumentedExported, s.UndocumentedPackage, s.Dispatched)}
+	if s.Languages != "" {
+		lines = append(lines, "languages: "+s.Languages)
+	}
+	if s.ByExt != "" {
+		lines = append(lines, "by ext:    "+s.ByExt)
+	}
+	return lines
+}
+
+// warningLines renders the ## warnings block's lines: parse failures
+// labelled unparsed:, notices as they are (a notice is not a parse
+// failure), and the active exclusions on one line.
+func warningLines(s Summary) []string {
+	lines := make([]string, 0, len(s.Warnings)+len(s.Notices)+1)
+	for _, w := range s.Warnings {
+		lines = append(lines, "unparsed: "+w)
+	}
+	lines = append(lines, s.Notices...)
+	if len(s.Exclusions) > 0 {
+		lines = append(lines, "active exclusions: "+strings.Join(s.Exclusions, ", "))
+	}
+	return lines
+}
+
+// unseen returns the lines of lines that seen does not hold, in order.
+func unseen(lines, seen []string) []string {
+	if len(seen) == 0 {
+		return lines
+	}
+	have := make(map[string]bool, len(seen))
+	for _, l := range seen {
+		have[l] = true
+	}
+	var out []string
+	for _, l := range lines {
+		if !have[l] {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// section starts a section: a blank line between sections, none before
+// the first (which, since directive 046, need not be ## index), then the
+// header on its own line.
+func section(b *strings.Builder, header string) {
+	if b.Len() > 0 {
+		b.WriteByte('\n')
+	}
+	b.WriteString(header)
+	b.WriteByte('\n')
+}
+
+// sectionLen is how many bytes section would write now — what the
+// budget has to count for a header before it is printed (§26 C-30).
+func sectionLen(b *strings.Builder, header string) int {
+	n := len(header) + 1
+	if b.Len() > 0 {
+		n++
+	}
+	return n
+}
+
+func writeLines(b *strings.Builder, lines []string) {
+	for _, l := range lines {
+		b.WriteString(l)
+		b.WriteByte('\n')
+	}
 }
 
 // resultLine renders one result. line prints whenever the entry has one

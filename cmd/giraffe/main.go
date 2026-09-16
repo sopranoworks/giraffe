@@ -22,6 +22,7 @@ import (
 	"giraffe/internal/output"
 	"giraffe/internal/query"
 	"giraffe/internal/scanner"
+	"giraffe/internal/session"
 )
 
 func main() {
@@ -68,6 +69,7 @@ type rootResult struct {
 type searchState struct {
 	entries           query.Entries  // §30 C-46: every root's store, merged; nothing decoded until Search/Suggest/Browse/Summarize actually range over it
 	stores            []*index.Store // closed once this invocation is done querying — see run
+	homeRoot          string         // the invocation's own root: where its cache, and the session record in it, live
 	invocationProject string         // §21 C-6: home root's own project; unexported entries elsewhere are hidden unless a search runs from within them
 	commitLine        string
 	dispatched        int
@@ -219,7 +221,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 		// choice whether to commit, so they are not checked here. This is
 		// not enforced by giraffe editing .gitignore (§17 I9 forbids a
 		// tool silently doing that) — only reported if it is missing.
-		cachePath := filepath.Join(index.Dir, "cache")
+		cachePath := filepath.Join(index.Dir, index.CacheDir)
 		if _, statErr := os.Stat(filepath.Join(r, cachePath)); statErr == nil && notIgnored(ctx, r, cachePath) {
 			ignoreWarnings = append(ignoreWarnings,
 				fmt.Sprintf("%s is not ignored by git in %s (add it to .gitignore yourself; giraffe will not)", cachePath, filepath.Base(r)))
@@ -277,6 +279,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 	return searchState{
 		entries:           query.Concat(sources...),
 		stores:            stores,
+		homeRoot:          homeRoot,
 		invocationProject: invocationProject,
 		commitLine:        commitLine,
 		dispatched:        totalDispatched,
@@ -350,8 +353,24 @@ func runFind(args []string, st searchState) int {
 	if word != "" && page == 1 {
 		summary.Sources = exactSources(matches, word, st.rootOf)
 	}
+	// Directive 046: the ## index and ## warnings lines print once per
+	// session. What this session has seen comes from the record in the
+	// home root's cache; what it is shown now goes back there after.
+	shownDir, key := filepath.Join(st.homeRoot, index.Dir, index.CacheDir), session.Key()
+	summary.Seen = session.Shown(shownDir, key)
 	fmt.Print(output.FormatFrom(summary, matches, page))
+	remember(shownDir, key, summary)
 	return 0
+}
+
+// remember records the state lines a session has now been shown — the
+// ones it had seen plus this answer's. A record that cannot be written
+// is reported on stderr and costs one repeat of the block next call;
+// it does not fail a search whose answer has already been printed.
+func remember(shownDir, key string, summary output.Summary) {
+	if err := session.Remember(shownDir, key, append(summary.Seen, summary.StateLines()...)); err != nil {
+		fmt.Fprintln(os.Stderr, "giraffe:", err)
+	}
 }
 
 // maxSources caps how many exact matches ## source reads from disk
@@ -505,7 +524,11 @@ func runPrepare(args []string, st searchState) int {
 		return 2
 	}
 	summary := output.Summarize(st.entries.All(), st.commitLine, st.dispatched, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
+	// prepare always prints the whole block — it is the command whose
+	// output is that block — and, having shown it, records it for the
+	// session so the next find does not repeat it (directive 046).
 	fmt.Print(output.Format(summary, nil))
+	remember(filepath.Join(st.homeRoot, index.Dir, index.CacheDir), session.Key(), summary)
 	return 0
 }
 

@@ -77,7 +77,7 @@ type Store struct {
 // instead) — used by the fast "nothing changed" path, which must never
 // be the reason a store gets created.
 func openStore(root string, readOnly bool) (s *Store, ok bool, err error) {
-	dir := filepath.Join(root, Dir, cacheDir)
+	dir := filepath.Join(root, Dir, CacheDir)
 	path := filepath.Join(dir, storeFilename)
 
 	if readOnly {
@@ -124,12 +124,12 @@ func openStore(root string, readOnly bool) (s *Store, ok bool, err error) {
 // createStore makes a fresh store at root, first removing anything
 // already there — used when a full rebuild is needed (something
 // changed, or the existing store failed to open). mkdir is separate
-// from bolt.Open's own file creation because cacheDir may not exist yet
+// from bolt.Open's own file creation because CacheDir may not exist yet
 // on a first run.
 func createStore(root string) (*Store, error) {
-	dir := filepath.Join(root, Dir, cacheDir)
+	dir := filepath.Join(root, Dir, CacheDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create %s/%s: %w", Dir, cacheDir, err)
+		return nil, fmt.Errorf("create %s/%s: %w", Dir, CacheDir, err)
 	}
 	path := filepath.Join(dir, storeFilename)
 	_ = os.Remove(path)
@@ -160,7 +160,7 @@ func createStore(root string) (*Store, error) {
 // a failure here would mean it changed shape between the two opens,
 // which callers treat as any other I/O error.
 func openForWrite(root string) (*Store, error) {
-	path := filepath.Join(root, Dir, cacheDir, storeFilename)
+	path := filepath.Join(root, Dir, CacheDir, storeFilename)
 	db, err := bolt.Open(path, 0o644, &bolt.Options{Timeout: time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("reopen store for writing: %w", err)

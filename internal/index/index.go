@@ -18,13 +18,16 @@ import (
 // Dir is where giraffe's own files live, at the repository root: hand-
 // written configuration directly under it (roots, exclude — authored,
 // and the operator's choice whether to commit them), the derived cache
-// under cacheDir (never committed — §23: "make the split obvious from
+// under CacheDir (never committed — §23: "make the split obvious from
 // the layout, a directory the operator can ignore wholesale").
 const Dir = ".giraffe"
 
-// cacheDir holds only derived, disposable state. Nothing under it is
-// ever read as configuration and nothing under it is ever committed.
-const cacheDir = "cache"
+// CacheDir, under Dir, holds only derived, disposable state. Nothing
+// under it is ever read as configuration and nothing under it is ever
+// committed. Exported since directive 046: the session record
+// (internal/session) lives there too, and main names the directory
+// for both.
+const CacheDir = "cache"
 
 // Record is one file's extraction-cache entry (§20 C-2, unaffected by
 // §30's storage change): its freshness fingerprint — mtime and size —

@@ -577,3 +577,76 @@ func TestFormat_SourceSection(t *testing.T) {
 		}
 	}
 }
+
+// TestFormat_SeenStateLinesAreOmitted (directive 046): what a session
+// has already been shown of the ## index and ## warnings lines does not
+// print again — the header goes with the last of its lines — and a
+// line that changed prints alone under its header.
+func TestFormat_SeenStateLinesAreOmitted(t *testing.T) {
+	entries := []entry.Entry{{Path: "a.go", Name: "X", Kind: "type", Exported: true, Lang: "go", Ext: "go", Line: 1, EndLine: 2}}
+	s := Summarize(slices.Values(entries), "abc1234", 0, []string{"x.rb: no extractor"}, []string{".giraffe/cache is not ignored by git in r"}, nil, nil)
+	first := Format(s, entries)
+	for _, want := range []string{"## index\ncommit abc1234", "languages: go 1", "by ext:    go 1", "\n## warnings\nunparsed: x.rb: no extractor\n.giraffe/cache is not ignored by git in r\n"} {
+		if !strings.Contains(first, want) {
+			t.Fatalf("first answer lacks %q:\n%s", want, first)
+		}
+	}
+
+	s.Seen = s.StateLines()
+	second := Format(s, entries)
+	if strings.Contains(second, "## index") || strings.Contains(second, "## warnings") || strings.Contains(second, "commit abc1234") {
+		t.Fatalf("a seen block printed again:\n%s", second)
+	}
+	if !strings.HasPrefix(second, "## results\nname:X ") {
+		t.Fatalf("the answer should start at ## results with no blank line:\n%q", second)
+	}
+
+	changed := s
+	changed.Dispatched = 3
+	changed.Notices = append(changed.Notices, "new notice")
+	third := Format(changed, entries)
+	if !strings.HasPrefix(third, "## index\ncommit abc1234 | symbols 1 | packages 0 | undocumented 1 exported, 0 package | dispatched 3\n\n## results\n") {
+		t.Fatalf("only the changed index line should print, then results:\n%q", third)
+	}
+	if !strings.HasSuffix(third, "\n## warnings\nnew notice\n") || strings.Contains(third, "unparsed:") {
+		t.Fatalf("only the new warning should print:\n%q", third)
+	}
+}
+
+// TestFormat_NeverEmpty (directive 046): a miss with everything seen
+// still says something — the index line, so that "no results" is never
+// a blank answer.
+func TestFormat_NeverEmpty(t *testing.T) {
+	s := Summarize(slices.Values[[]entry.Entry](nil), "abc1234", 0, nil, nil, nil, nil)
+	s.Seen = s.StateLines()
+	out := Format(s, nil)
+	if out != "## index\ncommit abc1234 | symbols 0 | packages 0 | undocumented 0 exported, 0 package | dispatched 0\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// TestSummary_StateLines: the state lines are exactly what FormatFrom
+// prints under ## index and ## warnings, so a caller can record them
+// and hand them back as Seen.
+func TestSummary_StateLines(t *testing.T) {
+	entries := []entry.Entry{{Path: "a.go", Name: "X", Kind: "type", Exported: true, Lang: "go", Ext: "go"}}
+	s := Summarize(slices.Values(entries), "abc1234", 2, []string{"w"}, []string{"n"}, []string{"vendor/"}, nil)
+	got := s.StateLines()
+	want := []string{
+		"commit abc1234 | symbols 1 | packages 0 | undocumented 1 exported, 0 package | dispatched 2",
+		"languages: go 1",
+		"by ext:    go 1",
+		"unparsed: w",
+		"n",
+		"active exclusions: vendor/",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("StateLines = %q\nwant %q", got, want)
+	}
+	out := Format(s, entries)
+	for _, l := range want {
+		if !strings.Contains(out, "\n"+l+"\n") {
+			t.Fatalf("state line %q not printed as such in:\n%s", l, out)
+		}
+	}
+}

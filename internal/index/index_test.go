@@ -108,7 +108,7 @@ func TestOpenStore_MissingStoreIsNotAnError(t *testing.T) {
 // scratch, never partially recovered.
 func TestOpenStore_NotABoltFileIsDiscarded(t *testing.T) {
 	root := t.TempDir()
-	dir := filepath.Join(root, Dir, cacheDir)
+	dir := filepath.Join(root, Dir, CacheDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestStore_DeterministicOutput(t *testing.T) {
 			t.Fatal(err)
 		}
 		closeStore(t, s)
-		b, err := os.ReadFile(filepath.Join(root, Dir, cacheDir, storeFilename))
+		b, err := os.ReadFile(filepath.Join(root, Dir, CacheDir, storeFilename))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -222,7 +222,7 @@ func readLinesAt(path string) (lines []string, lineNos []int, err error) {
 // gitignore line — LoadExtensions keeps its own hard error for its own
 // file, where the fixed assignment grammar is everything the file has).
 //
-// Hand-written, unlike everything under cacheDir: authored by the
+// Hand-written, unlike everything under CacheDir: authored by the
 // operator, and theirs to commit or not — portable and committable
 // (§25 C-27).
 func LoadExclude(root string) (patterns []scanner.Pattern, err error) {
