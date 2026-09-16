@@ -1,6 +1,7 @@
 package output
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -302,28 +303,64 @@ func TestFit_OffsetPastEnd(t *testing.T) {
 	}
 }
 
-// TestFormatFrom_Offset (directive 032): FormatFrom's ## results section
-// starts at the offset entry, and Format (offset 0, the CLI's default)
-// is unchanged by FormatFrom's existence.
-func TestFormatFrom_Offset(t *testing.T) {
-	entries := []entry.Entry{
-		{Path: "a.go", Name: "First", Kind: "func", Exported: true},
-		{Path: "b.go", Name: "Second", Kind: "func", Exported: true},
-		{Path: "c.go", Name: "Third", Kind: "func", Exported: true},
+// TestPageCount (directive 033): pages are sized by maxResults (8),
+// rounded up, zero total giving zero pages rather than a stray "page 1
+// of 0".
+func TestPageCount(t *testing.T) {
+	tests := []struct{ total, want int }{
+		{0, 0}, {1, 1}, {8, 1}, {9, 2}, {16, 2}, {17, 3},
+	}
+	for _, tt := range tests {
+		if got := pageCount(tt.total); got != tt.want {
+			t.Errorf("pageCount(%d) = %d, want %d", tt.total, got, tt.want)
+		}
+	}
+}
+
+// TestFormatFrom_Page (directive 033, replacing 032's --offset): page 1
+// (Format's default) shows the first maxResults results and reports its
+// own position in ## truncated; page 2 picks up exactly where page 1's
+// budget stopped, in the same unit.
+func TestFormatFrom_Page(t *testing.T) {
+	var entries []entry.Entry
+	for i := 0; i < 10; i++ {
+		entries = append(entries, entry.Entry{
+			Path: strings.Repeat("x", i+1) + ".go",
+			Name: fmt.Sprintf("Sym%d", i),
+			Kind: "func", Exported: true,
+		})
 	}
 	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
 
-	fromStart := Format(s, entries)
-	if !strings.Contains(fromStart, "name:First") {
-		t.Fatalf("expected Format (offset 0) to include the first result:\n%s", fromStart)
+	page1 := Format(s, entries)
+	if !strings.Contains(page1, "name:Sym0") || strings.Contains(page1, "name:Sym8") {
+		t.Fatalf("expected page 1 (Format's default) to hold the first 8 results only:\n%s", page1)
+	}
+	if !strings.Contains(page1, "page 1 of 2, 2 more.") {
+		t.Fatalf("expected ## truncated to state page 1 of 2:\n%s", page1)
 	}
 
-	fromOffset := FormatFrom(s, entries, 1)
-	if strings.Contains(fromOffset, "name:First") {
-		t.Fatalf("expected offset 1 to skip the first result:\n%s", fromOffset)
+	page2 := FormatFrom(s, entries, 2)
+	if strings.Contains(page2, "name:Sym0") {
+		t.Fatalf("expected page 2 to skip page 1's results:\n%s", page2)
 	}
-	if !strings.Contains(fromOffset, "name:Second") || !strings.Contains(fromOffset, "name:Third") {
-		t.Fatalf("expected offset 1 to include the second and third results:\n%s", fromOffset)
+	if !strings.Contains(page2, "name:Sym8") || !strings.Contains(page2, "name:Sym9") {
+		t.Fatalf("expected page 2 to hold the remaining 2 results:\n%s", page2)
+	}
+	if strings.Contains(page2, "## truncated") {
+		t.Fatalf("expected no ## truncated on the last page:\n%s", page2)
+	}
+}
+
+// TestFormatFrom_PageBeyondEnd (directive 033): a page past the last one
+// is not an error — empty results, no truncated section, same contract
+// 032's offset-past-the-end had.
+func TestFormatFrom_PageBeyondEnd(t *testing.T) {
+	entries := []entry.Entry{{Path: "a.go", Name: "First", Kind: "func", Exported: true}}
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
+	out := FormatFrom(s, entries, 5)
+	if strings.Contains(out, "## results") || strings.Contains(out, "## truncated") {
+		t.Fatalf("expected an empty page past the end:\n%s", out)
 	}
 }
 

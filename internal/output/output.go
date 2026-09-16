@@ -254,20 +254,38 @@ func breakdownLine(counts map[string]int) string {
 	return line
 }
 
-// Format renders the full answer for one find call, from the top of the
-// ranking. Equivalent to FormatFrom with offset 0.
+// Format renders the full answer for one find call, page 1 — the top of
+// the ranking. Equivalent to FormatFrom with page 1.
 func Format(s Summary, matches []entry.Entry) string {
-	return FormatFrom(s, matches, 0)
+	return FormatFrom(s, matches, 1)
 }
 
-// FormatFrom renders the full answer for one find call, skipping the
-// first offset already-ranked matches before the response budget is
-// applied (--offset, directive 032). `## truncated` narrows the same
-// query by path; offset pages further into the same ranking without
-// re-running it — matches arrives pre-sorted by query.Search or
-// query.Browse, and paging is purely a slice of that order, so it costs
-// nothing beyond what fit already does to select a page.
-func FormatFrom(s Summary, matches []entry.Entry, offset int) string {
+// FormatFrom renders the full answer for one find call, at page (--page,
+// directive 033; 1-indexed, page 1 is the top of the ranking). A page
+// beyond the last is not an error — it renders like a query with nothing
+// left to show, the same as `page` being out of range for any other
+// paginated listing.
+//
+// §29 C-42/§33's own history: 032 shipped --offset, a count of entries to
+// skip — a unit that matched nothing giraffe ever displays, so a caller
+// who had just been shown "353 more" had to invent the arithmetic to turn
+// that into a number to type. 033 replaces it outright (032's own
+// directive named it disposable: "it shipped one directive ago and
+// nothing depends on it" — confirmed here: grep for --offset outside
+// output.go/main.go/main_test.go before this change found nothing).
+// `--page` is the unit `## truncated` now displays (see truncatedLine),
+// so the number a caller reads is the number they type — no multiply,
+// no second flag to learn. page and pageSize convert to fit's own
+// count-based offset right here, once, rather than teaching fit a second
+// unit — fit already had exactly the right primitive (skip N entries),
+// it was only ever reachable through the wrong-unit flag.
+func FormatFrom(s Summary, matches []entry.Entry, page int) string {
+	if page < 1 {
+		page = 1
+	}
+	totalPages := pageCount(len(matches))
+	offset := (page - 1) * maxResults
+
 	var b strings.Builder
 
 	indexLine := fmt.Sprintf("commit %s | symbols %d | packages %d | undocumented %d exported, %d package | dispatched %d",
@@ -306,7 +324,7 @@ func FormatFrom(s Summary, matches []entry.Entry, offset int) string {
 
 	if len(remainder) > 0 {
 		b.WriteString("\n## truncated\n")
-		b.WriteString(truncatedLine(remainder))
+		b.WriteString(truncatedLine(remainder, page, totalPages))
 		b.WriteByte('\n')
 	}
 
@@ -420,6 +438,20 @@ func quote(s string) string {
 	return s
 }
 
+// pageCount reports how many --page-sized pages total matches spans, the
+// nominal count FormatFrom shows in ## truncated's "page X of Y" (§7,
+// directive 033): pages are sized by maxResults, the stable unit a page
+// number converts to and from, even though fit's own byteBudget can
+// occasionally show fewer than maxResults on one particular page — the
+// caller's next --page N is still N, not something recomputed from how
+// many bytes an earlier page happened to fit.
+func pageCount(total int) int {
+	if total == 0 {
+		return 0
+	}
+	return (total + maxResults - 1) / maxResults
+}
+
 // fit selects a prefix of matches that stays within maxResults and, once
 // at least one result is shown, within byteBudget total for the answer.
 // preambleLen is every byte the caller has already printed or is about
@@ -429,10 +461,12 @@ func quote(s string) string {
 // counts").
 //
 // offset skips the first offset entries of matches before the budget is
-// applied (directive 032's --offset): matches already carries the full
-// ranking, so paging is a plain slice, not a second search. offset past
-// the end of matches yields no results and no remainder, not an error —
-// the caller asked to see further than there is anything to see.
+// applied — FormatFrom's page-to-offset conversion (directive 033;
+// offset was directive 032's own public unit, --page is now the only
+// public one). matches already carries the full ranking, so paging is a
+// plain slice, not a second search. offset past the end of matches
+// yields no results and no remainder, not an error — the caller asked to
+// see further than there is anything to see.
 func fit(matches []entry.Entry, showProject, showLang bool, extVaries map[string]bool, preambleLen, offset int) (shown, remainder []entry.Entry) {
 	if offset >= len(matches) {
 		return nil, nil
@@ -452,11 +486,16 @@ func fit(matches []entry.Entry, showProject, showLang bool, extVaries map[string
 	return matches, nil
 }
 
-// truncatedLine reports the remaining count and a distribution to narrow
-// by (§7: "a bare count does not tell the caller what to do next"). This
-// version narrows by path directory rather than language position, since
-// --query only supports filtering by path and project.
-func truncatedLine(remainder []entry.Entry) string {
+// truncatedLine reports the current page's position, the remaining
+// count, and a distribution to narrow by (§7: "a bare count does not
+// tell the caller what to do next"; directive 033: the count alone also
+// never said *where* the shown page sits, or that the remainder has an
+// order that can be walked — "page X of Y" is that, in the same unit
+// --page takes). Narrows by path directory rather than language
+// position, since --query only supports filtering by path and project —
+// unchanged from before this directive (033's own constraint: the
+// distribution axis is not what this measures).
+func truncatedLine(remainder []entry.Entry, page, totalPages int) string {
 	counts := make(map[string]int)
 	for _, e := range remainder {
 		counts[path.Dir(e.Path)]++
@@ -476,7 +515,7 @@ func truncatedLine(remainder []entry.Entry) string {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d more. narrow by path:", len(remainder))
+	fmt.Fprintf(&b, "page %d of %d, %d more. narrow by path:", page, totalPages, len(remainder))
 	for _, d := range dirs {
 		fmt.Fprintf(&b, " %s (%d)", d, counts[d])
 	}

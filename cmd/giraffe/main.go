@@ -86,7 +86,7 @@ func run(ctx context.Context, args []string) int {
 	// is not treated as a search term, since both are themselves
 	// plausible identifiers in real code.
 	if len(args) == 0 || (args[0] != "find" && args[0] != "prepare") {
-		fmt.Fprintln(os.Stderr, "usage: giraffe find [<word>] [--query '<attr>:<value> ...'] [--offset N] | giraffe prepare")
+		fmt.Fprintln(os.Stderr, "usage: giraffe find [<word>] [--query '<attr>:<value> ...'] [--page N] | giraffe prepare")
 		return 2
 	}
 	sub, rest := args[0], args[1:]
@@ -261,22 +261,23 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 	}, 0
 }
 
-// runFind implements `giraffe find [<word>] [--query ...] [--offset N]`.
+// runFind implements `giraffe find [<word>] [--query ...] [--page N]`.
 // Two modes, both in the specification (§31.3): a word searches and ranks
 // by relevance (query.Search); no word — only --query — browses a place,
 // everything at it in path/name order (query.Browse). At least one of
 // the two must be given, or there is nothing to search or browse.
-// --offset (directive 032) pages further into either mode's own ranking;
-// it does not change what ranks where, only where the response budget
-// starts reading from.
+// --page (directive 033, replacing 032's --offset) pages further into
+// either mode's own ranking; it does not change what ranks where, only
+// where the response budget starts reading from, and it is the same unit
+// ## truncated now displays a position in.
 func runFind(args []string, st searchState) int {
-	word, queryRaw, offset, err := parseArgs(args)
+	word, queryRaw, page, err := parseArgs(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "giraffe:", err)
 		return 2
 	}
 	if word == "" && queryRaw == "" {
-		fmt.Fprintln(os.Stderr, "usage: giraffe find <word> [--query '<attr>:<value> ...'] [--offset N] | giraffe find --query '<attr>:<value> ...' [--offset N]")
+		fmt.Fprintln(os.Stderr, "usage: giraffe find <word> [--query '<attr>:<value> ...'] [--page N] | giraffe find --query '<attr>:<value> ...' [--page N]")
 		return 2
 	}
 
@@ -296,7 +297,7 @@ func runFind(args []string, st searchState) int {
 		// there is nothing to suggest either — TryNext only makes sense
 		// once a word has actually missed.
 		matches := query.Browse(st.entries, filter, st.invocationProject)
-		fmt.Print(output.FormatFrom(summary, matches, offset))
+		fmt.Print(output.FormatFrom(summary, matches, page))
 		return 0
 	}
 
@@ -304,7 +305,7 @@ func runFind(args []string, st searchState) int {
 	if len(matches) == 0 {
 		summary.TryNext = query.Suggest(st.entries, word, st.invocationProject)
 	}
-	fmt.Print(output.FormatFrom(summary, matches, offset))
+	fmt.Print(output.FormatFrom(summary, matches, page))
 	return 0
 }
 
@@ -402,11 +403,15 @@ func notIgnored(ctx context.Context, root, relPath string) bool {
 }
 
 // parseArgs parses find's arguments: an optional positional word, an
-// optional --query value, and an optional --offset (directive 032:
-// "giraffe find <word> --offset N returns results starting at rank N+1,
-// under the same budget"). offset defaults to 0 — the top of the
-// ranking, unchanged from before this flag existed.
-func parseArgs(args []string) (word, queryRaw string, offset int, err error) {
+// optional --query value, and an optional --page (directive 033,
+// replacing 032's --offset: a count of entries to skip, a unit nothing
+// giraffe displays, so a caller shown "353 more" had to invent the
+// arithmetic to turn that into a number to type). --page N selects a
+// page directly, 1-indexed — page defaults to 1, the top of the ranking,
+// unchanged from before either flag existed, and matches the unit
+// ## truncated's "page X of Y" now shows (output.FormatFrom).
+func parseArgs(args []string) (word, queryRaw string, page int, err error) {
+	page = 1
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--query":
@@ -415,15 +420,15 @@ func parseArgs(args []string) (word, queryRaw string, offset int, err error) {
 			}
 			queryRaw = args[i+1]
 			i++
-		case args[i] == "--offset":
+		case args[i] == "--page":
 			if i+1 >= len(args) {
-				return "", "", 0, fmt.Errorf("--offset requires a value")
+				return "", "", 0, fmt.Errorf("--page requires a value")
 			}
 			n, convErr := strconv.Atoi(args[i+1])
-			if convErr != nil || n < 0 {
-				return "", "", 0, fmt.Errorf("--offset must be a non-negative integer, got %q", args[i+1])
+			if convErr != nil || n < 1 {
+				return "", "", 0, fmt.Errorf("--page must be a positive integer, got %q", args[i+1])
 			}
-			offset = n
+			page = n
 			i++
 		case word == "":
 			word = args[i]
@@ -431,7 +436,7 @@ func parseArgs(args []string) (word, queryRaw string, offset int, err error) {
 			return "", "", 0, fmt.Errorf("unexpected argument %q", args[i])
 		}
 	}
-	return word, queryRaw, offset, nil
+	return word, queryRaw, page, nil
 }
 
 func commitHash(ctx context.Context, root string) (string, error) {
