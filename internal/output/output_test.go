@@ -526,3 +526,54 @@ func TestFormat_NoticesRenderWithoutTheUnparsedLabel(t *testing.T) {
 		t.Fatalf("a notice must not be labelled as a parse failure:\n%s", out)
 	}
 }
+
+// TestFormat_SourceSection (directive 044): a result named exactly the
+// search word prints its declaration text under ## source, header
+// first (paste-ready, like a result line), within sourceBudget; past
+// the budget the section ends with the lines left and the sed that
+// prints them from there; with nothing to show the section is omitted
+// like any other.
+func TestFormat_SourceSection(t *testing.T) {
+	e := entry.Entry{Path: "a.go", Name: "X", Kind: "type", Exported: true, Line: 4, EndLine: 6, LineText: "type X struct {"}
+	long := entry.Entry{Path: "b.go", Name: "Y", Kind: "func", Exported: true, Line: 1, EndLine: 100, LineText: "func Y() {"}
+	longLines := make([]string, 100)
+	for i := range longLines {
+		longLines[i] = strings.Repeat("x", 40) // 41 bytes a line: ~36 fit
+	}
+	cases := []struct {
+		name    string
+		sources []Source
+		want    []string
+		absent  []string
+	}{
+		{"fits", []Source{{Entry: e, Lines: []string{"type X struct {", "\tA int", "}"}}},
+			[]string{"\n## source\nname:X path:a.go line:4-6\ntype X struct {\n\tA int\n}\n"}, []string{"more lines"}},
+		{"cut at the budget", []Source{{Entry: long, Lines: longLines}}, []string{"name:Y path:b.go line:1-100\n", "more lines: sed -n '"}, []string{"sed -n '1,100p'"}},
+		{"second source after a cut never prints", []Source{{Entry: long, Lines: longLines}, {Entry: e, Lines: []string{"type X struct {"}}}, nil, []string{"name:X path:a.go"}},
+		{"none", nil, nil, []string{"## source"}},
+	}
+	for _, c := range cases {
+		s := Summarize(slices.Values([]entry.Entry{e}), "abc1234", 0, nil, nil, nil, nil)
+		s.Sources = c.sources
+		out := Format(s, []entry.Entry{e})
+		for _, w := range c.want {
+			if !strings.Contains(out, w) {
+				t.Errorf("%s: expected %q in:\n%s", c.name, w, out)
+			}
+		}
+		for _, a := range c.absent {
+			if strings.Contains(out, a) {
+				t.Errorf("%s: did not expect %q in:\n%s", c.name, a, out)
+			}
+		}
+		if i := strings.Index(out, "## source"); i >= 0 {
+			section := out[i:]
+			if j := strings.Index(section, "\n## "); j >= 0 {
+				section = section[:j]
+			}
+			if len(section)-len("## source\n") > sourceBudget+len("... 99 more lines: sed -n '99,100p' b.go\n") {
+				t.Errorf("%s: ## source is %d bytes, over its budget:\n%s", c.name, len(section), section)
+			}
+		}
+	}
+}
