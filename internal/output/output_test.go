@@ -440,33 +440,35 @@ func TestFormat_KnownLanguageWithZeroMatchesStillNamed(t *testing.T) {
 	}
 }
 
-// TestResultLine_SizeAndDeclCount (directive 009 item 3): a file result
-// prints declarations: when it holds enough of them to be worth
-// narrowing with --query, size: when it is large but does not (or has
-// no extractor), and neither when both stay below threshold — §25
-// C-25's "only when it discriminates" applied to a new attribute.
+// TestResultLine_SizeAndDeclCount (directive 009 item 3; 043 for size
+// on every file): a file result always prints size:, since the caller's
+// next move with a file is to read it whole or not, and prints
+// declarations: only when it holds enough of them to be worth narrowing
+// with --query — §25 C-25's "only when it discriminates" applied to the
+// one of the two that has a threshold that fires on a real corpus.
 func TestResultLine_SizeAndDeclCount(t *testing.T) {
 	tests := []struct {
 		name string
 		e    entry.Entry
-		want string
+		want []string
 		none []string
 	}{
 		{
-			name: "many declarations",
+			name: "many declarations: both print",
 			e:    entry.Entry{Path: "big.go", Name: "big", Kind: entry.KindFile, Exported: true, DeclCount: 678, Size: 5000},
-			want: "declarations:678",
-			none: []string{"size:"},
+			want: []string{"size:5000 declarations:678"},
 		},
 		{
 			name: "large file, no extractor",
 			e:    entry.Entry{Path: "big.td", Name: "big", Kind: entry.KindFile, Exported: true, DeclCount: 0, Size: 391229},
-			want: "size:391229",
+			want: []string{"size:391229"},
+			none: []string{"declarations:"},
 		},
 		{
-			name: "small file, few declarations: neither prints",
+			name: "small file, few declarations: size prints, declarations does not",
 			e:    entry.Entry{Path: "small.go", Name: "small", Kind: entry.KindFile, Exported: true, DeclCount: 3, Size: 1200},
-			none: []string{"size:", "declarations:"},
+			want: []string{"size:1200"},
+			none: []string{"declarations:"},
 		},
 		{
 			name: "a declaration entry (not a file) never carries either, even if the fields are set",
@@ -478,8 +480,10 @@ func TestResultLine_SizeAndDeclCount(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := Summarize(slices.Values([]entry.Entry{tt.e}), "abc1234", 0, nil, nil, nil, nil)
 			out := Format(s, []entry.Entry{tt.e})
-			if tt.want != "" && !strings.Contains(out, tt.want) {
-				t.Errorf("expected %q in:\n%s", tt.want, out)
+			for _, w := range tt.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("expected %q in:\n%s", w, out)
+				}
 			}
 			for _, n := range tt.none {
 				if strings.Contains(out, n) {

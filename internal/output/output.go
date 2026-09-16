@@ -17,19 +17,20 @@ const (
 	byteBudget = 2000
 	narrowByN  = 3 // how many groups the truncated section suggests narrowing by
 
-	// declCountThreshold and sizeThreshold gate directive 009 item 3: a
-	// caller deciding whether to open a file result directly or narrow
-	// it first (with --query, or with grep) wants to know it is unusually
-	// large or holds unusually many declarations — not on every line
-	// (giraffe.md §25 C-25), only when the fact would actually change
-	// what happens next. Chosen from the three measurement corpora
-	// (report: reports/2026-09-13-009-cost-to-arrive-complete.md) —
-	// gekka and kubernetes source files cluster far below both numbers,
-	// so neither attribute prints on an ordinary Go file; a handful of
-	// llvm-project's largest generated/data files (.def, .td, .inc) sit
-	// well above sizeThreshold and do print it.
+	// declCountThreshold gates declarations: on a file result (directive
+	// 009 item 3): a caller deciding whether to open the file or narrow
+	// it first with --query wants to know when it holds unusually many,
+	// and only then (giraffe.md §25 C-25). It fires on a real corpus —
+	// 51 of gekka's 508 files at e6fd6aa (directive 043's count).
+	//
+	// size: has no threshold any more (043). 009 set one at 100,000
+	// bytes against llvm-project's generated .td/.inc files; on gekka it
+	// fired on two files of 508 and had appeared in no transcript since,
+	// while the decision it exists for — cat the file, or sed the range
+	// a result line names — is one every file result faces. So every
+	// file result carries it: " size:6837" is ten bytes or so, on file
+	// entries only, against a 2,000-byte page.
 	declCountThreshold = 40
-	sizeThreshold      = 100_000 // bytes
 )
 
 // Summary is the evidence carried on the always-present ## index line: it
@@ -399,17 +400,15 @@ func resultLine(e entry.Entry, showProject, showLang bool, extVaries map[string]
 	}
 	// Size and DeclCount are facts about the file, not the declaration
 	// (entry.Entry's own doc comment), so only a Kind==KindFile result
-	// carries them — printing declarations: when the file holds enough
-	// of them to be worth narrowing with --query rather than opening
-	// blind, else size: when the file is large enough that a caller
-	// about to grep it should know first (directive 009 item 3;
-	// giraffe.md §25 C-25: only when it changes the decision).
+	// carries them: size: always, since a file result is the one kind
+	// with no line: range and the caller's next move is to read it
+	// whole or not (directive 043); declarations: when the file holds
+	// enough of them to be worth narrowing with --query rather than
+	// opening blind (directive 009 item 3; giraffe.md §25 C-25).
 	if e.Kind == entry.KindFile {
-		switch {
-		case e.DeclCount > declCountThreshold:
+		fmt.Fprintf(&line, " size:%d", e.Size)
+		if e.DeclCount > declCountThreshold {
 			fmt.Fprintf(&line, " declarations:%d", e.DeclCount)
-		case e.Size > sizeThreshold:
-			fmt.Fprintf(&line, " size:%d", e.Size)
 		}
 	}
 	for _, p := range e.Position {

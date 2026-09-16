@@ -105,7 +105,7 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 				continue
 			}
 			exported := d.Name.IsExported()
-			line, end, text := lineRange(fset, d, lines)
+			line, end, text := lineRange(fset, d.Doc, d, lines)
 			decls = append(decls, entry.Entry{
 				Path:     f.Path,
 				Name:     d.Name.Name,
@@ -126,12 +126,12 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 				continue // import, or another declaration kind this version does not index
 			}
 			for _, spec := range d.Specs {
-				specName, doc, ok := specNameAndDoc(spec, d.Doc)
+				specName, ownDoc, ok := specNameAndDoc(spec)
 				if !ok {
 					continue
 				}
 				exported := ast.IsExported(specName)
-				line, end, text := lineRange(fset, spec, lines)
+				line, end, text := lineRange(fset, adjacentDoc(ownDoc, d), spec, lines)
 				decls = append(decls, entry.Entry{
 					Path:     f.Path,
 					Name:     specName,
@@ -139,7 +139,7 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 					Project:  project,
 					Scope:    scopeOf(exported),
 					Exported: exported,
-					Doc:      doc,
+					Doc:      firstLine(preferDoc(ownDoc, d.Doc)),
 					Position: position,
 					Line:     line,
 					LineText: text,
@@ -177,27 +177,36 @@ func handles(p string) bool {
 	return false
 }
 
-// lineRange renders node's extent as 1-based line numbers — the line
-// it starts on and the line it ends on, inclusive — plus the first
-// line's own text, trimmed of surrounding whitespace (§31.4; directive
-// 042 for the end). The start line's text is the fact that lets a
-// caller discard a candidate ("struct X {" vs "v := X.New") without
-// opening the file; the end line is what lets it open exactly the
-// declaration and nothing else. The range is the node's own —
-// go/parser's Pos and End — so a func's is its signature through its
-// closing brace, a type's the whole declaration, a spec's the spec
-// alone (never the group it sits in), and a field's its own line(s);
-// the doc comment above a declaration is not part of it, its first
-// line already being on the result line. Out-of-range is defensive
-// only: fset.Position always resolves a valid ast.Node's own Pos
-// within lines already split from the same content that produced file.
-func lineRange(fset *token.FileSet, node ast.Node, lines []string) (line, end int, text string) {
-	line = fset.Position(node.Pos()).Line
+// lineRange renders a declaration's extent as 1-based line numbers —
+// the line it starts on and the line it ends on, inclusive — plus the
+// text of the declaration's own first line, trimmed of surrounding
+// whitespace (§31.4; directive 042 for the end, 043 for the doc). The
+// extent runs from doc's first line, when doc is non-nil, else from
+// node's Pos, through node's End: a func's doc and signature through
+// its closing brace, a type's the whole declaration, a spec's the spec
+// alone (never the group it sits in), a field's its own line(s). The
+// doc comment is inside the range (043) because a caller who wants the
+// whole comment otherwise has to widen the start by a number it cannot
+// know; 042 had left it out, and the doc's first line appearing twice —
+// on the result line and at the top of what sed returns — is the
+// cheaper of the two. text is always node's own first line, never the
+// doc's: it is the fact that lets a caller discard a candidate
+// ("struct X {" vs "v := X.New") without opening the file. Out-of-range
+// is defensive only: fset.Position always resolves a valid ast.Node's
+// own Pos within lines already split from the same content that
+// produced file.
+func lineRange(fset *token.FileSet, doc *ast.CommentGroup, node ast.Node, lines []string) (line, end int, text string) {
+	start := node.Pos()
+	if doc != nil {
+		start = doc.Pos()
+	}
+	line = fset.Position(start).Line
 	end = fset.Position(node.End()).Line
-	if line < 1 || line > len(lines) {
+	own := fset.Position(node.Pos()).Line
+	if own < 1 || own > len(lines) {
 		return line, end, ""
 	}
-	return line, end, strings.TrimSpace(lines[line-1])
+	return line, end, strings.TrimSpace(lines[own-1])
 }
 
 // methodEntry returns the index entry for a method declaration, or
@@ -211,7 +220,7 @@ func methodEntry(path, project string, d *ast.FuncDecl, base []entry.Position, f
 		return entry.Entry{}, false
 	}
 	exported := d.Name.IsExported()
-	line, end, text := lineRange(fset, d, lines)
+	line, end, text := lineRange(fset, d.Doc, d, lines)
 	return entry.Entry{
 		Path:     path,
 		Name:     d.Name.Name,
@@ -247,7 +256,7 @@ func fieldEntries(path, project string, ts *ast.TypeSpec, base []entry.Position,
 				names = []*ast.Ident{{Name: n}}
 			}
 		}
-		line, end, text := lineRange(fset, field, lines)
+		line, end, text := lineRange(fset, field.Doc, field, lines)
 		for _, n := range names {
 			if n.Name == "_" {
 				continue
@@ -326,32 +335,54 @@ func genDeclKind(tok token.Token) string {
 	}
 }
 
-// specNameAndDoc returns the declared name and doc comment for one
-// spec inside a (possibly grouped) declaration. A spec's own Doc —
-// present when each item in a group has its own comment — takes
-// precedence; groupDoc is the comment above the declaration keyword
-// itself, used as a fallback. The spec's position is the caller's to
-// take from the spec itself (lineRange), and is always the spec's own,
-// never the group's: in `const (\n A = 1\n B = 2\n)` each spec's own
-// line is what a caller discarding a candidate needs (§31.4), not the
-// line the group starts on.
-func specNameAndDoc(spec ast.Spec, groupDoc *ast.CommentGroup) (name, doc string, ok bool) {
+// specNameAndDoc returns the declared name and the spec's own doc
+// comment for one spec inside a (possibly grouped) declaration — nil
+// when the spec has none, which is always the case for an ungrouped
+// spec, whose comment go/parser hangs on the GenDecl instead. The
+// caller resolves that against the group's comment twice over, and
+// differently: preferDoc for the text a result line shows, adjacentDoc
+// for the range. The spec's position is likewise the caller's to take
+// from the spec itself (lineRange), and is always the spec's own, never
+// the group's: in `const (\n A = 1\n B = 2\n)` each spec's own line is
+// what a caller discarding a candidate needs (§31.4), not the line the
+// group starts on.
+func specNameAndDoc(spec ast.Spec) (name string, doc *ast.CommentGroup, ok bool) {
 	switch s := spec.(type) {
 	case *ast.TypeSpec:
-		return s.Name.Name, firstLine(preferDoc(s.Doc, groupDoc)), true
+		return s.Name.Name, s.Doc, true
 	case *ast.ValueSpec:
 		if len(s.Names) == 0 {
-			return "", "", false
+			return "", nil, false
 		}
 		// const/var can declare several names on one line (A, B = 1, 2);
 		// only the first is reported for this version, matching the
 		// declaration's own doc comment.
-		return s.Names[0].Name, firstLine(preferDoc(s.Doc, groupDoc)), true
+		return s.Names[0].Name, s.Doc, true
 	default:
-		return "", "", false
+		return "", nil, false
 	}
 }
 
+// adjacentDoc returns the comment that sits directly above one spec of
+// d, for the spec's range (directive 043): the keyword's own comment
+// when d is a single ungrouped declaration (`// Config holds…` above
+// `type Config struct` is on the GenDecl, and the spec's own Doc is
+// nil), else the spec's own, inside a parenthesised group. A group's
+// comment sits above the keyword, with other specs possibly between it
+// and this one, so it never widens a grouped spec's range — even though
+// preferDoc still lends its text to a grouped spec that has none of its
+// own.
+func adjacentDoc(own *ast.CommentGroup, d *ast.GenDecl) *ast.CommentGroup {
+	if !d.Lparen.IsValid() {
+		return d.Doc
+	}
+	return own
+}
+
+// preferDoc picks the comment a result line shows for a spec: its own,
+// else the group's — a `// Errors the store returns.` above `var (`
+// describes each sentinel inside it well enough to be worth printing,
+// though it is not adjacent to any of them (see adjacentDoc).
 func preferDoc(specDoc, groupDoc *ast.CommentGroup) *ast.CommentGroup {
 	if specDoc != nil {
 		return specDoc

@@ -275,11 +275,12 @@ func TestRefresh_FileItselfIsASearchTarget(t *testing.T) {
 // all — the record's freshness fields are still stat-compared like any
 // other file's (§20 C-2), only its declarations are always empty.
 // TestRefresh_LineAndLineTextSurviveAStoreRoundTrip (§31.4; directive
-// 042 for EndLine): a declaration's Line, LineText and EndLine are
-// store.go fields (encodeEntry/decodeEntry) — this exercises the real
-// write-then-read path Refresh uses, not just the in-package extractor
-// test, so a field-count mismatch between encode and decode would fail
-// here even if it left every other field looking fine.
+// 042 for EndLine, 043 for the doc inside the range): a declaration's
+// Line, LineText and EndLine are store.go fields
+// (encodeEntry/decodeEntry) — this exercises the real write-then-read
+// path Refresh uses, not just the in-package extractor test, so a
+// field-count mismatch between encode and decode would fail here even
+// if it left every other field looking fine.
 func TestRefresh_LineAndLineTextSurviveAStoreRoundTrip(t *testing.T) {
 	root := gitRepo(t)
 	writeFile(t, root, "retry.go", "package retry\n\n// Retry retries.\nfunc Retry() {}\n\nfunc run() {\n\tRetry()\n}\n")
@@ -291,7 +292,7 @@ func TestRefresh_LineAndLineTextSurviveAStoreRoundTrip(t *testing.T) {
 		line, endLine int
 		text          string
 	}{
-		"Retry": {4, 4, "func Retry() {}"},
+		"Retry": {3, 4, "func Retry() {}"}, // its doc on 3, itself on 4
 		"run":   {6, 8, "func run() {"},
 	}
 	for _, e := range allEntries(s) {

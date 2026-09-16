@@ -67,34 +67,39 @@ type Entry struct {
 	// they are only ever meaningful on a Kind==KindFile entry — a
 	// caller deciding whether to open a file directly or narrow it
 	// first (with --query, or with grep) wants exactly this (§27
-	// directive 009 item 3, giraffe.md §25 C-25: printed only when it
-	// discriminates, never on every line). Left zero-valued on
-	// declaration entries; nothing reads them there.
+	// directive 009 item 3). Size prints on every file result
+	// (directive 043); DeclCount only when it discriminates (§25 C-25).
+	// Left zero-valued on declaration entries; nothing reads them there.
 	Size      int64
 	DeclCount int
 
-	// Line is the 1-based source line the declaration starts at, and
-	// LineText is that line's own text, trimmed of surrounding
-	// whitespace (specifications/giraffe.md §31.4): a caller can
-	// discard a candidate from these two facts without opening the
-	// file, the same way `struct X {` and `v := X.New` answer the same
-	// name search differently. Zero/empty on a Kind==KindFile entry,
-	// which addresses no specific line — absence is the correct
-	// encoding (§25 C-24), never a placeholder.
+	// Line is the 1-based source line the declaration's range starts
+	// at: its doc comment's first line when it has one directly above
+	// it, else the declaration's own line (directive 043; 042 had the
+	// range start at the declaration). LineText is the declaration's
+	// own line's text, trimmed of surrounding whitespace
+	// (specifications/giraffe.md §31.4) — the signature, never the doc,
+	// so it may sit a few lines below Line: a caller can discard a
+	// candidate from these facts without opening the file, the same way
+	// `struct X {` and `v := X.New` answer the same name search
+	// differently. Zero/empty on a Kind==KindFile entry, which addresses
+	// no specific line — absence is the correct encoding (§25 C-24),
+	// never a placeholder.
 	Line     int
 	LineText string
 
 	// EndLine is the 1-based source line the declaration ends on,
 	// inclusive (directive 042): the closing brace of a func or a
 	// struct, the last line of a multi-line const or var, Line itself
-	// for a declaration that fits on one line. With Line it is the
-	// declaration's whole extent, absolute within Path — a member's
-	// range lies inside its owner's but is not expressed relative to
-	// it — so a caller hands the two numbers to `sed -n 'A,Bp'` with
-	// no arithmetic. §31.4 asked for the line and its text and dropped
-	// the end; 041 measured whole-file reads of files giraffe had just
-	// named as the largest cost of every aided run, because a start
-	// line alone cannot aim sed. Zero, like Line, on a file entry.
+	// for an undocumented declaration that fits on one line. With Line
+	// it is the declaration's whole extent, doc included, absolute
+	// within Path — a member's range lies inside its owner's but is not
+	// expressed relative to it — so a caller hands the two numbers to
+	// `sed -n 'A,Bp'` with no arithmetic. §31.4 asked for the line and
+	// its text and dropped the end; 041 measured whole-file reads of
+	// files giraffe had just named as the largest cost of every aided
+	// run, because a start line alone cannot aim sed. Zero, like Line,
+	// on a file entry.
 	EndLine int
 }
 
@@ -102,9 +107,10 @@ type Entry struct {
 // result line as line:<LineRange>, and what --query line:<value>
 // compares against — so what a caller copies from an answer is what
 // the filter matches (§7's paste-ready rule, kept over a value that
-// is no longer a single number). "19-62" for a declaration spanning
-// lines 19 to 62, "19" for one that fits on its line, "" for an entry
-// that addresses no line at all (a file entry).
+// is no longer a single number). "17-62" for a declaration spanning
+// lines 17 to 62 (doc included), "19" for an undocumented one that
+// fits on its line, "" for an entry that addresses no line at all (a
+// file entry).
 func (e Entry) LineRange() string {
 	switch {
 	case e.Line <= 0:

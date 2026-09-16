@@ -749,6 +749,30 @@ func TestSearch_ExportedVisibleFromEveryProject(t *testing.T) {
 	}
 }
 
+// TestBrowse_OrdersByLineWithinAFile (directive 043, from 041's
+// branch): within one path, a browse follows the file's own order — the
+// file entry (line 0) first, then declarations by line — not name
+// order, which scattered a struct's fields away from the struct and
+// printed ranges out of sequence.
+func TestBrowse_OrdersByLineWithinAFile(t *testing.T) {
+	entries := []entry.Entry{
+		{Name: "Zed", Path: "a.go", Line: 10, Project: "giraffe", Exported: true},
+		{Name: "a", Path: "a.go", Kind: entry.KindFile, Project: "giraffe", Exported: true},
+		{Name: "Alpha", Path: "a.go", Line: 30, Project: "giraffe", Exported: true},
+		{Name: "Mid", Path: "a.go", Line: 20, Project: "giraffe", Exported: true},
+	}
+	got := Browse(Slice(entries), Filter{"path": {"a.go"}}, "giraffe")
+	want := []string{"a", "Zed", "Mid", "Alpha"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d entries, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].Name != w {
+			t.Errorf("position %d = %s, want %s", i, got[i].Name, w)
+		}
+	}
+}
+
 // TestSearch_ShorterNameFirstWithinATier (directive 042; built and
 // measured in 041): among substring matches of equal tier, the name
 // the word covers more of comes first — NodeMetrics ahead of
