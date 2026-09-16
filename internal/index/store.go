@@ -42,7 +42,10 @@ const storeFilename = "store.bolt"
 // scratch, the same convention the old line-oriented cache used for an
 // undecodable line, just cheaper to detect — one key, not a parse
 // failure partway through 37MB of text.
-const schemaVersion = "3" // 3: EndLine joined the entry encoding (directive 042)
+// A change in what an encoded field means is a change of shape too: an
+// index that decoded fine but held ranges computed the old way would
+// keep them for every file that has not changed since.
+const schemaVersion = "4" // 3: EndLine joined the entry encoding (directive 042); 4: Line starts at the doc comment (043)
 
 var (
 	bucketMeta         = []byte("meta")

@@ -534,12 +534,19 @@ func dedupKey(e entry.Entry) string {
 }
 
 // Browse returns every entry matching filter and visible from
-// invocationProject, ordered by path then name (§31.3: browsing a
-// place — find with no search word and a --query — lists what is
-// there; there is no search word to rank matches against, so path/name
-// order stands in for relevance order). filter must be non-empty; the
-// caller (main.runFind) rejects an empty one, since browsing always
-// names a place rather than dumping the whole index.
+// invocationProject, ordered by path, then line, then name (§31.3:
+// browsing a place — find with no search word and a --query — lists
+// what is there; there is no search word to rank matches against, so
+// file order stands in for relevance order). Within one file the order
+// is the file's own (directive 043, from 041's branch): a declaration's
+// line is the order a reader of that file meets it in, and the file
+// entry (line 0) comes first, ahead of everything declared inside it.
+// Before 043 it was name order, which scattered a struct's fields
+// alphabetically away from the struct and, once every line carried a
+// range (042), printed line:117-134 above line:19-60 above line:32.
+// filter must be non-empty; the caller (main.runFind) rejects an empty
+// one, since browsing always names a place rather than dumping the
+// whole index.
 func Browse(src Entries, filter Filter, invocationProject string) []entry.Entry {
 	var out []entry.Entry
 	for e := range src.All() {
@@ -554,6 +561,9 @@ func Browse(src Entries, filter Filter, invocationProject string) []entry.Entry 
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Path != out[j].Path {
 			return out[i].Path < out[j].Path
+		}
+		if out[i].Line != out[j].Line {
+			return out[i].Line < out[j].Line
 		}
 		return out[i].Name < out[j].Name
 	})
