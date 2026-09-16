@@ -67,6 +67,30 @@ func TestFilter_Match(t *testing.T) {
 	}
 }
 
+// TestFilter_Match_PathIsSubstringNotPrefix (037): the motivating case —
+// 033's aided run wrote path:kubectl meaning the kubectl project, and
+// 036's own run wrote path:logs meaning the logs command; neither
+// kubectl/ nor logs/ sits at a repository root, so the old
+// exact-or-directory-prefix rule matched nothing for either. A value
+// appearing anywhere in the path — not just at its start — now matches.
+func TestFilter_Match_PathIsSubstringNotPrefix(t *testing.T) {
+	f := Filter{"path": {"kubectl"}}
+	middle := entry.Entry{Path: "staging/src/k8s.io/kubectl/pkg/cmd/logs/logs.go"}
+	if !f.Match(middle) {
+		t.Error("expected kubectl to match as a substring of a path where it is not the leading segment")
+	}
+	noMatch := entry.Entry{Path: "internal/other/x.go"}
+	if f.Match(noMatch) {
+		t.Error("expected a path containing no occurrence of kubectl not to match")
+	}
+	// A value carrying "/" still behaves like a directory prefix in
+	// practice: it is a substring that happens to include the separator.
+	prefixShaped := Filter{"path": {"staging/src/k8s.io/kubectl"}}
+	if !prefixShaped.Match(middle) {
+		t.Error("expected a slash-bearing value to still match the directory it names")
+	}
+}
+
 // TestParse_KindAndScopeAreFilterable (§22 C-10): before this directive
 // these were valid, displayed attributes rejected by --query as
 // "not supported" — safe, but broke §6's paste-ready promise. 001's
@@ -318,17 +342,19 @@ func TestBrowse_HidesUnexportedOutsideItsOwnProject(t *testing.T) {
 }
 
 // TestDiagnoseFilter_ListsEveryAttributeAValueActuallyBelongsTo
-// (directive 035, revising 034): the motivating case — 033's aided run
-// wrote path:kubectl meaning the kubectl project. "kubectl" is not a
-// real path in this fixture, but is genuinely real under two other
-// attributes at once (an exact Name, a file entry, and a Project) — 034
-// reported only the alphabetically-first ("name"), silently hiding the
-// more useful "project" answer that was equally true. 035 requires both,
-// alphabetical, no ranking between them.
+// (directive 035, revising 034): a value genuinely real under two other
+// attributes at once (an exact Name and a Project) — 034 reported only
+// the alphabetically-first ("name"), silently hiding the more useful
+// "project" answer that was equally true. 035 requires both,
+// alphabetical, no ranking between them. The fixture's Path
+// (cmd/x/x.go) deliberately contains no occurrence of "kubectl" at all —
+// 037 made path: a substring match, and the original fixture's
+// cmd/kubectl/kubectl.go would now match path:kubectl directly (see
+// TestFilter_Match_PathIsSubstringNotPrefix), which is a different test.
 func TestDiagnoseFilter_ListsEveryAttributeAValueActuallyBelongsTo(t *testing.T) {
 	entries := []entry.Entry{
-		{Name: "kubectl", Kind: "file", Path: "cmd/kubectl/kubectl.go", Project: "gekka", Exported: true},
-		{Name: "Get", Kind: "func", Path: "cmd/x/x.go", Project: "kubectl", Exported: true},
+		{Name: "kubectl", Kind: "file", Path: "cmd/x/x.go", Project: "gekka", Exported: true},
+		{Name: "Get", Kind: "func", Path: "cmd/y/y.go", Project: "kubectl", Exported: true},
 	}
 	got := DiagnoseFilter(Slice(entries), Filter{"path": {"kubectl"}})
 	if len(got) != 1 {
@@ -337,6 +363,22 @@ func TestDiagnoseFilter_ListsEveryAttributeAValueActuallyBelongsTo(t *testing.T)
 	want := `"path:kubectl" is wrong - it is in [name, project]`
 	if got[0] != want {
 		t.Errorf("diagnosis = %q, want %q", got[0], want)
+	}
+}
+
+// TestDiagnoseFilter_PathDiagnosisStillFiresWhenNoPathContainsTheValue
+// (037): the cross-attribute diagnosis for path is not dead — it is
+// unreachable only for a value that some real path happens to contain.
+// A value absent from every path, name, kind, and project still gets
+// the plain "no such path" report.
+func TestDiagnoseFilter_PathDiagnosisStillFiresWhenNoPathContainsTheValue(t *testing.T) {
+	entries := []entry.Entry{{Name: "Retry", Kind: "func", Path: "internal/retry/retry.go", Project: "gekka", Exported: true}}
+	got := DiagnoseFilter(Slice(entries), Filter{"path": {"nosuchsubstring"}})
+	if len(got) != 1 {
+		t.Fatalf("expected one diagnosis, got %v", got)
+	}
+	if !strings.Contains(got[0], "no such path") || !strings.Contains(got[0], `"nosuchsubstring"`) {
+		t.Errorf("diagnosis = %q, want a plain \"no such path\" report", got[0])
 	}
 }
 
@@ -376,11 +418,14 @@ func TestDiagnoseFilter_DistinguishesRealEmptyIntersectionFromABadValue(t *testi
 
 // TestDiagnoseFilter_MultipleBadConstraintsEachGetTheirOwnLine (directive
 // 035 report item 2's "a case with two bad constraints"): path:kubectl
-// (real, under name and project) and lang:cobol (real nowhere) in the
-// same filter each produce their own line, attribute-sorted.
+// (real, under name) and lang:cobol (real nowhere) in the same filter
+// each produce their own line, attribute-sorted. Path is cmd/x/x.go, not
+// cmd/kubectl/kubectl.go, so 037's substring rule does not make
+// path:kubectl a direct match here — see
+// TestDiagnoseFilter_ListsEveryAttributeAValueActuallyBelongsTo's comment.
 func TestDiagnoseFilter_MultipleBadConstraintsEachGetTheirOwnLine(t *testing.T) {
 	entries := []entry.Entry{
-		{Name: "kubectl", Kind: "file", Path: "cmd/kubectl/kubectl.go", Project: "gekka", Exported: true, Lang: "go"},
+		{Name: "kubectl", Kind: "file", Path: "cmd/x/x.go", Project: "gekka", Exported: true, Lang: "go"},
 	}
 	got := DiagnoseFilter(Slice(entries), Filter{"path": {"kubectl"}, "lang": {"cobol"}})
 	if len(got) != 2 {

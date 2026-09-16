@@ -199,8 +199,12 @@ func sortedKeys(m map[string]bool) []string {
 }
 
 // Match reports whether e satisfies every attribute in f. path matches by
-// exact value or directory prefix (so path:internal/retry narrows to
-// everything under that directory); project matches exactly.
+// substring (037: not a prefix — an agent writing path:kubectl or
+// path:logs means "somewhere in the path", and neither directive 033's
+// nor 036's real failing query named a repository-root prefix; a value
+// carrying "/" still behaves like a prefix in practice, since that is
+// what a substring of a path with a directory separator in it is);
+// project matches exactly.
 func (f Filter) Match(e entry.Entry) bool {
 	for name, values := range f {
 		if !matchesAny(name, e, values) {
@@ -214,7 +218,7 @@ func matchesAny(name string, e entry.Entry, values []string) bool {
 	for _, v := range values {
 		switch name {
 		case "path":
-			if e.Path == v || strings.HasPrefix(e.Path, v+"/") {
+			if strings.Contains(e.Path, v) {
 				return true
 			}
 		case "project":
