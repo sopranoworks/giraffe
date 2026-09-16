@@ -84,8 +84,8 @@ already seen: copying a result's whole path narrows to that one file.
 The index searches a declaration's name, the first line of its doc, and
 its path — nothing else. If you later discover something that your
 search should have found, the word you used is in none of those. Say
-so, and name the word: the fix is the doc comment (§7), and a miss that
-is not reported will happen the same way for the next person, including
+so, and name the word: the fix is the doc comment, and a miss that is
+not reported will happen the same way for the next person, including
 you next week.
 
 ## 6. When giraffe cannot answer
@@ -100,12 +100,3 @@ writing the script again.
 Do not build a private search. Ad-hoc analysis scripts are exactly the
 duplication this tooling exists to prevent, and a second search
 implementation is the worst possible example to set.
-
-## 7. What you owe the index
-
-Every declaration gets one line saying what it is for. That doc comment
-is the index's raw material: an undocumented declaration becomes an
-index line that says nothing and is invisible to every later search —
-including yours.
-
-Writing it is not politeness. It is the reason the next search works.
