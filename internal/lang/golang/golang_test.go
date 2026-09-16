@@ -46,6 +46,11 @@ type (
 )
 
 var Enabled = true
+
+// Run runs one attempt.
+func Run() error {
+	return Retry()
+}
 `
 
 func TestExtract(t *testing.T) {
@@ -160,6 +165,49 @@ func TestExtract(t *testing.T) {
 
 	if _, present := got["_"]; present {
 		t.Error("a blank field (_) should never be extracted: it is not addressable")
+	}
+}
+
+// TestExtract_RangeIsTheDeclarationsOwnExtent (directive 042): every
+// kind carries the line it ends on — a func through its closing brace,
+// a struct type through its closing brace, a spec inside a group its
+// own line only, a field its own line, a one-liner the same line it
+// starts on — and the doc comment above is never part of it. The
+// expected numbers are src's own line numbers, counted from its first
+// line (the "// Package sample" comment), not this file's.
+func TestExtract_RangeIsTheDeclarationsOwnExtent(t *testing.T) {
+	f := scanner.WithContent("internal/retry/retry.go", []byte(src))
+	entries, _, err := Extract(f, "giraffe", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]entry.Entry)
+	for _, e := range entries {
+		got[e.Name] = e
+	}
+	want := map[string]struct{ line, end int }{
+		"Retry":    {7, 7},   // func, one line
+		"Run":      {42, 44}, // func, through its closing brace; the doc on 41 excluded
+		"Config":   {12, 20}, // struct type, through its closing brace
+		"Name":     {14, 14}, // field
+		"Mutex":    {17, 17}, // embedded field
+		"Do":       {23, 23}, // method, one line
+		"Attempts": {29, 29}, // spec in a const group: its own line, not the group's 27-31
+		"Policy":   {35, 35}, // spec in a type group
+		"Enabled":  {39, 39}, // var
+	}
+	for name, w := range want {
+		e, ok := got[name]
+		if !ok {
+			t.Errorf("expected %s in extracted entries, got %v", name, names(entries))
+			continue
+		}
+		if e.Line != w.line || e.EndLine != w.end {
+			t.Errorf("%s: Line-EndLine = %d-%d, want %d-%d", name, e.Line, e.EndLine, w.line, w.end)
+		}
+	}
+	if fe := got["retry"]; fe.Line != 0 || fe.EndLine != 0 {
+		t.Errorf("file entry: Line/EndLine = %d/%d, want 0/0 (a file addresses no line)", fe.Line, fe.EndLine)
 	}
 }
 

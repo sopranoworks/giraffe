@@ -7,6 +7,7 @@ package entry
 
 import (
 	"path"
+	"strconv"
 	"strings"
 )
 
@@ -82,6 +83,37 @@ type Entry struct {
 	// encoding (§25 C-24), never a placeholder.
 	Line     int
 	LineText string
+
+	// EndLine is the 1-based source line the declaration ends on,
+	// inclusive (directive 042): the closing brace of a func or a
+	// struct, the last line of a multi-line const or var, Line itself
+	// for a declaration that fits on one line. With Line it is the
+	// declaration's whole extent, absolute within Path — a member's
+	// range lies inside its owner's but is not expressed relative to
+	// it — so a caller hands the two numbers to `sed -n 'A,Bp'` with
+	// no arithmetic. §31.4 asked for the line and its text and dropped
+	// the end; 041 measured whole-file reads of files giraffe had just
+	// named as the largest cost of every aided run, because a start
+	// line alone cannot aim sed. Zero, like Line, on a file entry.
+	EndLine int
+}
+
+// LineRange is the one value the line attribute carries — printed on a
+// result line as line:<LineRange>, and what --query line:<value>
+// compares against — so what a caller copies from an answer is what
+// the filter matches (§7's paste-ready rule, kept over a value that
+// is no longer a single number). "19-62" for a declaration spanning
+// lines 19 to 62, "19" for one that fits on its line, "" for an entry
+// that addresses no line at all (a file entry).
+func (e Entry) LineRange() string {
+	switch {
+	case e.Line <= 0:
+		return ""
+	case e.EndLine > e.Line:
+		return strconv.Itoa(e.Line) + "-" + strconv.Itoa(e.EndLine)
+	default:
+		return strconv.Itoa(e.Line)
+	}
 }
 
 // Position is one named language-position pair, e.g. {"module",

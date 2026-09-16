@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestParseArgs_Page (directive 033, replacing 032's --offset): --page
 // parses as a positive integer, defaults to 1 (the top of the ranking)
@@ -64,5 +67,46 @@ func TestParseArgs_OffsetIsGone(t *testing.T) {
 	_, _, _, err := parseArgs([]string{"prefix", "--offset", "8"})
 	if err == nil {
 		t.Fatalf("expected --offset to be rejected as an unrecognized flag")
+	}
+}
+
+// TestIsHelp (directive 042, from 041): help is asked for by --help, -h
+// or help first, or by --help after a subcommand; a word that merely
+// contains "help" is a search, not a request for help.
+func TestIsHelp(t *testing.T) {
+	tests := []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"--help"}, true},
+		{[]string{"-h"}, true},
+		{[]string{"help"}, true},
+		{[]string{"find", "--help"}, true},
+		{[]string{"find", "metrics", "-h"}, true},
+		{[]string{"find", "helper"}, false},
+		{[]string{"find", "metrics"}, false},
+		{[]string{"prepare"}, false},
+	}
+	for _, tt := range tests {
+		if got := isHelp(tt.args); got != tt.want {
+			t.Errorf("isHelp(%v) = %v, want %v", tt.args, got, tt.want)
+		}
+	}
+}
+
+// TestHelpText_StaysSmall (directive 042, from 041): the help is read
+// once by every caller and then re-read on every later turn of theirs;
+// it is bounded the way a result page is, so that explaining the tool
+// never costs more than one answer from it. And it says what the range
+// on a result line is for.
+func TestHelpText_StaysSmall(t *testing.T) {
+	const limit = 1000
+	if len(helpText) > limit {
+		t.Fatalf("helpText is %d bytes, over the %d-byte limit", len(helpText), limit)
+	}
+	for _, must := range []string{"find <word>", "--query", "--page", "browse a place", "line:A-B", "sed -n 'A,Bp'", "Not indexed: call sites"} {
+		if !strings.Contains(helpText, must) {
+			t.Errorf("helpText does not mention %q", must)
+		}
 	}
 }

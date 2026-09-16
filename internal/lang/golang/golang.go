@@ -105,7 +105,7 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 				continue
 			}
 			exported := d.Name.IsExported()
-			line, text := lineOf(fset, d.Pos(), lines)
+			line, end, text := lineRange(fset, d, lines)
 			decls = append(decls, entry.Entry{
 				Path:     f.Path,
 				Name:     d.Name.Name,
@@ -117,6 +117,7 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 				Position: position,
 				Line:     line,
 				LineText: text,
+				EndLine:  end,
 			})
 
 		case *ast.GenDecl:
@@ -125,12 +126,12 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 				continue // import, or another declaration kind this version does not index
 			}
 			for _, spec := range d.Specs {
-				specName, doc, pos, ok := specNameDocAndPos(spec, d.Doc)
+				specName, doc, ok := specNameAndDoc(spec, d.Doc)
 				if !ok {
 					continue
 				}
 				exported := ast.IsExported(specName)
-				line, text := lineOf(fset, pos, lines)
+				line, end, text := lineRange(fset, spec, lines)
 				decls = append(decls, entry.Entry{
 					Path:     f.Path,
 					Name:     specName,
@@ -142,6 +143,7 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 					Position: position,
 					Line:     line,
 					LineText: text,
+					EndLine:  end,
 				})
 				if kind == "type" {
 					if ts, ok := spec.(*ast.TypeSpec); ok {
@@ -175,18 +177,27 @@ func handles(p string) bool {
 	return false
 }
 
-// lineOf renders pos as a 1-based line number and that line's own
-// text, trimmed of surrounding whitespace (§31.4) — the fact that lets
-// a caller discard a candidate ("struct X {" vs "v := X.New") without
-// opening the file. Out-of-range is defensive only: fset.Position
-// always resolves a valid ast.Node's own Pos within lines already
-// split from the same content that produced file.
-func lineOf(fset *token.FileSet, pos token.Pos, lines []string) (int, string) {
-	line := fset.Position(pos).Line
+// lineRange renders node's extent as 1-based line numbers — the line
+// it starts on and the line it ends on, inclusive — plus the first
+// line's own text, trimmed of surrounding whitespace (§31.4; directive
+// 042 for the end). The start line's text is the fact that lets a
+// caller discard a candidate ("struct X {" vs "v := X.New") without
+// opening the file; the end line is what lets it open exactly the
+// declaration and nothing else. The range is the node's own —
+// go/parser's Pos and End — so a func's is its signature through its
+// closing brace, a type's the whole declaration, a spec's the spec
+// alone (never the group it sits in), and a field's its own line(s);
+// the doc comment above a declaration is not part of it, its first
+// line already being on the result line. Out-of-range is defensive
+// only: fset.Position always resolves a valid ast.Node's own Pos
+// within lines already split from the same content that produced file.
+func lineRange(fset *token.FileSet, node ast.Node, lines []string) (line, end int, text string) {
+	line = fset.Position(node.Pos()).Line
+	end = fset.Position(node.End()).Line
 	if line < 1 || line > len(lines) {
-		return line, ""
+		return line, end, ""
 	}
-	return line, strings.TrimSpace(lines[line-1])
+	return line, end, strings.TrimSpace(lines[line-1])
 }
 
 // methodEntry returns the index entry for a method declaration, or
@@ -200,7 +211,7 @@ func methodEntry(path, project string, d *ast.FuncDecl, base []entry.Position, f
 		return entry.Entry{}, false
 	}
 	exported := d.Name.IsExported()
-	line, text := lineOf(fset, d.Pos(), lines)
+	line, end, text := lineRange(fset, d, lines)
 	return entry.Entry{
 		Path:     path,
 		Name:     d.Name.Name,
@@ -212,6 +223,7 @@ func methodEntry(path, project string, d *ast.FuncDecl, base []entry.Position, f
 		Position: withPosition(base, "receiver", recv),
 		Line:     line,
 		LineText: text,
+		EndLine:  end,
 	}, true
 }
 
@@ -235,7 +247,7 @@ func fieldEntries(path, project string, ts *ast.TypeSpec, base []entry.Position,
 				names = []*ast.Ident{{Name: n}}
 			}
 		}
-		line, text := lineOf(fset, field.Pos(), lines)
+		line, end, text := lineRange(fset, field, lines)
 		for _, n := range names {
 			if n.Name == "_" {
 				continue
@@ -252,6 +264,7 @@ func fieldEntries(path, project string, ts *ast.TypeSpec, base []entry.Position,
 				Position: position,
 				Line:     line,
 				LineText: text,
+				EndLine:  end,
 			})
 		}
 	}
@@ -313,28 +326,29 @@ func genDeclKind(tok token.Token) string {
 	}
 }
 
-// specNameDocAndPos returns the declared name, doc comment and source
-// position for one spec inside a (possibly grouped) declaration. A
-// spec's own Doc — present when each item in a group has its own
-// comment — takes precedence; groupDoc is the comment above the
-// declaration keyword itself, used as a fallback. pos is always the
-// spec's own position, never the group's: in `const (\n A = 1\n B = 2\n)`
-// each spec's own line is what a caller discarding a candidate needs
-// (§31.4), not the line the group starts on.
-func specNameDocAndPos(spec ast.Spec, groupDoc *ast.CommentGroup) (name, doc string, pos token.Pos, ok bool) {
+// specNameAndDoc returns the declared name and doc comment for one
+// spec inside a (possibly grouped) declaration. A spec's own Doc —
+// present when each item in a group has its own comment — takes
+// precedence; groupDoc is the comment above the declaration keyword
+// itself, used as a fallback. The spec's position is the caller's to
+// take from the spec itself (lineRange), and is always the spec's own,
+// never the group's: in `const (\n A = 1\n B = 2\n)` each spec's own
+// line is what a caller discarding a candidate needs (§31.4), not the
+// line the group starts on.
+func specNameAndDoc(spec ast.Spec, groupDoc *ast.CommentGroup) (name, doc string, ok bool) {
 	switch s := spec.(type) {
 	case *ast.TypeSpec:
-		return s.Name.Name, firstLine(preferDoc(s.Doc, groupDoc)), s.Pos(), true
+		return s.Name.Name, firstLine(preferDoc(s.Doc, groupDoc)), true
 	case *ast.ValueSpec:
 		if len(s.Names) == 0 {
-			return "", "", token.NoPos, false
+			return "", "", false
 		}
 		// const/var can declare several names on one line (A, B = 1, 2);
 		// only the first is reported for this version, matching the
 		// declaration's own doc comment.
-		return s.Names[0].Name, firstLine(preferDoc(s.Doc, groupDoc)), s.Pos(), true
+		return s.Names[0].Name, firstLine(preferDoc(s.Doc, groupDoc)), true
 	default:
-		return "", "", token.NoPos, false
+		return "", "", false
 	}
 }
 

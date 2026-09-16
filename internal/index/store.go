@@ -42,7 +42,7 @@ const storeFilename = "store.bolt"
 // scratch, the same convention the old line-oriented cache used for an
 // undecodable line, just cheaper to detect — one key, not a parse
 // failure partway through 37MB of text.
-const schemaVersion = "2"
+const schemaVersion = "3" // 3: EndLine joined the entry encoding (directive 042)
 
 var (
 	bucketMeta         = []byte("meta")
@@ -797,13 +797,13 @@ func writeNextID(b *bolt.Bucket, id uint64) error {
 // used by Refresh, which now live in the files bucket instead of
 // alongside every entry, §30 C-47's division of labour: entries and
 // freshness are different concerns) — plus entry.Size and DeclCount
-// (directive 009 item 3) and Line/LineText (§31.4), none of which the
-// old cache persisted, because every caller used to get them from the
-// same in-memory all slice Refresh had just patched them into. Here,
-// every caller — including the fast, nothing-changed path, which never
-// touches that computation again — reads entries back through this
-// encoding, so these must round-trip through it too or the fast path
-// would silently serve them as zero.
+// (directive 009 item 3), Line/LineText (§31.4) and EndLine (directive
+// 042), none of which the old cache persisted, because every caller
+// used to get them from the same in-memory all slice Refresh had just
+// patched them into. Here, every caller — including the fast,
+// nothing-changed path, which never touches that computation again —
+// reads entries back through this encoding, so these must round-trip
+// through it too or the fast path would silently serve them as zero.
 func encodeEntry(e entry.Entry) []byte {
 	fields := []string{
 		sanitize(e.Path),
@@ -820,20 +820,22 @@ func encodeEntry(e entry.Entry) []byte {
 		strconv.Itoa(e.DeclCount),
 		strconv.Itoa(e.Line),
 		sanitize(e.LineText),
+		strconv.Itoa(e.EndLine),
 	}
 	return []byte(strings.Join(fields, "\t"))
 }
 
 func decodeEntry(v []byte) (entry.Entry, error) {
 	fields := strings.Split(string(v), "\t")
-	if len(fields) != 14 {
-		return entry.Entry{}, fmt.Errorf("expected 14 tab-separated fields, got %d", len(fields))
+	if len(fields) != 15 {
+		return entry.Entry{}, fmt.Errorf("expected 15 tab-separated fields, got %d", len(fields))
 	}
 	size, err1 := strconv.ParseInt(fields[10], 10, 64)
 	declCount, err2 := strconv.Atoi(fields[11])
 	line, err3 := strconv.Atoi(fields[12])
-	if err1 != nil || err2 != nil || err3 != nil {
-		return entry.Entry{}, fmt.Errorf("malformed Size/DeclCount/Line fields: %q", v)
+	endLine, err4 := strconv.Atoi(fields[14])
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+		return entry.Entry{}, fmt.Errorf("malformed Size/DeclCount/Line/EndLine fields: %q", v)
 	}
 	return entry.Entry{
 		Path:      fields[0],
@@ -850,5 +852,6 @@ func decodeEntry(v []byte) (entry.Entry, error) {
 		DeclCount: declCount,
 		Line:      line,
 		LineText:  fields[13],
+		EndLine:   endLine,
 	}, nil
 }

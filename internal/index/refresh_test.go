@@ -274,32 +274,42 @@ func TestRefresh_FileItselfIsASearchTarget(t *testing.T) {
 // needs to know, on a later call, whether this path is still there at
 // all — the record's freshness fields are still stat-compared like any
 // other file's (§20 C-2), only its declarations are always empty.
-// TestRefresh_LineAndLineTextSurviveAStoreRoundTrip (§31.4): a
-// declaration's Line and LineText are new store.go fields
-// (encodeEntry/decodeEntry) — this exercises the real write-then-read
-// path Refresh uses, not just the in-package extractor test, so a
-// field-count mismatch between encode and decode would fail here even
-// if it left every other field looking fine.
+// TestRefresh_LineAndLineTextSurviveAStoreRoundTrip (§31.4; directive
+// 042 for EndLine): a declaration's Line, LineText and EndLine are
+// store.go fields (encodeEntry/decodeEntry) — this exercises the real
+// write-then-read path Refresh uses, not just the in-package extractor
+// test, so a field-count mismatch between encode and decode would fail
+// here even if it left every other field looking fine.
 func TestRefresh_LineAndLineTextSurviveAStoreRoundTrip(t *testing.T) {
 	root := gitRepo(t)
-	writeFile(t, root, "retry.go", "package retry\n\n// Retry retries.\nfunc Retry() {}\n")
+	writeFile(t, root, "retry.go", "package retry\n\n// Retry retries.\nfunc Retry() {}\n\nfunc run() {\n\tRetry()\n}\n")
 	gitCommit(t, root, "retry.go")
 
 	s := mustRefresh(t, root)
 	defer closeStore(t, s)
+	want := map[string]struct {
+		line, endLine int
+		text          string
+	}{
+		"Retry": {4, 4, "func Retry() {}"},
+		"run":   {6, 8, "func run() {"},
+	}
 	for _, e := range allEntries(s) {
-		if e.Name != "Retry" {
+		w, ok := want[e.Name]
+		if !ok {
 			continue
 		}
-		if e.Line != 4 {
-			t.Errorf("Line = %d, want 4", e.Line)
+		if e.Line != w.line || e.EndLine != w.endLine {
+			t.Errorf("%s: Line/EndLine = %d/%d, want %d/%d", e.Name, e.Line, e.EndLine, w.line, w.endLine)
 		}
-		if e.LineText != "func Retry() {}" {
-			t.Errorf("LineText = %q, want %q", e.LineText, "func Retry() {}")
+		if e.LineText != w.text {
+			t.Errorf("%s: LineText = %q, want %q", e.Name, e.LineText, w.text)
 		}
-		return
+		delete(want, e.Name)
 	}
-	t.Fatal("expected a Retry entry in the store")
+	for name := range want {
+		t.Errorf("expected a %s entry in the store", name)
+	}
 }
 
 func TestRefresh_NoExtractorFileGetsANameOnlyEntry(t *testing.T) {

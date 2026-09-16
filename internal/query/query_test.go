@@ -226,6 +226,28 @@ func TestFilter_MatchesSizeDeclarationsAndLine(t *testing.T) {
 	}
 }
 
+// TestFilter_LineMatchesTheRangeAsPrinted (directive 042): a result
+// line prints line:19-62; pasting that into --query matches (§7's
+// paste-ready rule), and so does the bare start line. A different
+// range does not, and a file entry, which prints no line, never does.
+func TestFilter_LineMatchesTheRangeAsPrinted(t *testing.T) {
+	ranged := entry.Entry{Kind: "type", Line: 19, EndLine: 62}
+	fileEntry := entry.Entry{Kind: entry.KindFile}
+	for _, v := range []string{"19-62", "19"} {
+		if !(Filter{"line": {v}}).Match(ranged) {
+			t.Errorf("expected line:%s to match an entry at 19-62", v)
+		}
+		if (Filter{"line": {v}}).Match(fileEntry) {
+			t.Errorf("expected line:%s to exclude a file entry", v)
+		}
+	}
+	for _, v := range []string{"62", "19-63", "20"} {
+		if (Filter{"line": {v}}).Match(ranged) {
+			t.Errorf("expected line:%s not to match an entry at 19-62", v)
+		}
+	}
+}
+
 // TestParse_PositionAttributeIsFilterable (directive 015 item 2): module,
 // receiver, type — any language position, present or future — are
 // filterable the moment ValidAttributes reports them, with no second
@@ -725,4 +747,40 @@ func TestSearch_ExportedVisibleFromEveryProject(t *testing.T) {
 	if got := Search(Slice(entries), "Retry", nil, "gekka"); len(got) != 1 {
 		t.Fatalf("expected the exported entry visible from a different project, got %d: %v", len(got), got)
 	}
+}
+
+// TestSearch_ShorterNameFirstWithinATier (directive 042; built and
+// measured in 041): among substring matches of equal tier, the name
+// the word covers more of comes first — NodeMetrics ahead of
+// DefaultMetricsExporterConfig — rather than whichever sorts first
+// alphabetically. Exact matches (tier 0) still lead regardless of
+// length, and the alphabetical order remains the tie-break between
+// names of one length.
+func TestSearch_ShorterNameFirstWithinATier(t *testing.T) {
+	entries := []entry.Entry{
+		{Name: "DefaultMetricsExporterConfig", Kind: "func", Path: "a.go", Exported: true},
+		{Name: "ClusterMetricsProvider", Kind: "type", Path: "b.go", Exported: true},
+		{Name: "NodeMetrics", Kind: "type", Path: "c.go", Exported: true},
+		{Name: "MetricsSnapshot", Kind: "type", Path: "d.go", Exported: true},
+		{Name: "Metrics", Kind: "type", Path: "e.go", Exported: true},
+		{Name: "MetricsGossip", Kind: "type", Path: "f.go", Exported: true},
+	}
+	got := Search(Slice(entries), "metrics", nil, "")
+	want := []string{"Metrics", "NodeMetrics", "MetricsGossip", "MetricsSnapshot", "ClusterMetricsProvider", "DefaultMetricsExporterConfig"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d results, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].Name != w {
+			t.Errorf("position %d = %s, want %s (full order: %v)", i, got[i].Name, w, names(got))
+		}
+	}
+}
+
+func names(entries []entry.Entry) []string {
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		out[i] = e.Name
+	}
+	return out
 }

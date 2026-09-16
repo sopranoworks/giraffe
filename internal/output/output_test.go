@@ -63,6 +63,24 @@ func TestFormat_LineNumberAndLineTextBothPrint(t *testing.T) {
 	}
 }
 
+// TestFormat_LineIsTheDeclarationsRange (directive 042): a declaration
+// spanning lines prints line:A-B — the two numbers `sed -n 'A,Bp'`
+// takes — and a one-line declaration prints line:A alone, not A-A.
+func TestFormat_LineIsTheDeclarationsRange(t *testing.T) {
+	entries := []entry.Entry{
+		{Path: "internal/core/metrics.go", Name: "NodeMetrics", Kind: "type", Exported: true, Line: 19, EndLine: 62},
+		{Path: "internal/core/metrics.go", Name: "itoa", Kind: "func", Exported: false, Scope: "package", Line: 166, EndLine: 166},
+	}
+	s := Summarize(slices.Values(entries), "abc1234", 1, nil, nil, nil, nil)
+	out := Format(s, entries)
+	if !strings.Contains(out, "name:NodeMetrics kind:type path:internal/core/metrics.go line:19-62") {
+		t.Fatalf("expected line:19-62 on the ranged declaration:\n%s", out)
+	}
+	if !strings.Contains(out, "name:itoa kind:func path:internal/core/metrics.go line:166 ") {
+		t.Fatalf("expected line:166 alone on the one-line declaration:\n%s", out)
+	}
+}
+
 // TestFormat_NoLineForAFileEntry (§31.4, §25 C-24): a generic file
 // entry addresses no specific line — absence is the correct encoding,
 // not a placeholder like line:0.
