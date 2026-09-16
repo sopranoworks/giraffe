@@ -27,9 +27,17 @@
 // trips are counted and classified from the transcript afterward, not
 // prescribed here.
 //
-// ARM=unaided|aided, CWD (the corpus root), RUN_ID, OUT_DIR, and (aided
-// only) GIRAFFE_BIN are read from the environment — this runs inside a
-// container with its own mounts, not the host's (see
+// Directive 041: the task text is read from TASK_TEXT when set, so the
+// same script runs 040's gekka task ("Cluster's metrics should include
+// the total number of actors on a node. Where do you start?") without a
+// second copy of this file — 040 made one (run-arrival-gekka.ts) and
+// deleted it after; a repeated measurement wants the one script to be
+// parameterised instead (code-manners M6). Unset, the text is 030's own,
+// unchanged.
+//
+// ARM=unaided|aided, CWD (the corpus root), RUN_ID, OUT_DIR, TASK_TEXT,
+// and (aided only) GIRAFFE_BIN are read from the environment — this runs
+// inside a container with its own mounts, not the host's (see
 // docker-run-arrival.sh for the exact invocation).
 
 import { writeFileSync } from "node:fs";
@@ -45,8 +53,9 @@ import {
   SCOPED_READ_PATTERN,
 } from "./tool-lists.js";
 
-const TASK_TEXT = "Add an option that prefixes a Pod's name with its start timestamp. Where do you start?";
+const DEFAULT_TASK_TEXT = "Add an option that prefixes a Pod's name with its start timestamp. Where do you start?";
 
+const TASK_TEXT = process.env.TASK_TEXT ?? DEFAULT_TASK_TEXT;
 const cwd = process.env.CWD ?? "/corpus";
 const runId = process.env.RUN_ID ?? `arrival-${Date.now()}`;
 const outDir = process.env.OUT_DIR ?? "/runs";
