@@ -317,21 +317,26 @@ func TestBrowse_HidesUnexportedOutsideItsOwnProject(t *testing.T) {
 	}
 }
 
-// TestDiagnoseFilter_NamesTheAttributeAValueActuallyBelongsTo (directive
-// 034): the motivating case — 033's aided run wrote path:kubectl meaning
-// the kubectl project. "kubectl" is not a real path in this fixture, but
-// is a real exact Name (a file entry), so that is what gets named — an
-// exact, index-backed fact, not a guess at what the caller meant.
-func TestDiagnoseFilter_NamesTheAttributeAValueActuallyBelongsTo(t *testing.T) {
+// TestDiagnoseFilter_ListsEveryAttributeAValueActuallyBelongsTo
+// (directive 035, revising 034): the motivating case — 033's aided run
+// wrote path:kubectl meaning the kubectl project. "kubectl" is not a
+// real path in this fixture, but is genuinely real under two other
+// attributes at once (an exact Name, a file entry, and a Project) — 034
+// reported only the alphabetically-first ("name"), silently hiding the
+// more useful "project" answer that was equally true. 035 requires both,
+// alphabetical, no ranking between them.
+func TestDiagnoseFilter_ListsEveryAttributeAValueActuallyBelongsTo(t *testing.T) {
 	entries := []entry.Entry{
 		{Name: "kubectl", Kind: "file", Path: "cmd/kubectl/kubectl.go", Project: "gekka", Exported: true},
+		{Name: "Get", Kind: "func", Path: "cmd/x/x.go", Project: "kubectl", Exported: true},
 	}
 	got := DiagnoseFilter(Slice(entries), Filter{"path": {"kubectl"}})
 	if len(got) != 1 {
 		t.Fatalf("expected one diagnosis, got %v", got)
 	}
-	if !strings.Contains(got[0], `"kubectl"`) || !strings.Contains(got[0], "path") || !strings.Contains(got[0], "name") {
-		t.Errorf("diagnosis = %q, want it to name both the wrong attribute (path) and the real one (name)", got[0])
+	want := `"path:kubectl" is wrong - it is in [name, project]`
+	if got[0] != want {
+		t.Errorf("diagnosis = %q, want %q", got[0], want)
 	}
 }
 
@@ -364,8 +369,28 @@ func TestDiagnoseFilter_DistinguishesRealEmptyIntersectionFromABadValue(t *testi
 	if len(got) != 1 {
 		t.Fatalf("expected one line, got %v", got)
 	}
-	if strings.Contains(got[0], "no such") || strings.Contains(got[0], "is not a") {
+	if strings.Contains(got[0], "no such") || strings.Contains(got[0], "is wrong") {
 		t.Errorf("diagnosis = %q, expected the real-but-empty-intersection message, not a bad-value one", got[0])
+	}
+}
+
+// TestDiagnoseFilter_MultipleBadConstraintsEachGetTheirOwnLine (directive
+// 035 report item 2's "a case with two bad constraints"): path:kubectl
+// (real, under name and project) and lang:cobol (real nowhere) in the
+// same filter each produce their own line, attribute-sorted.
+func TestDiagnoseFilter_MultipleBadConstraintsEachGetTheirOwnLine(t *testing.T) {
+	entries := []entry.Entry{
+		{Name: "kubectl", Kind: "file", Path: "cmd/kubectl/kubectl.go", Project: "gekka", Exported: true, Lang: "go"},
+	}
+	got := DiagnoseFilter(Slice(entries), Filter{"path": {"kubectl"}, "lang": {"cobol"}})
+	if len(got) != 2 {
+		t.Fatalf("expected two lines, got %v", got)
+	}
+	if got[0] != `no such lang: "cobol"` {
+		t.Errorf("line 0 = %q, want the lang diagnosis first (attribute-sorted: lang < path)", got[0])
+	}
+	if got[1] != `"path:kubectl" is wrong - it is in [name]` {
+		t.Errorf("line 1 = %q, want the path diagnosis naming only name (project is not in this fixture)", got[1])
 	}
 }
 

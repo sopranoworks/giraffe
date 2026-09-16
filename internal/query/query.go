@@ -533,10 +533,10 @@ func Browse(src Entries, filter Filter, invocationProject string) []entry.Entry 
 }
 
 // DiagnoseFilter explains a zero-result answer that carried a non-empty
-// filter (directive 034): an unknown attribute *name* is already a
-// parse-time error (§5, Parse) — an unknown *value* was not, and read
-// identically to a query whose constraints are all real but whose
-// intersection happens to be empty. The index holds every value of
+// filter (directive 034, revised by 035): an unknown attribute *name* is
+// already a parse-time error (§5, Parse) — an unknown *value* was not,
+// and read identically to a query whose constraints are all real but
+// whose intersection happens to be empty. The index holds every value of
 // every attribute, so which of those two happened is not a guess.
 //
 // Every attr:value pair in filter is checked against the whole index,
@@ -545,12 +545,17 @@ func Browse(src Entries, filter Filter, invocationProject string) []entry.Entry 
 // about this particular query, the same principle Suggest already
 // applies to a missed word. A constraint whose value matches nothing
 // anywhere, under any attribute, is reported as such; one whose value
-// exists under a *different* attribute names that attribute exactly
-// (an exact lookup, never a fuzzy one — §23 C-16's own constraint on
-// Suggest applies here too: no spelling correction, no ranked
-// candidates, only what the index actually holds). If every constraint
-// turns out to be individually real, that is reported too, distinct
-// from either — a query that legitimately intersected to nothing.
+// exists under a *different* attribute names every attribute it is real
+// under, not the alphabetically-first one (035: 034 shipped a single
+// first-match report — "path:kubectl" is not a path — it is a name" —
+// and 035 found this hid an equally-true, more-useful answer:
+// "project:kubectl" is exactly as real, in the one case with evidence.
+// Listing the attributes a value actually appears under is not a guess
+// and not a ranking — §23 C-16's "no fuzzy matching, no spelling
+// correction, no ranked candidates" governs invention, not enumeration
+// of facts the index already holds). If every constraint turns out to be
+// individually real, that is reported too, distinct from either — a
+// query that legitimately intersected to nothing.
 //
 // Only meaningful once the caller already knows word+filter together
 // matched nothing; DiagnoseFilter does not itself decide whether to
@@ -572,8 +577,8 @@ func DiagnoseFilter(src Entries, filter Filter) []string {
 			if valueExists(src, attr, v) {
 				continue
 			}
-			if other := findOtherAttr(src, valid, attr, v); other != "" {
-				out = append(out, fmt.Sprintf("%q is not a %s — it is a %s", v, attr, other))
+			if others := findOtherAttrs(src, valid, attr, v); len(others) > 0 {
+				out = append(out, fmt.Sprintf("%q is wrong - it is in [%s]", attr+":"+v, strings.Join(others, ", ")))
 			} else {
 				out = append(out, fmt.Sprintf("no such %s: %q", attr, v))
 			}
@@ -598,26 +603,53 @@ func valueExists(src Entries, attr, value string) bool {
 	return false
 }
 
-// findOtherAttr looks for value under every valid attribute except
+// findOtherAttrs looks for value under every valid attribute except
 // exclude, one pass over src rather than one pass per candidate
-// attribute — each entry is checked against every other attribute name
-// before moving to the next entry, so the scan stops at the first
-// match found anywhere rather than repeating a full scan per attribute.
-// Returns "" when value exists under no attribute at all, the same as
-// exhausting every possibility rather than a guess.
-func findOtherAttr(src Entries, valid map[string]bool, exclude, value string) string {
+// attribute — each entry is checked against every not-yet-found
+// attribute name before moving to the next entry. Unlike a first-match
+// search, this cannot stop once one attribute is confirmed (035: a value
+// can be genuinely real under more than one attribute, and reporting
+// only the alphabetically-first one hid the more useful answer in the
+// one case with evidence — see DiagnoseFilter); an already-found
+// attribute is skipped on later entries so no attribute is confirmed
+// twice, but every entry is still visited until every valid attribute
+// is accounted for or the scan ends. Returns nil when value exists under
+// no attribute at all, the same as exhausting every possibility rather
+// than a guess. The returned slice is alphabetical, carrying no implied
+// preference among the attributes found (035: an order by anything else
+// — match count, an exactness heuristic — would be a ranking, and the
+// one case with evidence does not even discriminate between its two
+// real answers).
+func findOtherAttrs(src Entries, valid map[string]bool, exclude, value string) []string {
 	others := sortedKeys(valid)
+	found := make(map[string]bool, len(others))
+	remaining := len(others)
+	if valid[exclude] {
+		remaining--
+	}
 	for e := range src.All() {
+		if remaining == 0 {
+			break
+		}
 		for _, attr := range others {
-			if attr == exclude {
+			if attr == exclude || found[attr] {
 				continue
 			}
 			if matchesAny(attr, e, []string{value}) {
-				return attr
+				found[attr] = true
+				remaining--
 			}
 		}
 	}
-	return ""
+	if len(found) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(found))
+	for attr := range found {
+		names = append(names, attr)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // prefixLen picks how many leading characters of word two names must
