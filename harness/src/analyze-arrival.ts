@@ -23,11 +23,21 @@
 //
 // Directive 045 (code-manners D6: 040, 041 and 044 each scored arrival
 // with a one-off script, and the third copy forces extraction):
-// --landing names a JSON file of {"landing point": "regex"} — the
-// task's own list, e.g. landing/gekka-actors.json — and each run's
-// final answer is scored against it, hits out of points, the way 041
-// did. The score is a grep of the agent's answer, not a judgement of
-// it; the report says what the points are.
+// --landing names a JSON file of the task's landing points, e.g.
+// landing/gekka-actors.json, and each run's final answer is scored
+// against it, hits out of points, the way 041 did. The score is a
+// match against the agent's answer, not a judgement of it; the report
+// says what the points are.
+//
+// Directive 046 §2: a landing point is a place, not a regex. 045's
+// file held four hand-written patterns from 040, and the skill changed
+// how agents phrase an answer — a run that wrote cluster.go:4239-4246
+// missed a pattern that wanted MetricsSnapshot(). A place is a file,
+// or a range of lines in a file, with the declarations at it (see
+// LandingPoint); an answer arrives at a file by naming it or something
+// declared in it, and at a range by naming a line in it or something
+// declared in it. The forms an answer may use are fixed here, once,
+// and the points are data read from the corpus.
 //
 // Also 045: a Skill tool call is its own category, and the run line
 // says whether the run loaded a skill and how many bytes it was — the
@@ -83,11 +93,72 @@ interface Arrival {
   readonly missed: readonly string[];
 }
 
-type LandingPoints = Record<string, string>;
+// A landing point is a place in the corpus: the file at path, or, with
+// lines, the range [from, to] of it (1-based, inclusive — a
+// declaration's whole extent as giraffe prints it). symbols are the
+// declarations at the place, as the corpus's own index lists them:
+// a bare name for a type, a func, a var or a const; Type.name for a
+// struct field; Type.name() for a method. For a file the symbols are
+// its top-level declarations — the names an answer uses to say "this
+// file"; a member belongs to its type, and a method name alone (Start,
+// Port) says nothing about which file. For a range, everything
+// declared in it, members included: the member is the place.
+interface LandingPoint {
+  readonly path: string;
+  readonly lines?: readonly [number, number];
+  readonly symbols?: readonly string[];
+}
+
+type LandingPoints = Record<string, LandingPoint>;
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// namesPath: the path itself, any suffix of it from a directory
+// boundary, or its basename — as a whole word, so metrics.go does not
+// match metrics_test.go or a longer name ending the same way.
+function namesPath(text: string, path: string): boolean {
+  const segments = path.split("/");
+  return segments.some((_, i) => new RegExp(`(?<![\\w/])${escapeRegExp(segments.slice(i).join("/"))}\\b`).test(text));
+}
+
+// namesLine: basename:N or basename:N-M (a hyphen or an en dash) with
+// the reference overlapping the range.
+function namesLine(text: string, path: string, [from, to]: readonly [number, number]): boolean {
+  const base = escapeRegExp(path.split("/").pop() ?? path);
+  for (const m of text.matchAll(new RegExp(`(?<!\\w)${base}:(\\d+)(?:[-–](\\d+))?`, "g"))) {
+    const a = Number(m[1]);
+    const b = m[2] === undefined ? a : Number(m[2]);
+    if (a <= to && b >= from) return true;
+  }
+  return false;
+}
+
+// namesSymbol: a bare name as a whole word; a field as Type.name or
+// v.name through a receiver variable; a method as Type.name, v.name( or
+// the call name( — the parenthesis is what tells a call of the method
+// from a type of the same name (core.MetricsSnapshot is the type,
+// MetricsSnapshot() the method). Two of 045's runs wrote exactly
+// "MetricsSnapshot() at line 4244".
+function namesSymbol(text: string, symbol: string): boolean {
+  const dot = symbol.indexOf(".");
+  if (dot < 0) return new RegExp(`\\b${escapeRegExp(symbol)}\\b`).test(text);
+  const type = escapeRegExp(symbol.slice(0, dot));
+  const isMethod = symbol.endsWith("()");
+  const member = escapeRegExp(isMethod ? symbol.slice(dot + 1, -2) : symbol.slice(dot + 1));
+  const viaReceiver = isMethod ? `\\b(?:[a-z_]\\w*\\.)?${member}\\(` : `\\b[a-z_]\\w*\\.${member}\\b`;
+  return new RegExp(`\\b${type}\\.${member}\\b|${viaReceiver}`).test(text);
+}
+
+function arrivesAt(text: string, p: LandingPoint): boolean {
+  const there = p.lines ? namesLine(text, p.path, p.lines) : namesPath(text, p.path);
+  return there || (p.symbols ?? []).some((s) => namesSymbol(text, s));
+}
 
 function scoreArrival(finalText: string, points: LandingPoints): Arrival {
   const missed = Object.entries(points)
-    .filter(([, pattern]) => !new RegExp(pattern).test(finalText))
+    .filter(([, point]) => !arrivesAt(finalText, point))
     .map(([name]) => name);
   const of = Object.keys(points).length;
   return { hit: of - missed.length, of, missed };
