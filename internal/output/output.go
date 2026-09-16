@@ -254,8 +254,20 @@ func breakdownLine(counts map[string]int) string {
 	return line
 }
 
-// Format renders the full answer for one find call.
+// Format renders the full answer for one find call, from the top of the
+// ranking. Equivalent to FormatFrom with offset 0.
 func Format(s Summary, matches []entry.Entry) string {
+	return FormatFrom(s, matches, 0)
+}
+
+// FormatFrom renders the full answer for one find call, skipping the
+// first offset already-ranked matches before the response budget is
+// applied (--offset, directive 032). `## truncated` narrows the same
+// query by path; offset pages further into the same ranking without
+// re-running it — matches arrives pre-sorted by query.Search or
+// query.Browse, and paging is purely a slice of that order, so it costs
+// nothing beyond what fit already does to select a page.
+func FormatFrom(s Summary, matches []entry.Entry, offset int) string {
 	var b strings.Builder
 
 	indexLine := fmt.Sprintf("commit %s | symbols %d | packages %d | undocumented %d exported, %d package | dispatched %d",
@@ -283,7 +295,7 @@ func Format(s Summary, matches []entry.Entry) string {
 	if len(matches) > 0 {
 		preambleLen += len(resultsHeader)
 	}
-	shown, remainder := fit(matches, s.ShowProject, s.ShowLang, s.ExtVaries, preambleLen)
+	shown, remainder := fit(matches, s.ShowProject, s.ShowLang, s.ExtVaries, preambleLen, offset)
 
 	if len(shown) > 0 {
 		b.WriteString(resultsHeader)
@@ -415,7 +427,17 @@ func quote(s string) string {
 // optional languages: and by ext: lines, and the ## results header
 // itself — not indexLine's length alone (§26 C-30: "everything printed
 // counts").
-func fit(matches []entry.Entry, showProject, showLang bool, extVaries map[string]bool, preambleLen int) (shown, remainder []entry.Entry) {
+//
+// offset skips the first offset entries of matches before the budget is
+// applied (directive 032's --offset): matches already carries the full
+// ranking, so paging is a plain slice, not a second search. offset past
+// the end of matches yields no results and no remainder, not an error —
+// the caller asked to see further than there is anything to see.
+func fit(matches []entry.Entry, showProject, showLang bool, extVaries map[string]bool, preambleLen, offset int) (shown, remainder []entry.Entry) {
+	if offset >= len(matches) {
+		return nil, nil
+	}
+	matches = matches[offset:]
 	total := preambleLen
 	for i, e := range matches {
 		if i >= maxResults {

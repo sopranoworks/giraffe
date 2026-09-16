@@ -260,11 +260,70 @@ func TestFit_PreambleLenCountsTowardBudget(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		matches = append(matches, entry.Entry{Path: strings.Repeat("a", 200), Name: "X", Kind: "func", Exported: true})
 	}
-	shownSmallPreamble, _ := fit(matches, false, false, nil, 10)
-	shownBigPreamble, _ := fit(matches, false, false, nil, 1200)
+	shownSmallPreamble, _ := fit(matches, false, false, nil, 10, 0)
+	shownBigPreamble, _ := fit(matches, false, false, nil, 1200, 0)
 	if len(shownBigPreamble) >= len(shownSmallPreamble) {
 		t.Fatalf("expected a larger preamble to leave room for fewer results before the byte backstop: small=%d big=%d",
 			len(shownSmallPreamble), len(shownBigPreamble))
+	}
+}
+
+// TestFit_Offset (directive 032): offset skips already-ranked entries
+// before the budget is applied, and the remainder shrinks by the same
+// amount — paging is a plain slice of the existing ranking, not a
+// second search with its own truncation count.
+func TestFit_Offset(t *testing.T) {
+	var matches []entry.Entry
+	for i := 0; i < 20; i++ {
+		matches = append(matches, entry.Entry{Path: "a.go", Name: "X", Kind: "func", Exported: true})
+	}
+	shownNoOffset, remainderNoOffset := fit(matches, false, false, nil, 10, 0)
+	shownOffset, remainderOffset := fit(matches, false, false, nil, 10, 8)
+	if len(shownOffset) != len(shownNoOffset) {
+		t.Fatalf("expected offset 8 to still fill a full page (%d entries remain): got %d, want %d",
+			len(matches)-8, len(shownOffset), len(shownNoOffset))
+	}
+	if shownOffset[0].Path != matches[8].Path || shownOffset[0].Line != matches[8].Line {
+		t.Fatalf("expected the first shown entry at offset 8 to be matches[8]")
+	}
+	if len(remainderOffset) != len(remainderNoOffset)-8 {
+		t.Fatalf("expected the remainder to shrink by exactly the offset: got %d, want %d",
+			len(remainderOffset), len(remainderNoOffset)-8)
+	}
+}
+
+// TestFit_OffsetPastEnd (directive 032): an offset beyond the ranked set
+// is not an error — it means there is nothing further to page to.
+func TestFit_OffsetPastEnd(t *testing.T) {
+	matches := []entry.Entry{{Path: "a.go", Name: "X", Kind: "func", Exported: true}}
+	shown, remainder := fit(matches, false, false, nil, 10, 5)
+	if shown != nil || remainder != nil {
+		t.Fatalf("expected no shown and no remainder past the end of matches: shown=%v remainder=%v", shown, remainder)
+	}
+}
+
+// TestFormatFrom_Offset (directive 032): FormatFrom's ## results section
+// starts at the offset entry, and Format (offset 0, the CLI's default)
+// is unchanged by FormatFrom's existence.
+func TestFormatFrom_Offset(t *testing.T) {
+	entries := []entry.Entry{
+		{Path: "a.go", Name: "First", Kind: "func", Exported: true},
+		{Path: "b.go", Name: "Second", Kind: "func", Exported: true},
+		{Path: "c.go", Name: "Third", Kind: "func", Exported: true},
+	}
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
+
+	fromStart := Format(s, entries)
+	if !strings.Contains(fromStart, "name:First") {
+		t.Fatalf("expected Format (offset 0) to include the first result:\n%s", fromStart)
+	}
+
+	fromOffset := FormatFrom(s, entries, 1)
+	if strings.Contains(fromOffset, "name:First") {
+		t.Fatalf("expected offset 1 to skip the first result:\n%s", fromOffset)
+	}
+	if !strings.Contains(fromOffset, "name:Second") || !strings.Contains(fromOffset, "name:Third") {
+		t.Fatalf("expected offset 1 to include the second and third results:\n%s", fromOffset)
 	}
 }
 

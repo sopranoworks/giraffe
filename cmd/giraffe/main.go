@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"giraffe/internal/index"
@@ -85,7 +86,7 @@ func run(ctx context.Context, args []string) int {
 	// is not treated as a search term, since both are themselves
 	// plausible identifiers in real code.
 	if len(args) == 0 || (args[0] != "find" && args[0] != "prepare") {
-		fmt.Fprintln(os.Stderr, "usage: giraffe find [<word>] [--query '<attr>:<value> ...'] | giraffe prepare")
+		fmt.Fprintln(os.Stderr, "usage: giraffe find [<word>] [--query '<attr>:<value> ...'] [--offset N] | giraffe prepare")
 		return 2
 	}
 	sub, rest := args[0], args[1:]
@@ -260,19 +261,22 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 	}, 0
 }
 
-// runFind implements `giraffe find [<word>] [--query ...]`. Two modes,
-// both in the specification (§31.3): a word searches and ranks by
-// relevance (query.Search); no word — only --query — browses a place,
+// runFind implements `giraffe find [<word>] [--query ...] [--offset N]`.
+// Two modes, both in the specification (§31.3): a word searches and ranks
+// by relevance (query.Search); no word — only --query — browses a place,
 // everything at it in path/name order (query.Browse). At least one of
 // the two must be given, or there is nothing to search or browse.
+// --offset (directive 032) pages further into either mode's own ranking;
+// it does not change what ranks where, only where the response budget
+// starts reading from.
 func runFind(args []string, st searchState) int {
-	word, queryRaw, err := parseArgs(args)
+	word, queryRaw, offset, err := parseArgs(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "giraffe:", err)
 		return 2
 	}
 	if word == "" && queryRaw == "" {
-		fmt.Fprintln(os.Stderr, "usage: giraffe find <word> [--query '<attr>:<value> ...'] | giraffe find --query '<attr>:<value> ...'")
+		fmt.Fprintln(os.Stderr, "usage: giraffe find <word> [--query '<attr>:<value> ...'] [--offset N] | giraffe find --query '<attr>:<value> ...' [--offset N]")
 		return 2
 	}
 
@@ -292,7 +296,7 @@ func runFind(args []string, st searchState) int {
 		// there is nothing to suggest either — TryNext only makes sense
 		// once a word has actually missed.
 		matches := query.Browse(st.entries, filter, st.invocationProject)
-		fmt.Print(output.Format(summary, matches))
+		fmt.Print(output.FormatFrom(summary, matches, offset))
 		return 0
 	}
 
@@ -300,7 +304,7 @@ func runFind(args []string, st searchState) int {
 	if len(matches) == 0 {
 		summary.TryNext = query.Suggest(st.entries, word, st.invocationProject)
 	}
-	fmt.Print(output.Format(summary, matches))
+	fmt.Print(output.FormatFrom(summary, matches, offset))
 	return 0
 }
 
@@ -397,22 +401,37 @@ func notIgnored(ctx context.Context, root, relPath string) bool {
 	return false // some other failure (e.g. git itself errored); do not report a false positive
 }
 
-func parseArgs(args []string) (word, queryRaw string, err error) {
+// parseArgs parses find's arguments: an optional positional word, an
+// optional --query value, and an optional --offset (directive 032:
+// "giraffe find <word> --offset N returns results starting at rank N+1,
+// under the same budget"). offset defaults to 0 — the top of the
+// ranking, unchanged from before this flag existed.
+func parseArgs(args []string) (word, queryRaw string, offset int, err error) {
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--query":
 			if i+1 >= len(args) {
-				return "", "", fmt.Errorf("--query requires a value")
+				return "", "", 0, fmt.Errorf("--query requires a value")
 			}
 			queryRaw = args[i+1]
+			i++
+		case args[i] == "--offset":
+			if i+1 >= len(args) {
+				return "", "", 0, fmt.Errorf("--offset requires a value")
+			}
+			n, convErr := strconv.Atoi(args[i+1])
+			if convErr != nil || n < 0 {
+				return "", "", 0, fmt.Errorf("--offset must be a non-negative integer, got %q", args[i+1])
+			}
+			offset = n
 			i++
 		case word == "":
 			word = args[i]
 		default:
-			return "", "", fmt.Errorf("unexpected argument %q", args[i])
+			return "", "", 0, fmt.Errorf("unexpected argument %q", args[i])
 		}
 	}
-	return word, queryRaw, nil
+	return word, queryRaw, offset, nil
 }
 
 func commitHash(ctx context.Context, root string) (string, error) {
