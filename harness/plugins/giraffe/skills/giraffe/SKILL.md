@@ -44,6 +44,9 @@ Run **two or three queries, not one**:
    `store`/`repository`/`registry`/`cache`
 3. the verb of the operation
 
+Run them together, in one command, and read the answers side by side:
+the comparison is the point, and one turn is cheaper than three.
+
 Search the *capability*, not your intended class name. You are looking
 for "bounded retry with backoff", not for `RetryPolicyManager`.
 
