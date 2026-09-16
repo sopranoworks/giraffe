@@ -335,17 +335,6 @@ func nameTier(e entry.Entry, lowerWord string) (int, bool) {
 	return 0, false
 }
 
-// ExactName reports whether e is a declaration named exactly word,
-// case-insensitively — the match nameTier ranks first for a top-level
-// declaration (tier 0) and first among members (tier 2), and the one a
-// caller who typed a name they already had is making. It is what
-// decides which results print their text under ## source (directive
-// 044). A file entry is never one: its name is a path's basename, and
-// a file has no declaration text of its own to print.
-func ExactName(e entry.Entry, word string) bool {
-	return e.Kind != entry.KindFile && strings.EqualFold(e.Name, word)
-}
-
 // docPathTier is tier's remaining half (tiers 4-5): a substring match on
 // Doc or Path, checked only for an entry nameTier already ruled out —
 // tier's original switch never reaches these cases once a name match is

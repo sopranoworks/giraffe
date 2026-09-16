@@ -80,12 +80,6 @@ type searchState struct {
 	// output.Summarize can give a registered-but-absent language
 	// visibility (§25 C-24: "go 0, unknown 181099" for llvm-project).
 	knownLanguages []string
-	// rootOf maps each root's own project name to the root's directory
-	// on disk — where a result's Path is relative to — so runFind can
-	// read an exact match's declaration text for ## source (directive
-	// 044). A nested marker's project (a second go.mod under a root)
-	// is not in it, and such a result prints no source.
-	rootOf map[string]string
 }
 
 func run(ctx context.Context, args []string) int {
@@ -243,11 +237,9 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 	exclusionSet := make(map[string]bool)
 	sources := make([]query.Entries, len(results))
 	stores := make([]*index.Store, len(results))
-	rootOf := make(map[string]string, len(results))
 	for i, r := range results {
 		sources[i] = r.store
 		stores[i] = r.store
-		rootOf[r.stats.RootProject] = r.root
 		totalDispatched += r.stats.Dispatched
 		warnings = append(warnings, r.stats.Warnings...)
 		commitParts = append(commitParts, fmt.Sprintf("%s@%s", filepath.Base(r.root), r.commit))
@@ -284,7 +276,6 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 		ignoreWarnings:    ignoreWarnings,
 		exclusions:        exclusions,
 		knownLanguages:    knownLanguages,
-		rootOf:            rootOf,
 	}, 0
 }
 
@@ -347,65 +338,8 @@ func runFind(args []string, st searchState) int {
 		}
 		summary.TryNext = tryNext
 	}
-	if word != "" && page == 1 {
-		summary.Sources = exactSources(matches, word, st.rootOf)
-	}
 	fmt.Print(output.FormatFrom(summary, matches, page))
 	return 0
-}
-
-// maxSources caps how many exact matches ## source reads from disk
-// (directive 044): the section's own byte budget (output.sourceBudget)
-// bounds what prints, this bounds what is opened for it — a word that
-// is the name of a method on forty types (String) should not cost
-// forty file reads to fill 1,500 bytes.
-const maxSources = 3
-
-// exactSources reads the declaration text of the results whose name is
-// exactly word (query.ExactName), in rank order, up to maxSources —
-// what ## source prints (directive 044: the measured agents, handed a
-// result's range, read the whole file anyway; this hands them the
-// range's text with the result that named it). A result whose file
-// cannot be read, or whose project has no root here, is skipped
-// silently: the result line itself still names the range, and a
-// missing section is the answer's shape for "nothing to add", not an
-// error condition of the search.
-func exactSources(matches []entry.Entry, word string, rootOf map[string]string) []output.Source {
-	var out []output.Source
-	for _, e := range matches {
-		if len(out) == maxSources {
-			break
-		}
-		if !query.ExactName(e, word) {
-			continue
-		}
-		root, ok := rootOf[e.Project]
-		if !ok {
-			continue
-		}
-		lines, err := declarationLines(filepath.Join(root, filepath.FromSlash(e.Path)), e.Line, e.EndLine)
-		if err != nil {
-			continue // the range still prints on the result line; see above
-		}
-		out = append(out, output.Source{Entry: e, Lines: lines})
-	}
-	return out
-}
-
-// declarationLines returns lines first through last (1-based,
-// inclusive) of the file at path, or an error when the file cannot be
-// read or is shorter than the range asks for — the index is refreshed
-// before any search, so the latter means the file changed under it.
-func declarationLines(path string, first, last int) ([]string, error) {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	lines := strings.Split(strings.TrimSuffix(string(content), "\n"), "\n")
-	if first < 1 || last < first || last > len(lines) {
-		return nil, fmt.Errorf("%s: lines %d-%d not in a %d-line file", path, first, last, len(lines))
-	}
-	return lines[first-1 : last], nil
 }
 
 // helpText is what --help, -h, help, and a bare or misused invocation
@@ -434,11 +368,10 @@ methods, struct fields, consts, vars) and files, one entry each.
 
 A result's line:A-B is the declaration's whole extent: sed -n 'A,Bp' <path>
 prints exactly it. Under each result: its source line, then its doc's
-first line - usually enough to judge it unopened. A result named exactly
-<word> also prints its text, under ## source. --query takes the attribute
-names result lines print (receiver: and type: for members); path: matches
-a substring, every other attribute exactly, no wildcards.
-Not indexed: call sites - grep for those.
+first line - usually enough to judge it unopened. --query takes the
+attribute names result lines print (receiver: and type: for members);
+path: matches a substring, every other attribute exactly, no wildcards.
+Not indexed: call sites and bodies - grep for those.
 `
 
 // isHelp reports whether args asks for help: --help, -h or help as the

@@ -31,26 +31,7 @@ const (
 	// file result carries it: " size:6837" is ten bytes or so, on file
 	// entries only, against a 2,000-byte page.
 	declCountThreshold = 40
-
-	// sourceBudget bounds the ## source section the way byteBudget bounds
-	// the answer (directive 044): a declaration's own text, printed
-	// under the result that named it exactly, is re-read on every later
-	// turn of the caller's like anything else giraffe prints, so it gets
-	// a budget of its own rather than a share of the page's. Past it,
-	// the section says how many lines remain and the sed that prints
-	// them.
-	sourceBudget = 1500
 )
-
-// Source is one declaration's own text, read from disk by the caller
-// for a result whose name is exactly the search word (directive 044):
-// Lines are the entry's Line through EndLine, verbatim. output does not
-// read files itself; it renders what it is given, as with everything
-// else on the page.
-type Source struct {
-	Entry entry.Entry
-	Lines []string
-}
 
 // Summary is the evidence carried on the always-present ## index line: it
 // is what the caller pastes into a report to show the command actually
@@ -113,12 +94,6 @@ type Summary struct {
 	// what to try instead). Never fabricated: populated only from
 	// something actually observed in the index (query.Suggest).
 	TryNext []string
-	// Sources is the declaration text of the results whose name is
-	// exactly the search word, in rank order, read by the caller
-	// (directive 044) — rendered as ## source on page 1, within
-	// sourceBudget. Empty for a browse, a later page, or a word no name
-	// equals: the section is then omitted like any other empty one.
-	Sources []Source
 }
 
 // Summarize computes a Summary from the full current entry set and the
@@ -348,11 +323,6 @@ func FormatFrom(s Summary, matches []entry.Entry, page int) string {
 		}
 	}
 
-	if len(s.Sources) > 0 {
-		b.WriteString("\n## source\n")
-		b.WriteString(sourceSection(s.Sources))
-	}
-
 	if len(remainder) > 0 {
 		b.WriteString("\n## truncated\n")
 		b.WriteString(truncatedLine(remainder, page, totalPages))
@@ -461,30 +431,6 @@ func resultLine(e entry.Entry, showProject, showLang bool, extVaries map[string]
 		fmt.Fprintf(&line, "  %s\n", e.Doc)
 	}
 	return line.String()
-}
-
-// sourceSection renders ## source: each Source as a header naming what
-// it is (name, path and the range, paste-ready like a result line) and
-// then its lines verbatim, in the order given, until sourceBudget is
-// spent. The source that runs out of room ends with the count of lines
-// left and the sed that prints them from where this stopped, so a
-// caller who wants the rest types that rather than opening the file
-// whole; nothing after it prints.
-func sourceSection(sources []Source) string {
-	var b strings.Builder
-	for _, src := range sources {
-		e := src.Entry
-		fmt.Fprintf(&b, "name:%s path:%s line:%s\n", quote(e.Name), quote(e.Path), e.LineRange())
-		for i, l := range src.Lines {
-			if b.Len()+len(l)+1 > sourceBudget {
-				fmt.Fprintf(&b, "... %d more lines: sed -n '%d,%dp' %s\n", len(src.Lines)-i, e.Line+i, e.EndLine, quote(e.Path))
-				return b.String()
-			}
-			b.WriteString(l)
-			b.WriteByte('\n')
-		}
-	}
-	return b.String()
 }
 
 func quote(s string) string {
