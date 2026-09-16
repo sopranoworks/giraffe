@@ -808,3 +808,25 @@ func names(entries []entry.Entry) []string {
 	}
 	return out
 }
+
+// TestExactName (directive 044): the results that print their text
+// under ## source are the declarations named exactly the word,
+// case-insensitively, top-level or member — never a file entry, whose
+// name is a basename and which has no declaration text of its own.
+func TestExactName(t *testing.T) {
+	cases := []struct {
+		e    entry.Entry
+		word string
+		want bool
+	}{
+		{entry.Entry{Name: "Metrics", Kind: "type"}, "metrics", true},
+		{entry.Entry{Name: "Collect", Kind: "method"}, "Collect", true},
+		{entry.Entry{Name: "NodeMetrics", Kind: "type"}, "metrics", false},
+		{entry.Entry{Name: "metrics", Kind: entry.KindFile}, "metrics", false},
+	}
+	for _, c := range cases {
+		if got := ExactName(c.e, c.word); got != c.want {
+			t.Errorf("ExactName(%s %s, %q) = %v, want %v", c.e.Kind, c.e.Name, c.word, got, c.want)
+		}
+	}
+}

@@ -1,8 +1,13 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"giraffe/internal/entry"
 )
 
 // TestParseArgs_Page (directive 033, replacing 032's --offset): --page
@@ -108,5 +113,42 @@ func TestHelpText_StaysSmall(t *testing.T) {
 		if !strings.Contains(helpText, must) {
 			t.Errorf("helpText does not mention %q", must)
 		}
+	}
+}
+
+// TestExactSources (directive 044): ## source reads, from the root a
+// result's project maps to, exactly the lines its range names, in rank
+// order, for the exact matches only, at most maxSources of them; a
+// result whose project has no root here, or whose range the file no
+// longer holds, contributes nothing and stops nothing.
+func TestExactSources(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n\n// X is x.\ntype X struct{}\n\nfunc Y() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	x := entry.Entry{Path: "a.go", Name: "X", Kind: "type", Project: "p", Line: 3, EndLine: 4}
+	matches := []entry.Entry{
+		{Path: "a.go", Name: "x", Kind: "field", Project: "elsewhere", Line: 1, EndLine: 1}, // exact, but no root for its project
+		x,
+		{Path: "a.go", Name: "XY", Kind: "type", Project: "p", Line: 3, EndLine: 4}, // not exact
+		{Path: "a.go", Name: "X", Kind: "func", Project: "p", Line: 3, EndLine: 40}, // exact, range past the file's end
+		{Path: "a.go", Name: "x", Kind: "method", Project: "p", Line: 6, EndLine: 6},
+	}
+	got := exactSources(matches, "x", map[string]string{"p": root})
+	if len(got) != 2 || got[0].Entry.Name != "X" || got[0].Entry.Kind != "type" || got[1].Entry.Kind != "method" {
+		t.Fatalf("exactSources = %+v, want X (type) then x (method)", got)
+	}
+	if want := []string{"// X is x.", "type X struct{}"}; !slices.Equal(got[0].Lines, want) {
+		t.Errorf("lines = %q, want %q", got[0].Lines, want)
+	}
+	if want := []string{"func Y() {}"}; !slices.Equal(got[1].Lines, want) {
+		t.Errorf("lines = %q, want %q", got[1].Lines, want)
+	}
+	many := make([]entry.Entry, 0, maxSources+2)
+	for range maxSources + 2 {
+		many = append(many, x)
+	}
+	if got := exactSources(many, "X", map[string]string{"p": root}); len(got) != maxSources {
+		t.Errorf("%d exact matches read %d sources, want maxSources (%d)", len(many), len(got), maxSources)
 	}
 }
