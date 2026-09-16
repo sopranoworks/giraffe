@@ -532,6 +532,94 @@ func Browse(src Entries, filter Filter, invocationProject string) []entry.Entry 
 	return out
 }
 
+// DiagnoseFilter explains a zero-result answer that carried a non-empty
+// filter (directive 034): an unknown attribute *name* is already a
+// parse-time error (§5, Parse) — an unknown *value* was not, and read
+// identically to a query whose constraints are all real but whose
+// intersection happens to be empty. The index holds every value of
+// every attribute, so which of those two happened is not a guess.
+//
+// Every attr:value pair in filter is checked against the whole index,
+// independent of word and independent of the filter's other
+// constraints — "is this a real value" is a fact about the corpus, not
+// about this particular query, the same principle Suggest already
+// applies to a missed word. A constraint whose value matches nothing
+// anywhere, under any attribute, is reported as such; one whose value
+// exists under a *different* attribute names that attribute exactly
+// (an exact lookup, never a fuzzy one — §23 C-16's own constraint on
+// Suggest applies here too: no spelling correction, no ranked
+// candidates, only what the index actually holds). If every constraint
+// turns out to be individually real, that is reported too, distinct
+// from either — a query that legitimately intersected to nothing.
+//
+// Only meaningful once the caller already knows word+filter together
+// matched nothing; DiagnoseFilter does not itself decide whether to
+// call it, and returns nil for an empty filter (nothing to diagnose).
+func DiagnoseFilter(src Entries, filter Filter) []string {
+	if len(filter) == 0 {
+		return nil
+	}
+	valid := ValidAttributes(src)
+	attrs := make([]string, 0, len(filter))
+	for attr := range filter {
+		attrs = append(attrs, attr)
+	}
+	sort.Strings(attrs)
+
+	var out []string
+	for _, attr := range attrs {
+		for _, v := range filter[attr] {
+			if valueExists(src, attr, v) {
+				continue
+			}
+			if other := findOtherAttr(src, valid, attr, v); other != "" {
+				out = append(out, fmt.Sprintf("%q is not a %s — it is a %s", v, attr, other))
+			} else {
+				out = append(out, fmt.Sprintf("no such %s: %q", attr, v))
+			}
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, "every constraint in this query matches something in the index on its own; their combination does not")
+	}
+	return out
+}
+
+// valueExists reports whether any entry in src satisfies attr:value —
+// the same matchesAny a real filter would use, checked in isolation
+// rather than as one AND'd condition among several, so the answer is
+// about the corpus, not about the rest of the query it appeared in.
+func valueExists(src Entries, attr, value string) bool {
+	for e := range src.All() {
+		if matchesAny(attr, e, []string{value}) {
+			return true
+		}
+	}
+	return false
+}
+
+// findOtherAttr looks for value under every valid attribute except
+// exclude, one pass over src rather than one pass per candidate
+// attribute — each entry is checked against every other attribute name
+// before moving to the next entry, so the scan stops at the first
+// match found anywhere rather than repeating a full scan per attribute.
+// Returns "" when value exists under no attribute at all, the same as
+// exhausting every possibility rather than a guess.
+func findOtherAttr(src Entries, valid map[string]bool, exclude, value string) string {
+	others := sortedKeys(valid)
+	for e := range src.All() {
+		for _, attr := range others {
+			if attr == exclude {
+				continue
+			}
+			if matchesAny(attr, e, []string{value}) {
+				return attr
+			}
+		}
+	}
+	return ""
+}
+
 // prefixLen picks how many leading characters of word two names must
 // share to count as a near miss below: short enough to catch a small
 // typo or an unfinished word, long enough that a one- or two-letter

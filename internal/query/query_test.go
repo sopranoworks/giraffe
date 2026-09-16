@@ -317,6 +317,67 @@ func TestBrowse_HidesUnexportedOutsideItsOwnProject(t *testing.T) {
 	}
 }
 
+// TestDiagnoseFilter_NamesTheAttributeAValueActuallyBelongsTo (directive
+// 034): the motivating case — 033's aided run wrote path:kubectl meaning
+// the kubectl project. "kubectl" is not a real path in this fixture, but
+// is a real exact Name (a file entry), so that is what gets named — an
+// exact, index-backed fact, not a guess at what the caller meant.
+func TestDiagnoseFilter_NamesTheAttributeAValueActuallyBelongsTo(t *testing.T) {
+	entries := []entry.Entry{
+		{Name: "kubectl", Kind: "file", Path: "cmd/kubectl/kubectl.go", Project: "gekka", Exported: true},
+	}
+	got := DiagnoseFilter(Slice(entries), Filter{"path": {"kubectl"}})
+	if len(got) != 1 {
+		t.Fatalf("expected one diagnosis, got %v", got)
+	}
+	if !strings.Contains(got[0], `"kubectl"`) || !strings.Contains(got[0], "path") || !strings.Contains(got[0], "name") {
+		t.Errorf("diagnosis = %q, want it to name both the wrong attribute (path) and the real one (name)", got[0])
+	}
+}
+
+// TestDiagnoseFilter_ReportsNoSuchValueWhenFoundNowhere: a value absent
+// from the index under every attribute, not just the one it was given
+// under — no cross-attribute hint to offer, and none invented.
+func TestDiagnoseFilter_ReportsNoSuchValueWhenFoundNowhere(t *testing.T) {
+	entries := []entry.Entry{{Name: "Retry", Kind: "func", Path: "internal/retry/retry.go", Project: "gekka", Exported: true}}
+	got := DiagnoseFilter(Slice(entries), Filter{"project": {"nosuchproject"}})
+	if len(got) != 1 {
+		t.Fatalf("expected one diagnosis, got %v", got)
+	}
+	if !strings.Contains(got[0], "no such project") || !strings.Contains(got[0], `"nosuchproject"`) {
+		t.Errorf("diagnosis = %q, want a plain \"no such project\" report with no invented alternative", got[0])
+	}
+}
+
+// TestDiagnoseFilter_DistinguishesRealEmptyIntersectionFromABadValue: two
+// constraints that each individually match something get a different
+// message than a bad value does — the two need different next moves and
+// must not read identically (directive 034 §2).
+func TestDiagnoseFilter_DistinguishesRealEmptyIntersectionFromABadValue(t *testing.T) {
+	entries := []entry.Entry{
+		{Name: "Retry", Kind: "func", Path: "internal/retry/retry.go", Project: "retryproj", Exported: true},
+		{Name: "kubectl", Kind: "file", Path: "cmd/kubectl/kubectl.go", Project: "gekka", Exported: true},
+	}
+	// project:retryproj is real (Retry); path:cmd/kubectl is real (the
+	// kubectl file entry) — but no single entry satisfies both at once.
+	got := DiagnoseFilter(Slice(entries), Filter{"project": {"retryproj"}, "path": {"cmd/kubectl"}})
+	if len(got) != 1 {
+		t.Fatalf("expected one line, got %v", got)
+	}
+	if strings.Contains(got[0], "no such") || strings.Contains(got[0], "is not a") {
+		t.Errorf("diagnosis = %q, expected the real-but-empty-intersection message, not a bad-value one", got[0])
+	}
+}
+
+// TestDiagnoseFilter_NilForEmptyFilter: nothing to diagnose when there
+// was no filter at all — main.go only calls this when queryRaw was
+// non-empty, but the function's own contract holds regardless.
+func TestDiagnoseFilter_NilForEmptyFilter(t *testing.T) {
+	if got := DiagnoseFilter(Slice(nil), Filter{}); got != nil {
+		t.Fatalf("expected nil for an empty filter, got %v", got)
+	}
+}
+
 func TestSuggest_ReportsMatchesHiddenByProjectVisibility(t *testing.T) {
 	entries := []entry.Entry{
 		{Name: "readLines", Project: "giraffe", Exported: false},

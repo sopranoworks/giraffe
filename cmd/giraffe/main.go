@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"giraffe/internal/entry"
 	"giraffe/internal/index"
 	"giraffe/internal/lang"
 	"giraffe/internal/limits"
@@ -270,6 +271,16 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 // either mode's own ranking; it does not change what ranks where, only
 // where the response budget starts reading from, and it is the same unit
 // ## truncated now displays a position in.
+//
+// Zero results carries direction either way (directive 034): a filter
+// value the index does not have anywhere is diagnosed first
+// (query.DiagnoseFilter — the more specific fact when both a filter and
+// a word are present, since it is about the corpus's own value set, not
+// about this particular search), then a missed word's own near-name
+// suggestions (query.Suggest, unchanged, word-only). Browsing a place
+// always carries a filter (the caller below rejects word=="" with an
+// empty filter too), so it now gets direction on a miss the same as a
+// search does — before this directive it got none at all.
 func runFind(args []string, st searchState) int {
 	word, queryRaw, page, err := parseArgs(args)
 	if err != nil {
@@ -292,18 +303,23 @@ func runFind(args []string, st searchState) int {
 
 	summary := output.Summarize(st.entries.All(), st.commitLine, st.dispatched, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
 
+	var matches []entry.Entry
 	if word == "" {
-		// Browsing a place (§31.3): no search word to rank against, so
-		// there is nothing to suggest either — TryNext only makes sense
-		// once a word has actually missed.
-		matches := query.Browse(st.entries, filter, st.invocationProject)
-		fmt.Print(output.FormatFrom(summary, matches, page))
-		return 0
+		// Browsing a place (§31.3): no search word to rank against.
+		matches = query.Browse(st.entries, filter, st.invocationProject)
+	} else {
+		matches = query.Search(st.entries, word, filter, st.invocationProject)
 	}
 
-	matches := query.Search(st.entries, word, filter, st.invocationProject)
 	if len(matches) == 0 {
-		summary.TryNext = query.Suggest(st.entries, word, st.invocationProject)
+		var tryNext []string
+		if len(filter) > 0 {
+			tryNext = append(tryNext, query.DiagnoseFilter(st.entries, filter)...)
+		}
+		if word != "" {
+			tryNext = append(tryNext, query.Suggest(st.entries, word, st.invocationProject)...)
+		}
+		summary.TryNext = tryNext
 	}
 	fmt.Print(output.FormatFrom(summary, matches, page))
 	return 0
