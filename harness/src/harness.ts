@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type SDKMessage, type SdkPluginConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { RunConfig, RunRecord } from "./types.js";
 
 function sdkVersion(): string {
@@ -48,6 +48,8 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
   let actualModel: string | null = null;
   let actualTools: readonly string[] | null = null;
   let actualPermissionMode: string | null = null;
+  let actualSkills: readonly string[] | null = null;
+  let actualPlugins: readonly { name: string; path: string }[] | null = null;
   let claudeCodeVersion: string | null = null;
   let apiKeySource: string | null = null;
 
@@ -78,6 +80,8 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
       permissionMode: config.permissionMode as never,
       settingSources: config.settingSources as never,
       strictMcpConfig: config.strictMcpConfig,
+      plugins: config.plugins as SdkPluginConfig[] | undefined,
+      skills: config.skills as string[] | undefined,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       sandbox: config.sandbox as any,
       maxTurns: config.maxTurns,
@@ -94,6 +98,8 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
       actualModel = message.model;
       actualTools = message.tools;
       actualPermissionMode = message.permissionMode;
+      actualSkills = message.skills;
+      actualPlugins = message.plugins;
       claudeCodeVersion = message.claude_code_version;
       apiKeySource = message.apiKeySource as unknown as string;
     }
@@ -150,6 +156,8 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
       permissionMode: config.permissionMode,
       settingSources: config.settingSources,
       strictMcpConfig: config.strictMcpConfig,
+      plugins: config.plugins,
+      skills: config.skills,
       sandbox: config.sandbox,
       corpus: config.corpus,
     },
@@ -158,6 +166,8 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
       model: actualModel,
       tools: actualTools,
       permissionMode: actualPermissionMode,
+      skills: actualSkills,
+      plugins: actualPlugins,
     },
     usage: {
       numTurns,

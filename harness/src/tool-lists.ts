@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 // Directive 029 §1: both arms' tool lists, closed by construction — "deny
 // everything, then allow exactly what the arm is meant to have" — rather
 // than the ambient default minus a few names. 028 found the ambient
@@ -73,3 +75,20 @@ export function aidedBashPatterns(giraffeBinaryPath: string): readonly string[] 
 }
 
 export const PERMISSION_MODE = "dontAsk";
+
+// Directive 045 §2–§3: the aided arm carries the giraffe skill. A skill
+// reaches the model in two parts — its name and description in the
+// system prompt, its body through the Skill tool when the model asks for
+// it — so the arm needs the Skill tool at the availability layer (029's
+// closed list plus one name; the SDK's `skills` option approves the
+// tool, so no allowedTools entry) and a plugin directory the SDK reads
+// the skill from. settingSources stays []: nothing on this host is
+// inherited, and the plugin — harness/plugins/giraffe, mounted with the
+// harness itself (docker-run-arrival.sh mounts harness/ at /harness) —
+// is the one explicit carrier. `skills` names the skill so the SDK's
+// listing holds it and nothing else; init's `skills` array is where a
+// run record shows what the model was offered.
+export const SKILL_TOOL = "Skill";
+export const AIDED_TOOLS: readonly string[] = [...CLOSED_TOOLS, SKILL_TOOL];
+export const GIRAFFE_SKILL_PLUGIN = fileURLToPath(new URL("../plugins/giraffe", import.meta.url));
+export const GIRAFFE_SKILL = "giraffe:giraffe";

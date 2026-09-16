@@ -3,6 +3,8 @@
 // are scoped to class-based TypeScript; a plain functional module sidesteps
 // them by construction, the same instinct behind giraffe's own Go style).
 
+import type { SdkPluginConfig } from "@anthropic-ai/claude-agent-sdk";
+
 export interface RunConfig {
   readonly runId: string;
   readonly label: string;
@@ -31,6 +33,15 @@ export interface RunConfig {
   // for a closed arm — see tool-lists.ts.
   readonly settingSources?: readonly string[];
   readonly strictMcpConfig?: boolean;
+  // Directive 045 §3: what carries a skill into an arm. With
+  // settingSources [] the SDK reads no skill from this host, so a
+  // plugin directory — the SDK's own shape, passed through verbatim —
+  // is the one explicit carrier, and `skills` names which of the
+  // discovered skills the model is shown (the SDK hides the rest from
+  // its listing). Both absent: the arm has what 029 gave it and
+  // nothing more.
+  readonly plugins?: readonly SdkPluginConfig[];
+  readonly skills?: readonly string[];
   // Passed through verbatim to the SDK's `sandbox` option. Left untyped
   // here (not re-declared) so this file does not drift from the SDK's own
   // SandboxSettings shape — see harness.ts's import instead.
@@ -67,6 +78,8 @@ export interface RunRecord {
     readonly permissionMode: string | undefined;
     readonly settingSources: readonly string[] | undefined;
     readonly strictMcpConfig: boolean | undefined;
+    readonly plugins: readonly SdkPluginConfig[] | undefined;
+    readonly skills: readonly string[] | undefined;
     readonly sandbox: unknown;
     readonly corpus: RunConfig["corpus"];
   };
@@ -79,6 +92,13 @@ export interface RunRecord {
     readonly model: string | null;
     readonly tools: readonly string[] | null;
     readonly permissionMode: string | null;
+    // Directive 045 §3: the skills the session lists and the plugins it
+    // loaded, as init reports them — 029's rule, verify against what the
+    // model was given. A skill's body still only reaches the model when
+    // it asks for it (a Skill tool call in the transcript); this says it
+    // was offered.
+    readonly skills: readonly string[] | null;
+    readonly plugins: readonly { name: string; path: string }[] | null;
   };
 
   // Straight from the SDK's final "result" message. Never computed by

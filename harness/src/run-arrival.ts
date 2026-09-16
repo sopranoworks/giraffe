@@ -35,6 +35,14 @@
 // parameterised instead (code-manners M6). Unset, the text is 030's own,
 // unchanged.
 //
+// Directive 045 §2: the aided arm also carries the giraffe skill — the
+// first thing since 030 to change what the agent knows about searching
+// rather than what giraffe prints. It is offered, not injected: the
+// SDK lists it in the system prompt and the agent loads its body with
+// the Skill tool if it chooses to, as it would installed. The prompt
+// below is unchanged; the record's actual.skills says it was offered
+// and the transcript says whether it was read.
+//
 // ARM=unaided|aided, CWD (the corpus root), RUN_ID, OUT_DIR, TASK_TEXT,
 // and (aided only) GIRAFFE_BIN are read from the environment — this runs
 // inside a container with its own mounts, not the host's (see
@@ -45,12 +53,15 @@ import { join } from "node:path";
 import { runOne, gitCommitOrNull } from "./harness.js";
 import {
   CLOSED_TOOLS,
+  AIDED_TOOLS,
   CLOSED_SETTING_SOURCES,
   STRICT_MCP_CONFIG,
   UNAIDED_BASH_PATTERNS,
   aidedBashPatterns,
   PERMISSION_MODE,
   SCOPED_READ_PATTERN,
+  GIRAFFE_SKILL_PLUGIN,
+  GIRAFFE_SKILL,
 } from "./tool-lists.js";
 
 const DEFAULT_TASK_TEXT = "Add an option that prefixes a Pod's name with its start timestamp. Where do you start?";
@@ -63,10 +74,11 @@ const arm = process.env.ARM === "aided" ? "aided" : "unaided";
 const giraffeBin = process.env.GIRAFFE_BIN ?? "/giraffe-bin/giraffe";
 
 async function main() {
-  const bashPatterns = arm === "aided" ? aidedBashPatterns(giraffeBin) : UNAIDED_BASH_PATTERNS;
+  const aided = arm === "aided";
+  const bashPatterns = aided ? aidedBashPatterns(giraffeBin) : UNAIDED_BASH_PATTERNS;
 
   const prompt =
-    arm === "aided"
+    aided
       ? `You have access to a command-line tool at ${giraffeBin}. It searches this codebase; run "${giraffeBin} --help" if you want to see its usage. ` +
         TASK_TEXT
       : TASK_TEXT;
@@ -77,11 +89,13 @@ async function main() {
       label: `arrival-${arm}`,
       prompt,
       cwd,
-      tools: CLOSED_TOOLS,
+      tools: aided ? AIDED_TOOLS : CLOSED_TOOLS,
       allowedTools: [SCOPED_READ_PATTERN, ...bashPatterns, "Bash(cd *)"],
       permissionMode: PERMISSION_MODE,
       settingSources: CLOSED_SETTING_SOURCES,
       strictMcpConfig: STRICT_MCP_CONFIG,
+      plugins: aided ? [{ type: "local", path: GIRAFFE_SKILL_PLUGIN }] : undefined,
+      skills: aided ? [GIRAFFE_SKILL] : undefined,
       maxTurns: 40,
       corpus: { root: cwd, commit: gitCommitOrNull(cwd) },
     },
