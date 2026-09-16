@@ -258,7 +258,12 @@ func matchesAny(name string, e entry.Entry, values []string) bool {
 				return true
 			}
 		case "line":
-			if strconv.Itoa(e.Line) == v {
+			// The value a result line prints (entry.Entry.LineRange —
+			// "19-62", or "19" for a one-liner) matches as pasted (§7);
+			// the bare start line matches too, so a caller who read
+			// line:19-62 and typed line:19 is not told the declaration
+			// is not there. A file entry has no line and matches neither.
+			if e.Line > 0 && (e.LineRange() == v || strconv.Itoa(e.Line) == v) {
 				return true
 			}
 		default:
@@ -392,10 +397,26 @@ func visible(e entry.Entry, invocationProject string) bool {
 // since it is weaker evidence of what the caller is looking for), then
 // within a tier declaration-before-file-entry, then
 // exported-before-unexported (§21 C-6 added the scope tie-break, §24
-// C-20 the declaration-versus-file one). §7's "do not tune further" was
+// C-20 the declaration-versus-file one), then shorter-name-first
+// (directive 042), then name, then path. §7's "do not tune further" was
 // written when the index held only top-level declarations; §29 treats
 // it as a calibration to recheck, not a permanent rule, now that
 // members have changed the population it was calibrated against.
+//
+// Shorter name first, within a tier: a substring tier holds every name
+// the word appears in, and the name the word covers more of is the
+// closer match — "NodeMetrics" and "MetricsSnapshot" answer "metrics"
+// more directly than "DefaultMetricsExporterConfig" does. Before this
+// the tie-break was the name itself, alphabetically, so a page of
+// eight showed whichever substring matches happened to start with A
+// through G: on gekka, `find metrics` (the first query in every one of
+// 041's aided runs) filled its page with ClusterMetrics*,
+// DefaultMetrics* and GossipMetrics* and never showed NodeMetrics or
+// MetricsSnapshot — the two types the task turned on — at all. §12
+// item 1: the ranking is tuned against real queries, and these are the
+// real queries. 041 built and measured this, and reverted it under its
+// own token-median rule; 042 takes it on this ground instead.
+//
 // invocationProject is the project the caller is searching from;
 // package-scope entries outside it are excluded before ranking, not
 // merely ranked low.
@@ -476,6 +497,9 @@ func Search(src Entries, word string, filter Filter, invocationProject string) [
 		}
 		if ri.scope != rj.scope {
 			return ri.scope < rj.scope
+		}
+		if len(ri.e.Name) != len(rj.e.Name) {
+			return len(ri.e.Name) < len(rj.e.Name)
 		}
 		if ri.e.Name != rj.e.Name {
 			return ri.e.Name < rj.e.Name

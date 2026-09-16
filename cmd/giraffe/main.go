@@ -83,11 +83,28 @@ type searchState struct {
 }
 
 func run(ctx context.Context, args []string) int {
+	// --help is the first thing every measured agent runs (041: every
+	// aided transcript since 030), and until directive 042 it got one
+	// usage line — nothing about what a result line carries, that
+	// members are indexed, that a place can be browsed, or what --query
+	// accepts. It answers with the help text now, on stdout, exit 0. A
+	// bare `giraffe` gets the same text on stderr, exit 2: the command
+	// was misused, but the reply is still the one that says how to use
+	// it.
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, helpText)
+		return 2
+	}
+	if isHelp(args) {
+		fmt.Print(helpText)
+		fmt.Print(indexedAttributes(ctx))
+		return 0
+	}
 	// find and prepare are mandatory and never implied (§4): a bare word
 	// is not treated as a search term, since both are themselves
 	// plausible identifiers in real code.
-	if len(args) == 0 || (args[0] != "find" && args[0] != "prepare") {
-		fmt.Fprintln(os.Stderr, "usage: giraffe find [<word>] [--query '<attr>:<value> ...'] [--page N] | giraffe prepare")
+	if args[0] != "find" && args[0] != "prepare" {
+		fmt.Fprint(os.Stderr, helpText)
 		return 2
 	}
 	sub, rest := args[0], args[1:]
@@ -288,7 +305,7 @@ func runFind(args []string, st searchState) int {
 		return 2
 	}
 	if word == "" && queryRaw == "" {
-		fmt.Fprintln(os.Stderr, "usage: giraffe find <word> [--query '<attr>:<value> ...'] [--page N] | giraffe find --query '<attr>:<value> ...' [--page N]")
+		fmt.Fprintln(os.Stderr, "usage: giraffe find <word> [--query '<attr>:<value> ...'] [--page N] | giraffe find --query '<attr>:<value> ...' [--page N]; giraffe --help explains")
 		return 2
 	}
 
@@ -323,6 +340,87 @@ func runFind(args []string, st searchState) int {
 	}
 	fmt.Print(output.FormatFrom(summary, matches, page))
 	return 0
+}
+
+// helpText is what --help, -h, help, and a bare or misused invocation
+// print (directive 042, taking 041's text and adding the range). It is
+// the tool's whole self-description to a caller that has never seen it
+// — the measured agents read it once and then decided how to explore —
+// so it says what is indexed, what a result line carries and what to
+// do with the range, how a browse lists a place, how --query matches,
+// and, as plainly, what is not indexed. It is also read once and then
+// re-read on every later turn of that caller's, so it is bounded like a
+// result page: 041's first version was 1,975 bytes and cost a 25-turn
+// run some 20k tokens of re-reading; this one says the same in under
+// 1,000 (TestHelpText_StaysSmall). It is static: the attributes and
+// kinds actually present in this repository's index follow it, from
+// the index itself (§6: "--help lists the four common attributes
+// always, plus the language-specific attributes actually present"),
+// see indexedAttributes.
+const helpText = `giraffe: an index of this repository's declarations (Go: types, funcs,
+methods, struct fields, consts, vars) and files, one entry each.
+
+  giraffe find <word>                          entries whose name, doc line or
+                                               path contains <word>, closest first
+  giraffe find <word> --query 'attr:value ...' the same, narrowed
+  giraffe find --query 'attr:value ...'        browse a place: everything at it
+  giraffe find ... --page N                    the next page of the same answer
+
+A result's line:A-B is the declaration's whole extent: sed -n 'A,Bp' <path>
+prints exactly it. Under each result: its source line, then its doc's
+first line - usually enough to judge it unopened. --query takes the
+attribute names result lines print (receiver: and type: for members);
+path: matches a substring, every other attribute exactly, no wildcards.
+Not indexed: call sites and bodies - grep for those.
+`
+
+// isHelp reports whether args asks for help: --help, -h or help as the
+// first argument, or --help anywhere after a subcommand (find --help).
+func isHelp(args []string) bool {
+	switch args[0] {
+	case "--help", "-h", "help":
+		return true
+	}
+	for _, a := range args[1:] {
+		if a == "--help" || a == "-h" {
+			return true
+		}
+	}
+	return false
+}
+
+// indexedAttributes renders the part of --help that comes from this
+// repository's own index (§6): the attribute names --query accepts
+// here, and the kind values present. Outside a repository, or when the
+// index cannot be built, it renders nothing — the static help already
+// printed is still correct, and the failure is find's to report when a
+// search is actually attempted, not help's.
+func indexedAttributes(ctx context.Context) string {
+	st, code := buildSearchState(ctx)
+	if code != 0 {
+		return ""
+	}
+	defer func() {
+		for _, s := range st.stores {
+			_ = s.Close()
+		}
+	}()
+	attrs := make([]string, 0)
+	for a := range query.ValidAttributes(st.entries) {
+		attrs = append(attrs, a)
+	}
+	sort.Strings(attrs)
+	kindSet := make(map[string]bool)
+	for e := range st.entries.All() {
+		kindSet[e.Kind] = true
+	}
+	kinds := make([]string, 0, len(kindSet))
+	for k := range kindSet {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	return fmt.Sprintf("\nattributes in this index: %s\nkind values in this index: %s\n",
+		strings.Join(attrs, " "), strings.Join(kinds, " "))
 }
 
 // runPrepare implements `giraffe prepare` (§4, §24 C-21). find already

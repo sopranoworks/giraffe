@@ -359,7 +359,10 @@ func FormatFrom(s Summary, matches []entry.Entry, page int) string {
 
 // resultLine renders one result. line prints whenever the entry has one
 // (a generic file entry addresses no specific line, §31.4 — absence is
-// the correct encoding, not a placeholder). project, ext and lang each
+// the correct encoding, not a placeholder), as the declaration's whole
+// range — line:19-62, or line:19 for a one-liner (directive 042;
+// entry.Entry.LineRange is the one definition of that form, shared
+// with --query's matching). project, ext and lang each
 // print only when they discriminate (§25 C-25): project only across more
 // than one project (unchanged from §24); ext only when it is not
 // recoverable from lang — either lang is unknown, so ext is all there
@@ -372,8 +375,8 @@ func FormatFrom(s Summary, matches []entry.Entry, page int) string {
 func resultLine(e entry.Entry, showProject, showLang bool, extVaries map[string]bool) string {
 	var line strings.Builder
 	fmt.Fprintf(&line, "name:%s kind:%s path:%s", quote(e.Name), quote(e.Kind), quote(e.Path))
-	if e.Line > 0 {
-		fmt.Fprintf(&line, " line:%d", e.Line)
+	if r := e.LineRange(); r != "" {
+		fmt.Fprintf(&line, " line:%s", r)
 	}
 	if showProject && e.Project != "" {
 		fmt.Fprintf(&line, " project:%s", quote(e.Project))
