@@ -24,11 +24,20 @@
 // against it, and say nothing — "passed over" means nothing in the run
 // refers to it afterwards, which is the most a transcript can say.
 //
-// Usage: tsx src/account-output.ts <transcript.jsonl>...
+// Usage: tsx src/account-output.ts [--landing <points.json>] <transcript.jsonl>...
 // One transcript: the call-by-call account. Several: the totals per run.
+//
+// Directive 049 §1–§3 asks a question of every tool call, not only
+// giraffe's: what each one was — a giraffe call whose answer was used
+// or was not, a read of a file giraffe had named or had not, a search,
+// a listing — what it cost in tokens, and at which call the run first
+// put one of the task's landing points on the page. --landing names the
+// points, as analyze-arrival.ts takes them; without it the landing
+// columns are blank.
 
 import { basename } from "node:path";
-import { readTranscript, finalText, type ToolUse } from "./transcript.js";
+import { readTranscript, finalText, toolCallCosts, type ToolUse, type Transcript } from "./transcript.js";
+import { namesLine, namesPath, readLandingPoints, type LandingPoint, type LandingPoints } from "./landing.js";
 
 // giraffe's own section headers (specification §7).
 const SECTIONS = ["## index", "## results", "## source", "## truncated", "## try next", "## warnings"] as const;
@@ -343,7 +352,14 @@ function steer(sections: readonly Section[], nextGiraffe: string | undefined): S
 }
 
 function accountFor(path: string): { file: string; calls: Call[]; finalAnswer: string } {
-  const { turns, results: resultText, final } = readTranscript(path);
+  const transcript = readTranscript(path);
+  const { calls, finalAnswer } = giraffeCalls(transcript);
+  return { file: basename(path), calls, finalAnswer };
+}
+
+// Every giraffe call of a run, with what became of what it printed.
+function giraffeCalls(transcript: Transcript): { calls: Call[]; finalAnswer: string } {
+  const { turns, results: resultText, final } = transcript;
   const calls: ToolUse[] = [];
   const turnOf = new Map<string, number>();
   for (const [i, t] of turns.entries()) {
@@ -387,7 +403,7 @@ function accountFor(path: string): { file: string; calls: Call[]; finalAnswer: s
       tryNext: steer(byName.get("## try next") ?? [], nextGiraffe),
     });
   }
-  return { file: basename(path), calls: out, finalAnswer: answer };
+  return { calls: out, finalAnswer: answer };
 }
 
 function attributeBytes(calls: readonly Call[]): Map<string, { bytes: number; onUsed: number; count: number }> {
@@ -462,6 +478,485 @@ function printResultTotals(calls: readonly Call[]) {
   console.log(`  passed over                  ${String(over.length).padStart(5)}  ${String(bytesOf(over)).padStart(7)} bytes  ${((100 * bytesOf(over)) / bytesOf(all)).toFixed(1)}% of result bytes`);
 }
 
+// ---------------------------------------------------------------------
+// Directive 049 §1–§3: every call of a run, named by what it did.
+
+// What a tool call was. The giraffe kinds are decided by what became of
+// the results it printed (§1: "a giraffe call whose results were used by
+// none"); a read is named or unnamed by whether an earlier giraffe call
+// had printed the file's path on a result line or a ## source header.
+type StepKind =
+  | "skill"
+  | "giraffe help"
+  | "giraffe nothing found"
+  | "giraffe used"
+  | "giraffe none used"
+  | "read named"
+  | "read unnamed"
+  | "search"
+  | "list"
+  | "other";
+
+// How a read was shaped: the whole file, a range of it, or a grep
+// through it.
+type ReadShape = "whole" | "ranged" | "grep";
+
+interface Step {
+  readonly index: number;
+  readonly kind: StepKind;
+  // The call with the noise taken out — the binary's path, the pipes
+  // through head, the echo separators — so two runs' calls can be
+  // compared for being the same call.
+  readonly signature: string;
+  readonly bytes: number;
+  readonly added: number;
+  readonly carried: number;
+  readonly files: readonly string[];
+  readonly shape: ReadShape | null;
+  // A whole-file read of a file some earlier giraffe result had printed
+  // a line: range for — 043's finding, the range on the page and the
+  // file read whole regardless.
+  readonly rangeOnPage: boolean;
+  readonly landed: readonly string[];
+  // For a giraffe call: how many results it printed, and whether it was
+  // truncated. Zero results with no truncation is a miss.
+  readonly resultCount: number;
+  readonly truncated: boolean;
+  // The two shapes of leaving giraffe for grep: a search whose pattern
+  // is a name giraffe had already printed (its callers — --help says
+  // "not indexed: call sites - grep for those"), and a read of a file
+  // giraffe never named but a search's output had.
+  readonly follows: "a printed name" | "a search hit" | null;
+}
+
+interface Run {
+  readonly file: string;
+  readonly tokens: number;
+  readonly steps: readonly Step[];
+  // The index of the first step that put any landing point on the page,
+  // and of the step by which every point had been; null when never.
+  readonly firstLanding: number | null;
+  readonly allLanding: number | null;
+  // Per landing point, the first step that put it on the page.
+  readonly landings: ReadonlyMap<string, Step>;
+}
+
+// The file extensions a command's arguments are read as files by. A
+// grep pattern like c.actors would pass a looser test, and so would the
+// _test.go of a `grep -v "_test.go"`, which is why a name starts with a
+// letter or a digit.
+const FILE_EXTENSIONS = ["go", "md", "json", "yaml", "yml", "toml", "txt", "proto", "sh", "mod", "sum", "html", "ts"];
+const FILE_TOKEN = new RegExp(`(?<![\\w./=*-])(/?(?:[\\w.-]+/)*[A-Za-z0-9][\\w-]*(?:\\.[\\w-]+)*\\.(?:${FILE_EXTENSIONS.join("|")}))(?![\\w/-])`, "g");
+
+// The corpus is mounted at /corpus in the container and giraffe prints
+// paths relative to it; the agents type both.
+function relative(path: string): string {
+  return path.replace(/^\/corpus\//, "").replace(/^\.\//, "");
+}
+
+function samePath(a: string, b: string): boolean {
+  const x = relative(a);
+  const y = relative(b);
+  return x === y || x.endsWith("/" + y) || y.endsWith("/" + x);
+}
+
+function filesRead(u: ToolUse): string[] {
+  if (u.name === "Read") return [relative(u.command)];
+  if (u.name !== "Bash") return [];
+  return [...new Set([...u.command.matchAll(FILE_TOKEN)].map((m) => relative(m[1] as string)))];
+}
+
+function overlaps(a: readonly [number, number], b: readonly [number, number]): boolean {
+  return a[0] <= b[1] && a[1] >= b[0];
+}
+
+// The line ranges a read asked for: Read's offset and limit, sed's A,Bp,
+// head -N from the top. Empty for a whole-file read.
+function readRanges(u: ToolUse): (readonly [number, number])[] {
+  if (u.name === "Read") {
+    const offset = typeof u.input.offset === "number" ? u.input.offset : 1;
+    const limit = typeof u.input.limit === "number" ? u.input.limit : null;
+    return u.input.offset === undefined && limit === null ? [] : [[offset, limit === null ? Number.MAX_SAFE_INTEGER : offset + limit - 1]];
+  }
+  const out: (readonly [number, number])[] = [];
+  for (const m of u.command.matchAll(/(\d+),\s*(\d+)p/g)) out.push([Number(m[1]), Number(m[2])]);
+  for (const m of u.command.matchAll(/head -n? ?(\d+)/g)) out.push([1, Number(m[1])]);
+  return out;
+}
+
+function readShape(u: ToolUse): ReadShape | null {
+  if (u.name === "Read") return readRanges(u).length === 0 ? "whole" : "ranged";
+  if (u.name !== "Bash") return null;
+  const c = u.command;
+  if (/\b(sed|head|tail|awk)\b/.test(c)) return "ranged";
+  if (/\bcat\b/.test(c)) return "whole";
+  if (/\b(grep|rg)\b/.test(c)) return "grep";
+  return null;
+}
+
+function stepKindOf(u: ToolUse, call: Call | undefined, files: readonly string[], named: boolean): StepKind {
+  if (u.name === "Skill") return "skill";
+  if (call !== undefined) {
+    if (call.results.some((r) => usedStrongly(r.use))) return "giraffe used";
+    if (call.results.length > 0) return "giraffe none used";
+    if (call.tryNext.sections > 0) return "giraffe nothing found";
+    return "giraffe help";
+  }
+  if (files.length > 0) return named ? "read named" : "read unnamed";
+  const first = u.command.replace(/^cd \S+ *(&&|;) */, "").split(/\s+/)[0] ?? "";
+  if (first === "grep" || first === "rg" || first === "find") return "search";
+  if (first === "ls" || first === "wc" || first === "git" || first === "tree") return "list";
+  return "other";
+}
+
+function signatureOf(u: ToolUse, kind: StepKind, files: readonly string[]): string {
+  if (kind.startsWith("giraffe")) {
+    return u.command
+      .replace(/\S*giraffe\b/g, "giraffe")
+      .replace(/cd \S+ *(&&|;) */g, "")
+      .replace(/2>&1/g, "")
+      .replace(/\|\s*(head|sed|grep|tail)[^;|]*/g, "")
+      .replace(/echo\s+("[^"]*"|'[^']*'|\S+)\s*(;|&&)?/g, "")
+      .replace(/\s*;\s*/g, " ; ")
+      .replace(/\s+/g, " ")
+      .replace(/ ; $/, "")
+      .trim();
+  }
+  if (kind.startsWith("read")) return `${kind} ${files.join(" ")}`;
+  if (kind === "search") {
+    const pattern = /(?:grep|rg)\s+(?:-\S+\s+)*("[^"]*"|'[^']*'|\S+)/.exec(u.command);
+    return `grep ${pattern?.[1] ?? ""}`;
+  }
+  return kind;
+}
+
+// The landing points a step put on the page. A giraffe call names one
+// by printing its path (and, for a range, an overlapping line:); a read
+// by reading the file (the whole of it, or lines overlapping the
+// range); a search by an output line that names the place the way an
+// answer would. Listings and the skill load name nothing.
+function landedOn(u: ToolUse, kind: StepKind, call: Call | undefined, files: readonly string[], output: string, points: LandingPoints): string[] {
+  const out: string[] = [];
+  const atPlace = (path: string, range: readonly [number, number] | null, p: LandingPoint) =>
+    samePath(path, p.path) && (p.lines === undefined || (range !== null && overlaps(range, p.lines)));
+  for (const [name, p] of Object.entries(points)) {
+    let there = false;
+    if (call !== undefined) {
+      there = call.results.some((r) => atPlace(r.result.path, r.result.range, p)) || call.sources.some((s) => atPlace(s.source.path, s.source.range, p));
+    } else if (kind.startsWith("read")) {
+      const ranges = readRanges(u);
+      const whole = readShape(u) === "whole";
+      there = files.some((f) => samePath(f, p.path)) && (p.lines === undefined || whole || ranges.some((r) => overlaps(r, p.lines!)) || namesLine(output, p.path, p.lines));
+    } else if (kind === "search" || kind === "other") {
+      there = p.lines === undefined ? namesPath(output, p.path) : namesLine(output, p.path, p.lines);
+    }
+    if (there) out.push(name);
+  }
+  return out;
+}
+
+function runOf(file: string, transcript: Transcript, calls: readonly Call[], landing: LandingPoints | null): Run {
+  const costs = toolCallCosts(transcript.turns, transcript.results);
+  const byIndex = new Map(calls.map((c) => [c.index, c]));
+  const uses = transcript.turns.flatMap((t) => t.toolUses);
+  const printed = new Set<string>();
+  const ranged = new Set<string>();
+  const names = new Set<string>();
+  let lastSearchOutput = "";
+  const steps: Step[] = [];
+  const landings = new Map<string, Step>();
+  let firstLanding: number | null = null;
+  let allLanding: number | null = null;
+  for (const [i, u] of uses.entries()) {
+    const index = i + 1;
+    const call = byIndex.get(index);
+    const cost = costs[i];
+    const files = call === undefined ? filesRead(u) : [];
+    const named = files.some((f) => [...printed].some((p) => samePath(f, p)));
+    const kind = stepKindOf(u, call, files, named);
+    const shape = kind.startsWith("read") ? readShape(u) : null;
+    const rangeOnPage = shape === "whole" && files.some((f) => [...ranged].some((p) => samePath(f, p)));
+    const output = transcript.results.get(u.id) ?? "";
+    const landed = landing === null ? [] : landedOn(u, kind, call, files, output, landing);
+    const follows =
+      kind === "search" && [...names].some((n) => n.length > 2 && new RegExp(`\\b${escapeRegExp(n)}\\b`).test(u.command))
+        ? "a printed name"
+        : kind === "read unnamed" && files.some((f) => namesPath(lastSearchOutput, f))
+          ? "a search hit"
+          : null;
+    if (kind === "search") lastSearchOutput = output;
+    if (landed.length > 0 && firstLanding === null) firstLanding = index;
+    if (call !== undefined) {
+      for (const r of call.results) {
+        printed.add(r.result.path);
+        names.add(r.result.name);
+        if (r.result.range !== null) ranged.add(r.result.path);
+      }
+      for (const s of call.sources) {
+        printed.add(s.source.path);
+        if (s.source.range !== null) ranged.add(s.source.path);
+      }
+    }
+    const step: Step = {
+      index,
+      kind,
+      signature: signatureOf(u, kind, files),
+      bytes: output.length,
+      added: cost?.added ?? 0,
+      carried: cost?.carried ?? 0,
+      files,
+      shape,
+      rangeOnPage,
+      landed,
+      resultCount: call?.results.length ?? 0,
+      truncated: (call?.truncated.sections ?? 0) > 0,
+      follows,
+    };
+    steps.push(step);
+    for (const name of landed) if (!landings.has(name)) landings.set(name, step);
+    if (landing !== null && allLanding === null && landings.size === Object.keys(landing).length) allLanding = index;
+  }
+  const f = transcript.final as { usage?: Record<string, number> } | null;
+  const usage = f?.usage ?? {};
+  const tokens = (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+  return { file, tokens, steps, firstLanding, allLanding, landings };
+}
+
+const KINDS: readonly StepKind[] = ["skill", "giraffe help", "giraffe nothing found", "giraffe used", "giraffe none used", "read named", "read unnamed", "search", "list", "other"];
+const KIND_CODE: Record<StepKind, string> = {
+  skill: "S",
+  "giraffe help": "H",
+  "giraffe nothing found": "G0",
+  "giraffe used": "G+",
+  "giraffe none used": "G-",
+  "read named": "Rn",
+  "read unnamed": "Ru",
+  search: "Q",
+  list: "L",
+  other: "O",
+};
+
+function mean(xs: readonly number[]): number {
+  return xs.length === 0 ? 0 : xs.reduce((s, x) => s + x, 0) / xs.length;
+}
+
+function count(steps: readonly Step[], kind: StepKind): number {
+  return steps.filter((s) => s.kind === kind).length;
+}
+
+function wholeReads(run: Run): number {
+  return run.steps.filter((s) => s.shape === "whole").length;
+}
+
+// §1: the per-call classification, per run and pooled; the calls before
+// and after the first landing point; the cheapest third of runs against
+// the dearest, by calls; and at each call position, how far the runs
+// still agree on what to ask.
+function printSteps(runs: readonly Run[]) {
+  const codes = KINDS.map((k) => KIND_CODE[k]);
+  console.log(`\n# every call, by what it did (${runs.length} runs)`);
+  console.log(`  ${codes.map((c) => c.padStart(3)).join("")}  S skill, H giraffe --help, G0 giraffe found nothing, G+ giraffe result used, G- giraffe nothing used,`);
+  console.log(`  ${"".padStart(3 * codes.length)}  Rn read of a file giraffe named, Ru read of one it had not, Q search, L listing, O other; * marks the first landing point`);
+  console.log(`\nrun                            tokens calls ${codes.map((c) => c.padStart(3)).join("")} whole  first  all  sequence`);
+  for (const r of runs) {
+    const seq = r.steps.map((s) => KIND_CODE[s.kind] + (s.index === r.firstLanding ? "*" : "")).join(" ");
+    console.log(
+      `${r.file.replace(".transcript.jsonl", "").padEnd(28)} ${String(r.tokens).padStart(8)} ${String(r.steps.length).padStart(5)} ${KINDS.map((k) => String(count(r.steps, k)).padStart(3)).join("")} ${String(wholeReads(r)).padStart(5)}  ${String(r.firstLanding ?? "-").padStart(5)} ${String(r.allLanding ?? "-").padStart(4)}  ${seq}`
+    );
+  }
+
+  printPooledKinds(runs);
+  printLanding(runs);
+  printThirds(runs);
+  printPositions(runs);
+}
+
+function printPooledKinds(runs: readonly Run[]) {
+  const all = runs.flatMap((r) => r.steps);
+  const carriedAll = all.reduce((s, x) => s + x.carried, 0) || 1;
+  console.log(`\npooled: ${all.length} calls over ${runs.length} runs`);
+  console.log(`  kind                     calls  per run    added tokens  carried tokens  share`);
+  for (const k of KINDS) {
+    const xs = all.filter((s) => s.kind === k);
+    const carried = xs.reduce((s, x) => s + x.carried, 0);
+    console.log(`  ${k.padEnd(24)} ${String(xs.length).padStart(5)}  ${mean(runs.map((r) => count(r.steps, k))).toFixed(1).padStart(7)}  ${String(xs.reduce((s, x) => s + x.added, 0)).padStart(14)}  ${String(carried).padStart(14)}  ${((100 * carried) / carriedAll).toFixed(1).padStart(5)}%`);
+  }
+}
+
+// Where the landing points were first put on the page, and by what.
+function printLanding(runs: readonly Run[]) {
+  const codes = KINDS.map((k) => KIND_CODE[k]);
+  const landed = runs.filter((r) => r.firstLanding !== null);
+  if (landed.length > 0) {
+    console.log(`\nfirst landing point on the page: ${landed.length} of ${runs.length} runs`);
+    console.log(`  calls before and including it   mean ${mean(landed.map((r) => r.firstLanding!)).toFixed(1)}   median ${median(landed.map((r) => r.firstLanding!))}`);
+    console.log(`  calls after it                  mean ${mean(landed.map((r) => r.steps.length - r.firstLanding!)).toFixed(1)}   median ${median(landed.map((r) => r.steps.length - r.firstLanding!))}`);
+    const every = runs.filter((r) => r.allLanding !== null);
+    console.log(`  every point on the page         ${every.length} runs; at call mean ${mean(every.map((r) => r.allLanding!)).toFixed(1)}, with mean ${mean(every.map((r) => r.steps.length - r.allLanding!)).toFixed(1)} calls after`);
+    const names = [...new Set(runs.flatMap((r) => [...r.landings.keys()]))];
+    console.log(`\n  point                 runs   first on the page at call (median)   put there by`);
+    for (const name of names) {
+      const at = runs.filter((r) => r.landings.has(name)).map((r) => r.landings.get(name)!);
+      const by = new Map<string, number>();
+      for (const s of at) by.set(s.kind, (by.get(s.kind) ?? 0) + 1);
+      console.log(`  ${name.padEnd(20)} ${String(at.length).padStart(5)}   ${String(median(at.map((s) => s.index))).padStart(6)}                              ${[...by].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(", ")}`);
+    }
+    const byKind = (rs: readonly Run[], pick: (r: Run) => readonly Step[]) => KINDS.map((k) => mean(rs.map((r) => count(pick(r), k))).toFixed(1).padStart(5)).join("");
+    console.log(`\n  per run, mean calls          ${codes.map((c) => c.padStart(5)).join("")}`);
+    console.log(`  before the first point       ${byKind(landed, (r) => r.steps.slice(0, r.firstLanding!))}`);
+    console.log(`  after it                     ${byKind(landed, (r) => r.steps.slice(r.firstLanding!))}`);
+  }
+}
+
+// The cheapest third of runs against the dearest, by calls, and the
+// class of calls that leaves giraffe for grep.
+function printThirds(runs: readonly Run[]) {
+  const codes = KINDS.map((k) => KIND_CODE[k]);
+  const all = runs.flatMap((r) => r.steps);
+  const sorted = [...runs].sort((a, b) => a.steps.length - b.steps.length);
+  const third = Math.floor(runs.length / 3);
+  if (third > 0) {
+    console.log(`\ncheapest third against dearest third, by calls (${third} runs each)`);
+    console.log(`  third      calls   tokens  ${codes.map((c) => c.padStart(5)).join("")}  whole  first  after`);
+    for (const [label, rs] of [
+      ["cheapest", sorted.slice(0, third)],
+      ["middle", sorted.slice(third, runs.length - third)],
+      ["dearest", sorted.slice(runs.length - third)],
+    ] as const) {
+      const first = rs.filter((r) => r.firstLanding !== null);
+      console.log(
+        `  ${label.padEnd(9)} ${mean(rs.map((r) => r.steps.length)).toFixed(1).padStart(6)} ${Math.round(mean(rs.map((r) => r.tokens))).toString().padStart(8)}  ${KINDS.map((k) => mean(rs.map((r) => count(r.steps, k))).toFixed(1).padStart(5)).join("")}  ${mean(rs.map(wholeReads)).toFixed(1).padStart(5)}  ${mean(first.map((r) => r.firstLanding!)).toFixed(1).padStart(5)}  ${mean(first.map((r) => r.steps.length - r.firstLanding!)).toFixed(1).padStart(5)}`
+      );
+    }
+  }
+
+  const topOf = (label: string, xs: readonly Step[], key: (s: Step) => string) => {
+    const t = new Map<string, number>();
+    for (const x of xs) t.set(key(x), (t.get(key(x)) ?? 0) + 1);
+    console.log(`\n${label} (${xs.length}): ${[...t].sort((a, b) => b[1] - a[1]).slice(0, 14).map(([k, n]) => `${k} ${n}`).join(", ")}`);
+  };
+  topOf("searches, by pattern", all.filter((s) => s.kind === "search"), (s) => s.signature.replace(/^grep /, ""));
+  topOf("reads of files giraffe had not named, by file", all.filter((s) => s.kind === "read unnamed"), (s) => s.files.join(" "));
+  const hunt = (rs: readonly Run[]) => {
+    const xs = rs.flatMap((r) => r.steps);
+    const searches = xs.filter((s) => s.kind === "search");
+    const forName = searches.filter((s) => s.follows === "a printed name");
+    const unnamed = xs.filter((s) => s.kind === "read unnamed");
+    const fromHit = unnamed.filter((s) => s.follows === "a search hit");
+    const carried = [...forName, ...fromHit].reduce((s, x) => s + x.carried, 0);
+    const inRuns = rs.filter((r) => r.steps.some((x) => x.follows === "a printed name")).length;
+    return `searches for a name giraffe had printed ${forName.length} of ${searches.length} (in ${inRuns} of ${rs.length} runs); unnamed reads of a file a search had hit ${fromHit.length} of ${unnamed.length}; together ${forName.length + fromHit.length} calls, ${(
+      (forName.length + fromHit.length) / rs.length
+    ).toFixed(1)} a run, ${carried} tokens carried (${((100 * carried) / (xs.reduce((s, x) => s + x.carried, 0) || 1)).toFixed(1)}%)`;
+  };
+  console.log(`\nleaving giraffe for grep: ${hunt(runs)}`);
+  if (third > 0) {
+    console.log(`  cheapest third: ${hunt(sorted.slice(0, third))}`);
+    console.log(`  dearest third:  ${hunt(sorted.slice(runs.length - third))}`);
+  }
+}
+
+// At each call position, how far the runs still agree on what to ask.
+function printPositions(runs: readonly Run[]) {
+  console.log(`\nat each call position: the calls the runs made, most common first (runs still at that position)`);
+  for (let at = 0; at < 12; at++) {
+    const here = runs.filter((r) => r.steps.length > at);
+    if (here.length === 0) break;
+    const tally = new Map<string, number>();
+    for (const r of here) {
+      const sig = r.steps[at]!.signature;
+      tally.set(sig, (tally.get(sig) ?? 0) + 1);
+    }
+    const top = [...tally].sort((a, b) => b[1] - a[1]).slice(0, 3);
+    console.log(`  call ${String(at + 1).padStart(2)} (${here.length} runs, ${tally.size} distinct): ${top.map(([sig, n]) => `${n}× ${sig.slice(0, 60)}`).join(" | ")}`);
+  }
+}
+
+// §2: the giraffe calls whose answer nothing followed from — none of
+// their results opened, cited or re-queried — and the ones that found
+// nothing at all; what they cost, and what they have in common.
+function printUnused(runs: readonly Run[]) {
+  const all = runs.flatMap((r) => r.steps);
+  const giraffe = all.filter((s) => s.kind.startsWith("giraffe"));
+  const carriedAll = all.reduce((s, x) => s + x.carried, 0) || 1;
+  const tokensAll = runs.reduce((s, r) => s + r.tokens, 0) || 1;
+  console.log(`\n# giraffe calls nothing followed from (${giraffe.length} giraffe calls in ${runs.length} runs)`);
+  for (const kind of ["giraffe none used", "giraffe nothing found"] as const) {
+    const xs = giraffe.filter((s) => s.kind === kind);
+    const carried = xs.reduce((s, x) => s + x.carried, 0);
+    console.log(`\n${kind}: ${xs.length} calls (${((100 * xs.length) / giraffe.length).toFixed(1)}% of giraffe calls), ${xs.reduce((s, x) => s + x.bytes, 0)} bytes, ${xs.reduce((s, x) => s + x.added, 0)} tokens added, ${carried} carried (${((100 * carried) / carriedAll).toFixed(1)}% of all carried, ${((100 * carried) / tokensAll).toFixed(1)}% of the runs' tokens)`);
+    const shape = (s: Step) => {
+      const invocations = s.signature.split(" ; ").length;
+      const bare = /^giraffe find (?:count )?["']?[\w.-]+["']?$/.test(s.signature);
+      const query = s.signature.includes("--query");
+      return invocations > 1 ? "chained invocations" : bare ? "one bare word" : query && /find --query/.test(s.signature) ? "query only, no word" : query ? "word narrowed by a query" : "other";
+    };
+    const tally = (label: string, key: (s: Step) => string) => {
+      const t = new Map<string, number>();
+      for (const s of xs) t.set(key(s), (t.get(key(s)) ?? 0) + 1);
+      console.log(`  ${label}: ${[...t].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(", ")}`);
+    };
+    if (xs.length === 0) continue;
+    tally("shape", shape);
+    tally("results printed", (s) => (s.resultCount === 0 ? "0" : s.resultCount <= 3 ? "1-3" : s.resultCount <= 7 ? "4-7" : "8+") + (s.truncated ? " truncated" : ""));
+    tally("position among the run's giraffe calls", (s) => {
+      const run = runs.find((r) => r.steps.includes(s))!;
+      const at = run.steps.filter((x) => x.kind.startsWith("giraffe") && x.kind !== "giraffe help" && x.index <= s.index).length;
+      const of = run.steps.filter((x) => x.kind.startsWith("giraffe") && x.kind !== "giraffe help").length;
+      return at === 1 ? "first" : at === 2 ? "second" : at === of ? "last" : "between";
+    });
+    tally("the call after it", (s) => {
+      const run = runs.find((r) => r.steps.includes(s))!;
+      const next = run.steps[s.index];
+      return next === undefined ? "none, the run's last call" : next.kind;
+    });
+    tally("before or after the first landing point", (s) => {
+      const run = runs.find((r) => r.steps.includes(s))!;
+      return run.firstLanding === null ? "no landing" : s.index < run.firstLanding ? "before" : s.index === run.firstLanding ? "at" : "after";
+    });
+    const words = new Map<string, number>();
+    for (const s of xs) {
+      for (const m of s.signature.matchAll(/find (?:count )?["']?([\w.-]+)["']?(?=\s|$)/g)) {
+        if (m[1] !== "--query") words.set(m[1] as string, (words.get(m[1] as string) ?? 0) + 1);
+      }
+      for (const m of s.signature.matchAll(/--query '([^']+)'/g)) words.set(`[${m[1]}]`, (words.get(`[${m[1]}]`) ?? 0) + 1);
+    }
+    console.log(`  words and queries, most common: ${[...words].sort((a, b) => b[1] - a[1]).slice(0, 25).map(([w, n]) => `${w} ${n}`).join(", ")}`);
+  }
+}
+
+// §3: the reads — whole-file against ranged, of files giraffe had named
+// against not, and for the whole-file ones whether a range for that file
+// was already on the page.
+function printReads(runs: readonly Run[]) {
+  const all = runs.flatMap((r) => r.steps);
+  const reads = all.filter((s) => s.kind.startsWith("read"));
+  const carriedAll = all.reduce((s, x) => s + x.carried, 0) || 1;
+  console.log(`\n# reads (${reads.length} in ${runs.length} runs, ${(reads.length / runs.length).toFixed(1)} a run)`);
+  console.log(`  shape    named?    calls   per run     bytes    added  carried   share   range on page`);
+  for (const shape of ["whole", "ranged", "grep"] as const) {
+    for (const kind of ["read named", "read unnamed"] as const) {
+      const xs = reads.filter((s) => s.shape === shape && s.kind === kind);
+      const carried = xs.reduce((s, x) => s + x.carried, 0);
+      const onPage = shape === "whole" ? `${xs.filter((s) => s.rangeOnPage).length} of ${xs.length}` : "";
+      console.log(`  ${shape.padEnd(8)} ${(kind === "read named" ? "named" : "unnamed").padEnd(8)} ${String(xs.length).padStart(6)}  ${(xs.length / runs.length).toFixed(2).padStart(7)}  ${String(xs.reduce((s, x) => s + x.bytes, 0)).padStart(8)}  ${String(xs.reduce((s, x) => s + x.added, 0)).padStart(7)}  ${String(carried).padStart(7)}  ${((100 * carried) / carriedAll).toFixed(1).padStart(5)}%   ${onPage}`);
+    }
+  }
+  const whole = reads.filter((s) => s.shape === "whole");
+  const files = new Map<string, number>();
+  for (const s of whole) for (const f of s.files) files.set(f, (files.get(f) ?? 0) + 1);
+  console.log(`  files read whole, most often: ${[...files].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([f, n]) => `${f} ${n}`).join(", ")}`);
+  const perRun = runs.map((r) => r.steps.filter((s) => s.shape === "whole").length);
+  console.log(`  whole-file reads per run: median ${median(perRun)}, range ${Math.min(...perRun)}-${Math.max(...perRun)}; runs with none ${perRun.filter((n) => n === 0).length}`);
+}
+
+function median(xs: readonly number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  const at = (i: number) => s[i] ?? 0;
+  return s.length % 2 === 1 ? at(mid) : Math.round((at(mid - 1) + at(mid)) / 2);
+}
+
 function printOne(path: string) {
   const { file, calls } = accountFor(path);
   console.log(`# ${file}`);
@@ -491,11 +986,15 @@ function printOne(path: string) {
   printResultTotals(calls);
 }
 
-function printMany(paths: readonly string[]) {
+function printMany(paths: readonly string[], landing: LandingPoints | null) {
   console.log(`run                              calls  printed  results  used  result bytes  used bytes`);
   const every: Call[] = [];
+  const runs: Run[] = [];
   for (const path of paths) {
-    const { file, calls } = accountFor(path);
+    const transcript = readTranscript(path);
+    const { calls } = giraffeCalls(transcript);
+    const file = basename(path);
+    runs.push(runOf(file, transcript, calls, landing));
     every.push(...calls);
     const all = calls.flatMap((c) => c.results);
     const usedCount = all.filter((r) => used(r.use)).length;
@@ -506,6 +1005,9 @@ function printMany(paths: readonly string[]) {
     );
   }
   printUptake(paths.length, every);
+  printSteps(runs);
+  printUnused(runs);
+  printReads(runs);
 }
 
 // Directive 048 §2/§3: over many runs at once, what became of the two
@@ -544,12 +1046,15 @@ function printUptake(runs: number, calls: readonly Call[]) {
   console.log(`\nattributes typed into a query: ${[...queried].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} (${n})`).join(", ")}`);
 }
 
-const args = process.argv.slice(2);
+const argv = process.argv.slice(2);
+const landingAt = argv.indexOf("--landing");
+const landing = landingAt >= 0 ? readLandingPoints(argv[landingAt + 1] as string) : null;
+const args = landingAt >= 0 ? argv.filter((_, i) => i !== landingAt && i !== landingAt + 1) : argv;
 if (args.length === 0) {
-  console.error("usage: tsx src/account-output.ts <transcript.jsonl>...");
+  console.error("usage: tsx src/account-output.ts [--landing <points.json>] <transcript.jsonl>...");
   process.exitCode = 1;
 } else if (args.length === 1) {
   printOne(args[0] as string);
 } else {
-  printMany(args);
+  printMany(args, landing);
 }
