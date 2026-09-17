@@ -73,6 +73,19 @@ Attributes in a result line are exactly what the query accepts. Copy
 them; do not invent them. An unknown attribute is an error, not a
 filter that quietly does nothing.
 
+What they select:
+
+- `kind:` the sort of declaration — a type, a func, a method, a field
+- `scope:` exported, or package-private
+- `type:` for a field or method, the type it belongs to — so
+  `type:Options` is every member of that type
+- `receiver:` for a method, the type it hangs off — that type's methods
+- `line:` the declaration's whole extent, to read exactly it
+
+`--query 'name:Prefix type:Options'` is the shape of "the member of
+this type called that", and it answers in one call what a search and a
+read would.
+
 Narrow by what you actually know. Knowing the area is different from
 knowing the name — if you know where it lives, say so and the answer
 gets short; if you only know roughly what it does, stay wide and use
