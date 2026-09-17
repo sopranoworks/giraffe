@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { query, type SDKMessage, type SdkPluginConfig } from "@anthropic-ai/claude-agent-sdk";
-import type { RunConfig, RunRecord } from "./types.js";
+import type { RunConfig, RunRecord, Sampling } from "./types.js";
 
 function sdkVersion(): string {
   // Read the file directly rather than `require(".../package.json")` —
@@ -32,12 +32,85 @@ export function gitCommitOrNull(root: string): string | null {
   }
 }
 
+// Directive 047 §1: the sampling parameters, observed rather than
+// assumed. The Claude Code process logs the fields of every request it
+// makes — "[API REQUEST DETAIL] {model, thinking, output_config,
+// temperature, ...}" — but only at its `verbose` level, one above what
+// `--debug` alone selects; CLAUDE_CODE_DEBUG_LOG_LEVEL is what raises
+// it, and `debugFile` puts the log beside the transcript instead of on
+// stderr. The auth line in that log redacts the credential itself
+// ("Bearer ***"), which is why the file can be kept as evidence.
+const DEBUG_LOG_LEVEL_ENV = "CLAUDE_CODE_DEBUG_LOG_LEVEL";
+const DEBUG_LOG_LEVEL = "verbose";
+const REQUEST_DETAIL = "[API REQUEST DETAIL] ";
+
+// init reports the model with the context window appended —
+// "claude-opus-5[1m]" — and the request carries the bare name. Strip the
+// suffix so a run's own requests can be told from the helper requests
+// (session titles, classifiers) the same process makes on other models.
+function wireModel(model: string): string {
+  return model.replace(/\[[^\]]*\]$/, "");
+}
+
+interface RequestDetail {
+  readonly model?: string;
+  readonly temperature?: number;
+  readonly thinking?: { readonly type?: string };
+  readonly output_config?: { readonly effort?: string };
+}
+
+// The requests this run's own model received, in the order the log holds
+// them. A line that is not JSON is skipped with no error: the log is a
+// debugging aid the CLI owns, not an interface it promises this harness,
+// and a run must not fail because one line of it changed shape.
+function requestDetails(debugPath: string, model: string): RequestDetail[] {
+  if (!existsSync(debugPath)) return [];
+  const found: RequestDetail[] = [];
+  for (const line of readFileSync(debugPath, "utf8").split("\n")) {
+    const at = line.indexOf(REQUEST_DETAIL);
+    if (at === -1) continue;
+    let detail: RequestDetail;
+    try {
+      detail = JSON.parse(line.slice(at + REQUEST_DETAIL.length)) as RequestDetail;
+    } catch {
+      continue;
+    }
+    if (detail.model === model) found.push(detail);
+  }
+  return found;
+}
+
+export function samplingFromDebugLog(debugPath: string, model: string | null): Sampling | null {
+  if (model === null) return null;
+  const wire = wireModel(model);
+  const fields = requestDetails(debugPath, wire).map((d) => ({
+    model: wire,
+    // A request that carries no temperature field is recorded as null.
+    // Every model the CLI does not list as accepting one is sent without
+    // it, and the service's own default is not this harness's to state.
+    temperature: d.temperature ?? null,
+    thinking: d.thinking?.type ?? null,
+    effort: d.output_config?.effort ?? null,
+  }));
+  const first = fields[0];
+  // No request for this model in the log: nothing observed, so nothing
+  // recorded. The type checker wants the guard too — an index into a
+  // possibly-empty array is possibly undefined.
+  if (first === undefined) return null;
+  return {
+    ...first,
+    requests: fields.length,
+    uniform: fields.every((f) => JSON.stringify(f) === JSON.stringify(first)),
+  };
+}
+
 // The one place a run is executed and captured. Both smoke scripts call
 // this — sharing it is what keeps the transcript/usage capture from
 // drifting between them (code-manners D5).
 export async function runOne(config: RunConfig, outDir: string): Promise<RunRecord> {
   mkdirSync(outDir, { recursive: true });
   const transcriptPath = join(outDir, `${config.runId}.transcript.jsonl`);
+  const debugPath = join(outDir, `${config.runId}.debug.log`);
   if (existsSync(transcriptPath)) {
     throw new Error(`refusing to overwrite an existing transcript: ${transcriptPath}`);
   }
@@ -85,6 +158,8 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       sandbox: config.sandbox as any,
       maxTurns: config.maxTurns,
+      debugFile: debugPath,
+      env: { ...process.env, [DEBUG_LOG_LEVEL_ENV]: DEBUG_LOG_LEVEL },
     },
   }) as AsyncIterable<SDKMessage>) {
     // §1: the full transcript, as data — every message the SDK emits,
@@ -168,6 +243,7 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
       permissionMode: actualPermissionMode,
       skills: actualSkills,
       plugins: actualPlugins,
+      sampling: samplingFromDebugLog(debugPath, actualModel),
     },
     usage: {
       numTurns,

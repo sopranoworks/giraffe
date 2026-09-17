@@ -56,6 +56,28 @@ export interface RunConfig {
   };
 }
 
+// Directive 047 §1: the sampling parameters the Claude Code process put
+// on the wire for this run's own model, as its verbose log reports them.
+// §28 item 3's pinned metadata named the SDK version, the model, the
+// Claude Code version, the prompts, the tool lists and the corpus
+// commit; it did not name these, so six rounds were compared without
+// anything establishing they sampled alike.
+//
+// `temperature` is null when the request carried no temperature field at
+// all — which is what the CLI sends for a model it does not list as
+// accepting one. Null means absent, not zero and not "unknown".
+export interface Sampling {
+  readonly model: string;
+  readonly temperature: number | null;
+  readonly thinking: string | null;
+  readonly effort: string | null;
+  // How many requests for this model the log held, and whether every one
+  // of them carried the same three fields above. A round is comparable
+  // to another round only if this is true within each run first.
+  readonly requests: number;
+  readonly uniform: boolean;
+}
+
 // §1/§3: everything the harness itself observed about a run, taken from
 // the SDK's own init and result messages — never from anything the agent
 // said about itself.
@@ -99,6 +121,10 @@ export interface RunRecord {
     // was offered.
     readonly skills: readonly string[] | null;
     readonly plugins: readonly { name: string; path: string }[] | null;
+    // Directive 047 §1: what the request actually carried, read off the
+    // CLI's own verbose log of it. Null when no such line was found (no
+    // debug log, or none of its requests named this run's model).
+    readonly sampling: Sampling | null;
   };
 
   // Straight from the SDK's final "result" message. Never computed by
