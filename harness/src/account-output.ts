@@ -86,9 +86,21 @@ interface Call {
   readonly sections: readonly Section[];
   readonly results: readonly { result: Result; use: Use }[];
   readonly sources: readonly { source: Source; use: SourceUse }[];
-  // What the next giraffe call did with the three sections that exist to
-  // steer it. Null when there was no next giraffe call.
-  readonly followed: { truncated: boolean; tryNext: boolean } | null;
+  // What the next giraffe call did with the two sections that exist to
+  // steer it.
+  readonly truncated: Steer;
+  readonly tryNext: Steer;
+}
+
+// A steering section's fate on one call. `values` is how many things it
+// named that a caller could type; `hadNext` says whether there was a
+// later giraffe call at all, since a section printed on a run's last
+// call had no chance to be taken up and is not evidence either way.
+interface Steer {
+  readonly sections: number;
+  readonly values: number;
+  readonly hadNext: boolean;
+  readonly followed: boolean;
 }
 
 function escapeRegExp(s: string): string {
@@ -267,16 +279,67 @@ function usedStrongly(u: Use): boolean {
   return u.opened || u.requeried || u.cited;
 }
 
-// Did the next giraffe call take up what ## truncated and ## try next
-// offered? ## truncated ends in a distribution ("narrow by path: x (3)
-// ...") and ## try next in whole commands; both are taken up when the
-// next call contains one of the values they named.
+// The values a steering section named, in the form a caller would type
+// them.
+//
+// Directive 048 §2 counts how often ## try next is taken up across every
+// transcript on disk, so this has to know what that section actually
+// offers. It is not the whole-command form the first version assumed:
+// query.Suggest and query.DiagnoseFilter write prose lines that carry
+// their values at the end.
+//
+//   narrow by path: internal/core (5) actor (4)          ## truncated
+//   names in the index starting the same way: A, B, C     ## try next
+//   names in the index sharing part of the word: D, E     ## try next
+//   N entries match "w" in project p ... search again from within p
+//   "kind:fnc" is wrong - it is in [const, field, func]
+//
+// Two of ## try next's lines name nothing to type at all — `no such
+// kind: "fnc"` and `every constraint in this query matches something in
+// the index on its own; their combination does not`. A section with no
+// value in it is counted apart rather than scored as ignored: there was
+// nothing there to take up.
 function offered(section: Section): string[] {
   const out: string[] = [];
-  for (const m of section.text.matchAll(/([\w./-]+)\s*\((\d+)\)/g)) out.push(m[1] as string);
-  for (const m of section.text.matchAll(/--query\s+'([^']+)'/g)) out.push(m[1] as string);
-  for (const m of section.text.matchAll(/--page\s+(\d+)/g)) out.push(`--page ${m[1]}`);
-  return out;
+  for (const line of section.text.split("\n")) {
+    for (const m of line.matchAll(/([\w./-]+)\s*\((\d+)\)/g)) out.push(m[1] as string);
+    for (const m of line.matchAll(/--query\s+'([^']+)'/g)) out.push(m[1] as string);
+    for (const m of line.matchAll(/--page\s+(\d+)/g)) out.push(`--page ${m[1]}`);
+    const names = /^names in the index [^:]*: (.+)$/.exec(line.trim());
+    if (names !== null) out.push(...(names[1] as string).split(","));
+    const project = /search again from within (\S+)$/.exec(line.trim());
+    if (project !== null) out.push(project[1] as string);
+    const wrong = /is wrong - it is in \[([^\]]*)\]/.exec(line);
+    if (wrong !== null) out.push(...(wrong[1] as string).split(","));
+  }
+  return out.map((v) => v.trim()).filter((v) => v !== "");
+}
+
+// A value is taken up when the next call types it — present, and not as
+// a fragment of a longer identifier. The boundary is the whole point of
+// the test: an agent offered `Actor` that types `ActorCount` has
+// answered the miss with its own next guess, which is what 047 saw it
+// do, and a plain substring test would score that as having taken the
+// offer.
+function takenUp(command: string, value: string): boolean {
+  const identifier = /[A-Za-z0-9_]/;
+  for (let at = command.indexOf(value); at !== -1; at = command.indexOf(value, at + 1)) {
+    const before = command[at - 1] ?? " ";
+    const after = command[at + value.length] ?? " ";
+    if (!identifier.test(before) && !identifier.test(after)) return true;
+  }
+  return false;
+}
+
+// What one steering section offered on one call, and what became of it.
+function steer(sections: readonly Section[], nextGiraffe: string | undefined): Steer {
+  const values = sections.flatMap(offered);
+  return {
+    sections: sections.length,
+    values: values.length,
+    hadNext: nextGiraffe !== undefined,
+    followed: nextGiraffe !== undefined && values.some((v) => takenUp(nextGiraffe, v)),
+  };
 }
 
 function accountFor(path: string): { file: string; calls: Call[]; finalAnswer: string } {
@@ -320,13 +383,8 @@ function accountFor(path: string): { file: string; calls: Call[]; finalAnswer: s
           cited: citesRange(laterText, src.path, src.range),
         },
       })),
-      followed:
-        nextGiraffe === undefined
-          ? null
-          : {
-              truncated: (byName.get("## truncated") ?? []).flatMap(offered).some((v) => nextGiraffe.includes(v)),
-              tryNext: (byName.get("## try next") ?? []).flatMap(offered).some((v) => nextGiraffe.includes(v)),
-            },
+      truncated: steer(byName.get("## truncated") ?? [], nextGiraffe),
+      tryNext: steer(byName.get("## try next") ?? [], nextGiraffe),
     });
   }
   return { file: basename(path), calls: out, finalAnswer: answer };
@@ -373,10 +431,8 @@ function printOne(path: string) {
       const flags = [use.reread ? "range re-read" : "", use.opened ? "file opened" : "", use.cited ? "cited" : ""].filter((f) => f !== "");
       console.log(`    ${String(source.bytes).padStart(4)}b  source ${flags.length === 0 ? "SKIPPED" : flags.join("+")}  name:${source.name} path:${source.path} line:${source.range?.join("-") ?? "-"}`);
     }
-    if (call.followed !== null) {
-      const took = [call.followed.truncated ? "truncated" : "", call.followed.tryNext ? "try next" : ""].filter((f) => f !== "");
-      if (took.length > 0) console.log(`    next call took up: ${took.join(", ")}`);
-    }
+    const took = [call.truncated.followed ? "truncated" : "", call.tryNext.followed ? "try next" : ""].filter((f) => f !== "");
+    if (took.length > 0) console.log(`    next call took up: ${took.join(", ")}`);
   }
   const totals = attributeBytes(calls);
   const queried = attributesQueried(calls);
@@ -417,8 +473,10 @@ function printOne(path: string) {
 
 function printMany(paths: readonly string[]) {
   console.log(`run                              calls  printed  results  used  result bytes  used bytes`);
+  const every: Call[] = [];
   for (const path of paths) {
     const { file, calls } = accountFor(path);
+    every.push(...calls);
     const all = calls.flatMap((c) => c.results);
     const usedCount = all.filter((r) => used(r.use)).length;
     const allBytes = all.reduce((s, r) => s + r.result.bytes, 0);
@@ -427,6 +485,61 @@ function printMany(paths: readonly string[]) {
       `${file.replace(".transcript.jsonl", "").padEnd(32)} ${String(calls.length).padStart(5)} ${String(calls.reduce((s, c) => s + c.bytes, 0)).padStart(8)} ${String(all.length).padStart(8)} ${String(usedCount).padStart(5)} ${String(allBytes).padStart(13)} ${String(usedBytes).padStart(11)}`
     );
   }
+  printUptake(paths.length, every);
+}
+
+// Directive 048 §2/§3: over many runs at once, what became of the two
+// sections that steer the next call and of the one that prints a
+// declaration's text. Printed against followed, with the cases that
+// could not have been followed held apart from the cases that were not.
+function printUptake(runs: number, calls: readonly Call[]) {
+  const printedBytes = calls.reduce((s, c) => s + c.bytes, 0);
+  console.log(`\n${runs} runs, ${calls.length} giraffe calls, ${printedBytes} bytes printed`);
+
+  for (const [name, of] of [
+    ["## truncated", (c: Call) => c.truncated],
+    ["## try next", (c: Call) => c.tryNext],
+  ] as const) {
+    const shown = calls.filter((c) => of(c).sections > 0);
+    const sections = shown.reduce((s, c) => s + of(c).sections, 0);
+    const nothingToType = shown.filter((c) => of(c).values === 0);
+    const noNextCall = shown.filter((c) => of(c).values > 0 && !of(c).hadNext);
+    const could = shown.filter((c) => of(c).values > 0 && of(c).hadNext);
+    const followed = could.filter((c) => of(c).followed);
+    console.log(`\n${name}: ${sections} sections on ${shown.length} calls`);
+    console.log(`  named nothing a caller could type    ${String(nothingToType.length).padStart(5)}`);
+    console.log(`  no later giraffe call to take it up  ${String(noNextCall.length).padStart(5)}`);
+    console.log(`  could be taken up                    ${String(could.length).padStart(5)}`);
+    console.log(`    the next call took a value it named ${String(followed.length).padStart(4)}`);
+  }
+
+  const srcs = calls.flatMap((c) => c.sources);
+  const bytesOf = (xs: typeof srcs) => xs.reduce((s, x) => s + x.source.bytes, 0);
+  const reread = srcs.filter((x) => x.use.reread);
+  const openedElsewhere = srcs.filter((x) => !x.use.reread && x.use.opened);
+  const citedOnly = srcs.filter((x) => !x.use.reread && !x.use.opened && x.use.cited);
+  const skipped = srcs.filter((x) => !x.use.reread && !x.use.opened && !x.use.cited);
+  console.log(`\n## source: ${srcs.length} blocks, ${bytesOf(srcs)} bytes`);
+  console.log(`  the same range read again anyway  ${String(reread.length).padStart(5)}  ${String(bytesOf(reread)).padStart(7)} bytes`);
+  console.log(`  the file opened, another part     ${String(openedElsewhere.length).padStart(5)}  ${String(bytesOf(openedElsewhere)).padStart(7)} bytes`);
+  console.log(`  cited without opening             ${String(citedOnly.length).padStart(5)}  ${String(bytesOf(citedOnly)).padStart(7)} bytes`);
+  console.log(`  nothing followed                  ${String(skipped.length).padStart(5)}  ${String(bytesOf(skipped)).padStart(7)} bytes`);
+
+  const all = calls.flatMap((c) => c.results);
+  const strong = all.filter((r) => usedStrongly(r.use));
+  const weak = all.filter((r) => !usedStrongly(r.use) && used(r.use));
+  const over = all.filter((r) => !used(r.use));
+  const rb = (rs: typeof all) => rs.reduce((s, r) => s + r.result.bytes, 0);
+  console.log(`\nresults: ${all.length} printed, ${rb(all)} bytes`);
+  console.log(`  opened / cited / re-queried  ${String(strong.length).padStart(5)}  ${String(rb(strong)).padStart(7)} bytes`);
+  console.log(`  name appears in later prose  ${String(weak.length).padStart(5)}  ${String(rb(weak)).padStart(7)} bytes`);
+  console.log(`  passed over                  ${String(over.length).padStart(5)}  ${String(rb(over)).padStart(7)} bytes  ${((100 * rb(over)) / rb(all)).toFixed(1)}% of result bytes`);
+
+  const queried = new Map<string, number>();
+  for (const call of calls) {
+    for (const m of call.command.matchAll(/([a-z]+):/g)) queried.set(m[1] as string, (queried.get(m[1] as string) ?? 0) + 1);
+  }
+  console.log(`\nattributes typed into a query: ${[...queried].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} (${n})`).join(", ")}`);
 }
 
 const args = process.argv.slice(2);
