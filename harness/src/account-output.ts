@@ -642,7 +642,13 @@ function landedOn(u: ToolUse, kind: StepKind, call: Call | undefined, files: rea
   for (const [name, p] of Object.entries(points)) {
     let there = false;
     if (call !== undefined) {
-      there = call.results.some((r) => atPlace(r.result.path, r.result.range, p)) || call.sources.some((s) => atPlace(s.source.path, s.source.range, p));
+      // A result line or a ## source header at the place — or, since
+      // directive 050, a callers: line naming it as path:line, which
+      // the same test a search's output gets recognises.
+      there =
+        call.results.some((r) => atPlace(r.result.path, r.result.range, p)) ||
+        call.sources.some((s) => atPlace(s.source.path, s.source.range, p)) ||
+        (p.lines === undefined ? namesPath(output, p.path) : namesLine(output, p.path, p.lines));
     } else if (kind.startsWith("read")) {
       const ranges = readRanges(u);
       const whole = readShape(u) === "whole";

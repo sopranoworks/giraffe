@@ -128,10 +128,14 @@ type Entry struct {
 // alongside its entries, one per (Name, Line) in a file; the index
 // holds them under the name.
 type Call struct {
+	// Path is the file the call is in, repo-relative.
 	Path string
+	// Name is the name called.
 	Name string
+	// Line is the 1-based line the call's opening parenthesis is on.
 	Line int
-	Via  string
+	// Via is the qualifier the call hangs off; "" for a bare call.
+	Via string
 }
 
 // Place is the site as a result line prints it and --query callers:
