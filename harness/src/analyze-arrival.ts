@@ -45,20 +45,7 @@
 
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
-
-interface Turn {
-  readonly id: string;
-  readonly context: number; // input + cache_read + cache_creation
-  readonly output: number;
-  readonly toolUses: readonly ToolUse[];
-  readonly text: string;
-}
-
-interface ToolUse {
-  readonly id: string;
-  readonly name: string;
-  readonly summary: string;
-}
+import { readTranscript, type Turn } from "./transcript.js";
 
 interface ToolCallCost {
   readonly index: number;
@@ -167,65 +154,7 @@ function scoreArrival(finalText: string, points: LandingPoints): Arrival {
 // The SDK streams one assistant message per content block, repeating the
 // message id and usage on each — turns are deduplicated by id, and the
 // tool_use blocks of every part with that id are collected together.
-const SKILL_BODY_PREFIX = "Base directory for this skill:";
-
-function readTranscript(path: string): { turns: Turn[]; results: Map<string, number>; skillBodies: number[]; final: unknown } {
-  const turns: Turn[] = [];
-  const byId = new Map<string, { context: number; output: number; toolUses: ToolUse[]; text: string }>();
-  const results = new Map<string, number>();
-  const skillBodies: number[] = [];
-  let final: unknown = null;
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    if (line.trim() === "") continue;
-    const m = JSON.parse(line) as { type: string; message?: { id?: string; usage?: Record<string, number>; content?: unknown } };
-    if (m.type === "assistant" && m.message?.id) {
-      const u = m.message.usage ?? {};
-      let t = byId.get(m.message.id);
-      if (!t) {
-        t = {
-          context: (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0),
-          output: u.output_tokens ?? 0,
-          toolUses: [],
-          text: "",
-        };
-        byId.set(m.message.id, t);
-        turns.push({ id: m.message.id, ...t, toolUses: t.toolUses });
-      }
-      // output_tokens on a streamed part is the running figure; the last
-      // part carries the turn's whole output.
-      t.output = Math.max(t.output, u.output_tokens ?? 0);
-      for (const block of Array.isArray(m.message.content) ? (m.message.content as Record<string, unknown>[]) : []) {
-        if (block.type === "tool_use") {
-          const input = block.input as Record<string, unknown>;
-          const summary = typeof input.command === "string" ? input.command : typeof input.file_path === "string" ? input.file_path : JSON.stringify(input);
-          t.toolUses.push({ id: block.id as string, name: block.name as string, summary: summary.replace(/\s+/g, " ").slice(0, 110) });
-        }
-        if (block.type === "text") t.text += block.text as string;
-      }
-    }
-    if (m.type === "user") {
-      for (const block of Array.isArray(m.message?.content) ? (m.message!.content as Record<string, unknown>[]) : []) {
-        if (block.type === "tool_result") {
-          const c = block.content;
-          const text = typeof c === "string" ? c : Array.isArray(c) ? c.map((x: { text?: string }) => x.text ?? "").join("") : JSON.stringify(c);
-          results.set(block.tool_use_id as string, text.length);
-        }
-        if (block.type === "text" && typeof block.text === "string" && block.text.startsWith(SKILL_BODY_PREFIX)) {
-          skillBodies.push(block.text.length);
-        }
-      }
-    }
-    if (m.type === "result") final = m;
-  }
-  // Rebuild turns from the mutable accumulators so output/toolUses are final.
-  const built: Turn[] = turns.map((t) => {
-    const acc = byId.get(t.id)!;
-    return { id: t.id, context: acc.context, output: acc.output, toolUses: acc.toolUses, text: acc.text };
-  });
-  return { turns: built, results, skillBodies, final };
-}
-
-function toolCallCosts(turns: readonly Turn[], results: Map<string, number>): ToolCallCost[] {
+function toolCallCosts(turns: readonly Turn[], results: ReadonlyMap<string, string>): ToolCallCost[] {
   const out: ToolCallCost[] = [];
   let index = 0;
   for (const [i, t] of turns.entries()) {
@@ -236,12 +165,13 @@ function toolCallCosts(turns: readonly Turn[], results: Map<string, number>): To
     // their result sizes, since the SDK bills the turn, not the call.
     const added = next ? Math.max(0, next.context - t.context) : 0;
     const later = turns.length - (i + 1);
-    const totalBytes = t.toolUses.reduce((s, u) => s + (results.get(u.id) ?? 0), 0);
+    const totalBytes = t.toolUses.reduce((s, u) => s + (results.get(u.id) ?? "").length, 0);
     for (const u of t.toolUses) {
       index++;
-      const bytes = results.get(u.id) ?? 0;
+      const bytes = (results.get(u.id) ?? "").length;
       const share = t.toolUses.length === 1 ? added : totalBytes === 0 ? added / t.toolUses.length : Math.round((added * bytes) / totalBytes);
-      out.push({ index, turn: i + 1, name: u.name, summary: u.summary, resultBytes: bytes, added: share, carried: share * later });
+      const summary = u.command.replace(/\s+/g, " ").slice(0, 110);
+      out.push({ index, turn: i + 1, name: u.name, summary, resultBytes: bytes, added: share, carried: share * later });
     }
   }
   return out;
