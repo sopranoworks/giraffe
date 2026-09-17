@@ -33,11 +33,43 @@ func TestFormat_ResultsSection_PasteReadyAttributes(t *testing.T) {
 	}
 	s := Summarize(slices.Values(entries), "abc1234", 1, nil, nil, nil, nil)
 	out := Format(s, entries)
-	if !strings.Contains(out, "name:Retry kind:func path:internal/retry/retry.go module:internal/retry") {
+	// module: is not on the line: Go's module is the path's own
+	// directory, which the line already carries (directive 047).
+	if !strings.Contains(out, "name:Retry kind:func path:internal/retry/retry.go\n") {
 		t.Fatalf("result line not paste-ready:\n%s", out)
 	}
 	if !strings.Contains(out, "  retries with backoff") {
 		t.Fatalf("doc line missing or not indented:\n%s", out)
+	}
+}
+
+// TestFormat_PositionThatRepeatsThePathIsNotPrinted (directive 047 §3):
+// Go's module position is path.Dir of the entry's own path, so printing
+// it restates a part of the line the reader already has — 1,269 bytes of
+// the 24,050 one measured aided run was given. A position that says
+// something else still prints.
+func TestFormat_PositionThatRepeatsThePathIsNotPrinted(t *testing.T) {
+	entries := []entry.Entry{
+		{Path: "internal/cluster/cluster.go", Name: "Snapshot", Kind: "method", Exported: true,
+			Position: []entry.Position{{Name: "module", Value: "internal/cluster"}, {Name: "receiver", Value: "Cluster"}}},
+		{Path: "cluster.go", Name: "Start", Kind: "func", Exported: true,
+			Position: []entry.Position{{Name: "module", Value: "."}}},
+		{Path: "internal/cluster/cluster.go", Name: "Stop", Kind: "func", Exported: true,
+			Position: []entry.Position{{Name: "module", Value: "github.com/example/cluster"}}},
+	}
+	s := Summarize(slices.Values(entries), "abc1234", 3, nil, nil, nil, nil)
+	out := Format(s, entries)
+	if strings.Contains(out, "module:internal/cluster") {
+		t.Errorf("module: repeats the path's directory and should not print:\n%s", out)
+	}
+	if strings.Contains(out, "module:.") {
+		t.Errorf("a root file's module: is \".\", which repeats the path's directory:\n%s", out)
+	}
+	if !strings.Contains(out, "receiver:Cluster") {
+		t.Errorf("receiver: says what the path does not, and should print:\n%s", out)
+	}
+	if !strings.Contains(out, "module:github.com/example/cluster") {
+		t.Errorf("a module: that is not the path's directory should print:\n%s", out)
 	}
 }
 
