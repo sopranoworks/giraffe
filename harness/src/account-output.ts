@@ -416,6 +416,52 @@ function attributesQueried(calls: readonly Call[]): Set<string> {
   return queried;
 }
 
+// The three tables both accounts end with. printOne answers them for
+// one run and printUptake for a round or for all eight; they are the
+// same tables over the same shape, so they are written once (D6 — the
+// cross-run account was the second copy).
+function printSectionBytes(calls: readonly Call[]) {
+  const printed = calls.reduce((s, c) => s + c.bytes, 0);
+  const bySection = new Map<string, number>();
+  for (const call of calls) {
+    for (const sec of call.sections) bySection.set(sec.name, (bySection.get(sec.name) ?? 0) + sec.bytes);
+  }
+  console.log(`\nsection                bytes   share`);
+  for (const [name, bytes] of [...bySection].sort((a, b) => b[1] - a[1])) {
+    console.log(`  ${name.padEnd(18)} ${String(bytes).padStart(9)}   ${((100 * bytes) / printed).toFixed(1)}%`);
+  }
+}
+
+function printSourceTotals(calls: readonly Call[]) {
+  const srcs = calls.flatMap((c) => c.sources);
+  const bytesOf = (xs: typeof srcs) => xs.reduce((s, x) => s + x.source.bytes, 0);
+  const reread = srcs.filter((x) => x.use.reread);
+  const openedElsewhere = srcs.filter((x) => !x.use.reread && x.use.opened);
+  const citedOnly = srcs.filter((x) => !x.use.reread && !x.use.opened && x.use.cited);
+  const skipped = srcs.filter((x) => !x.use.reread && !x.use.opened && !x.use.cited);
+  console.log(`\n## source: ${srcs.length} blocks, ${bytesOf(srcs)} bytes`);
+  for (const [label, xs] of [
+    ["the same range read again anyway", reread],
+    ["the file opened, another part", openedElsewhere],
+    ["cited without opening", citedOnly],
+    ["nothing followed", skipped],
+  ] as const) {
+    console.log(`  ${label.padEnd(34)}${String(xs.length).padStart(5)}  ${String(bytesOf(xs)).padStart(7)} bytes`);
+  }
+}
+
+function printResultTotals(calls: readonly Call[]) {
+  const all = calls.flatMap((c) => c.results);
+  const bytesOf = (rs: typeof all) => rs.reduce((s, r) => s + r.result.bytes, 0);
+  const strong = all.filter((r) => usedStrongly(r.use));
+  const weak = all.filter((r) => !usedStrongly(r.use) && used(r.use));
+  const over = all.filter((r) => !used(r.use));
+  console.log(`\nresults: ${all.length} printed, ${bytesOf(all)} bytes`);
+  console.log(`  opened / cited / re-queried  ${String(strong.length).padStart(5)}  ${String(bytesOf(strong)).padStart(7)} bytes`);
+  console.log(`  name appears in later prose  ${String(weak.length).padStart(5)}  ${String(bytesOf(weak)).padStart(7)} bytes`);
+  console.log(`  passed over                  ${String(over.length).padStart(5)}  ${String(bytesOf(over)).padStart(7)} bytes  ${((100 * bytesOf(over)) / bytesOf(all)).toFixed(1)}% of result bytes`);
+}
+
 function printOne(path: string) {
   const { file, calls } = accountFor(path);
   console.log(`# ${file}`);
@@ -440,35 +486,9 @@ function printOne(path: string) {
   for (const [key, t] of [...totals].sort((a, b) => b[1].bytes - a[1].bytes)) {
     console.log(`  ${key.padEnd(14)} ${String(t.bytes).padStart(7)} ${String(t.onUsed).padStart(18)}   ${queried.has(key) ? "yes" : "no"}`);
   }
-  const bySection = new Map<string, number>();
-  for (const call of calls) {
-    for (const sec of call.sections) bySection.set(sec.name, (bySection.get(sec.name) ?? 0) + sec.bytes);
-  }
-  console.log(`\nsection                bytes   share`);
-  const printed = calls.reduce((s, c) => s + c.bytes, 0);
-  for (const [name, bytes] of [...bySection].sort((a, b) => b[1] - a[1])) {
-    console.log(`  ${name.padEnd(18)} ${String(bytes).padStart(7)}   ${((100 * bytes) / printed).toFixed(1)}%`);
-  }
-
-  const srcs = calls.flatMap((c) => c.sources);
-  const srcBytes = (xs: typeof srcs) => xs.reduce((s, x) => s + x.source.bytes, 0);
-  const rereadSrc = srcs.filter((x) => x.use.reread);
-  const openedSrc = srcs.filter((x) => !x.use.reread && x.use.opened);
-  const skippedSrc = srcs.filter((x) => !x.use.reread && !x.use.opened && !x.use.cited);
-  console.log(`\n## source: ${srcs.length} blocks, ${srcBytes(srcs)} bytes`);
-  console.log(`  the same range read again anyway  ${String(rereadSrc.length).padStart(3)}  ${String(srcBytes(rereadSrc)).padStart(5)} bytes`);
-  console.log(`  the file opened, another part     ${String(openedSrc.length).padStart(3)}  ${String(srcBytes(openedSrc)).padStart(5)} bytes`);
-  console.log(`  nothing followed                  ${String(skippedSrc.length).padStart(3)}  ${String(srcBytes(skippedSrc)).padStart(5)} bytes`);
-
-  const all = calls.flatMap((c) => c.results);
-  const strong = all.filter((r) => usedStrongly(r.use));
-  const weak = all.filter((r) => !usedStrongly(r.use) && used(r.use));
-  const over = all.filter((r) => !used(r.use));
-  const bytesOf = (rs: typeof all) => rs.reduce((s, r) => s + r.result.bytes, 0);
-  console.log(`\nresults: ${all.length} printed, ${bytesOf(all)} bytes`);
-  console.log(`  opened / cited / re-queried  ${String(strong.length).padStart(3)}  ${String(bytesOf(strong)).padStart(5)} bytes`);
-  console.log(`  name appears in later prose  ${String(weak.length).padStart(3)}  ${String(bytesOf(weak)).padStart(5)} bytes`);
-  console.log(`  passed over                  ${String(over.length).padStart(3)}  ${String(bytesOf(over)).padStart(5)} bytes`);
+  printSectionBytes(calls);
+  printSourceTotals(calls);
+  printResultTotals(calls);
 }
 
 function printMany(paths: readonly string[]) {
@@ -513,27 +533,9 @@ function printUptake(runs: number, calls: readonly Call[]) {
     console.log(`    the next call took a value it named ${String(followed.length).padStart(4)}`);
   }
 
-  const srcs = calls.flatMap((c) => c.sources);
-  const bytesOf = (xs: typeof srcs) => xs.reduce((s, x) => s + x.source.bytes, 0);
-  const reread = srcs.filter((x) => x.use.reread);
-  const openedElsewhere = srcs.filter((x) => !x.use.reread && x.use.opened);
-  const citedOnly = srcs.filter((x) => !x.use.reread && !x.use.opened && x.use.cited);
-  const skipped = srcs.filter((x) => !x.use.reread && !x.use.opened && !x.use.cited);
-  console.log(`\n## source: ${srcs.length} blocks, ${bytesOf(srcs)} bytes`);
-  console.log(`  the same range read again anyway  ${String(reread.length).padStart(5)}  ${String(bytesOf(reread)).padStart(7)} bytes`);
-  console.log(`  the file opened, another part     ${String(openedElsewhere.length).padStart(5)}  ${String(bytesOf(openedElsewhere)).padStart(7)} bytes`);
-  console.log(`  cited without opening             ${String(citedOnly.length).padStart(5)}  ${String(bytesOf(citedOnly)).padStart(7)} bytes`);
-  console.log(`  nothing followed                  ${String(skipped.length).padStart(5)}  ${String(bytesOf(skipped)).padStart(7)} bytes`);
-
-  const all = calls.flatMap((c) => c.results);
-  const strong = all.filter((r) => usedStrongly(r.use));
-  const weak = all.filter((r) => !usedStrongly(r.use) && used(r.use));
-  const over = all.filter((r) => !used(r.use));
-  const rb = (rs: typeof all) => rs.reduce((s, r) => s + r.result.bytes, 0);
-  console.log(`\nresults: ${all.length} printed, ${rb(all)} bytes`);
-  console.log(`  opened / cited / re-queried  ${String(strong.length).padStart(5)}  ${String(rb(strong)).padStart(7)} bytes`);
-  console.log(`  name appears in later prose  ${String(weak.length).padStart(5)}  ${String(rb(weak)).padStart(7)} bytes`);
-  console.log(`  passed over                  ${String(over.length).padStart(5)}  ${String(rb(over)).padStart(7)} bytes  ${((100 * rb(over)) / rb(all)).toFixed(1)}% of result bytes`);
+  printSectionBytes(calls);
+  printSourceTotals(calls);
+  printResultTotals(calls);
 
   const queried = new Map<string, number>();
   for (const call of calls) {
