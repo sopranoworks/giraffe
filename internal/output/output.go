@@ -372,7 +372,9 @@ func FormatFrom(s Summary, matches []entry.Entry, page int) string {
 // present (showLang), the same "costs a line, so only when it varies"
 // treatment project already gets — printing lang unconditionally would
 // make "lang:go" redundant noise on every line of an all-Go repository,
-// exactly what this section exists to avoid.
+// exactly what this section exists to avoid. A language position prints
+// only when it does not repeat the path's own directory (directive
+// 047), by the same rule.
 func resultLine(e entry.Entry, showProject, showLang bool, extVaries map[string]bool) string {
 	var line strings.Builder
 	fmt.Fprintf(&line, "name:%s kind:%s path:%s", quote(e.Name), quote(e.Kind), quote(e.Path))
@@ -411,8 +413,21 @@ func resultLine(e entry.Entry, showProject, showLang bool, extVaries map[string]
 			fmt.Fprintf(&line, " declarations:%d", e.DeclCount)
 		}
 	}
-	for _, p := range e.Position {
-		fmt.Fprintf(&line, " %s:%s", p.Name, quote(p.Value))
+	for _, pos := range e.Position {
+		// The same "only when it discriminates" test the attributes above
+		// pass, applied to the language positions for the first time
+		// (directive 047 §2 measured one aided run: module: was 1,269 of
+		// the 24,050 bytes giraffe printed, on every declaration line,
+		// and not once typed into a later --query). Go's module is
+		// path.Dir of the entry's own path, so it repeats, verbatim, a
+		// part of the line the reader has already been given. A position
+		// that says something the line does not already say still
+		// prints; --query module:... is unaffected, since the index
+		// keeps what the extractor emitted either way.
+		if pos.Value == path.Dir(e.Path) {
+			continue
+		}
+		fmt.Fprintf(&line, " %s:%s", pos.Name, quote(pos.Value))
 	}
 	line.WriteByte('\n')
 	// The declaration's own line (§31.4) prints first — it is what lets
