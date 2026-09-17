@@ -45,15 +45,16 @@ const (
 	// them.
 	sourceBudget = 1500
 
-	// maxCallers bounds how many call sites a result's callers: line
-	// and a ## source header name (directive 050 §4): bounded because a
-	// list of eighty is not read, not to save bytes — the remainder is
-	// a count. Five: the sites query.orderCallers puts first are the
-	// ones whose qualifier names the declaration's own type, and on the
-	// measured corpus the two landing points of the task (049 §1) are
-	// the first two of Snapshot's eighty; five leaves room for a name
-	// with a few real callers to show all of them (MetricsSnapshot has
-	// two, Metrics four) and keeps the line to one line.
+	// maxCallers bounds how many call sites a result's callers: block
+	// and a ## source header name (directive 050 §4, extended by 051
+	// §1's own site text): bounded because a list of eighty is not
+	// read, not to save bytes — the remainder is a count. Five: the
+	// sites query.orderCallers puts first are the ones whose qualifier
+	// names the declaration's own type, and on the measured corpus the
+	// two landing points of the task (049 §1) are the first two of
+	// Snapshot's eighty; five leaves room for a name with a few real
+	// callers to show all of them (MetricsSnapshot has two, Metrics
+	// four).
 	maxCallers = 5
 )
 
@@ -538,6 +539,14 @@ func resultLine(e entry.Entry, showProject, showLang bool, extVaries map[string]
 	if !e.Exported {
 		fmt.Fprintf(&line, " scope:%s", quote(e.Scope))
 	}
+	// Test is the same "only the informative case costs a line" rule as
+	// scope above: production is the overwhelming default, so test:true
+	// prints and test:false never does (directive 051 §1) — the fact a
+	// caller needs to tell a test's declarations and call sites apart
+	// from production code's, now that both are indexed.
+	if e.Test {
+		line.WriteString(" test:true")
+	}
 	// Size and DeclCount are facts about the file, not the declaration
 	// (entry.Entry's own doc comment), so only a Kind==KindFile result
 	// carries them: size: always, since a file result is the one kind
@@ -587,29 +596,37 @@ func resultLine(e entry.Entry, showProject, showLang bool, extVaries map[string]
 	// what it is for: the sites the caller would otherwise grep for —
 	// 049 counted that grep in 81 of 119 runs — as places to open,
 	// bounded, the rest a count. The label is the attribute --query
-	// takes (callers:), and each site is the value it matches.
+	// takes (callers:), and each site is the value it matches. Directive
+	// 051 §1 added each site's own line (Text) and, since test files are
+	// indexed too, the sites this now lists include the tests: what the
+	// grep in 14 of round 9's 20 runs went to get.
 	if c := callersLine(e.Callers); c != "" {
-		fmt.Fprintf(&line, "  %s\n", c)
+		line.WriteString(c)
 	}
 	return line.String()
 }
 
-// callersLine renders callers: with at most maxCallers sites, path:line
-// each, and "+N more" for the rest; "" when there are none, so the line
-// is omitted like any other absent attribute.
+// callersLine renders callers: as a small block, one site a line —
+// path:line: the call's own text, at most maxCallers of them, likeliest
+// first (query.orderCallers), then a count of the rest; "" when there
+// are none, so the section is omitted like any other absent attribute.
+// One site a line, not one line of path:line pairs (050's original
+// shape), because directive 051 §1 added what 050 did not: the call's
+// own text, the same fact a grep of the name returns and a bare site
+// does not — a line long enough to hold that for five sites is not one
+// line any reader would rather have compressed.
 func callersLine(calls []entry.Call) string {
 	if len(calls) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("callers:")
+	b.WriteString("  callers:\n")
 	for i, c := range calls {
 		if i == maxCallers {
-			fmt.Fprintf(&b, " +%d more", len(calls)-i)
-			break
+			fmt.Fprintf(&b, "    +%d more\n", len(calls)-i)
+			return b.String()
 		}
-		b.WriteByte(' ')
-		b.WriteString(quote(c.Place()))
+		fmt.Fprintf(&b, "    %s: %s\n", c.Place(), c.Text)
 	}
 	return b.String()
 }
@@ -630,7 +647,6 @@ func sourceSection(sources []Source) string {
 		fmt.Fprintf(&b, "name:%s path:%s line:%s\n", quote(e.Name), quote(e.Path), e.LineRange())
 		if c := callersLine(e.Callers); c != "" {
 			b.WriteString(c)
-			b.WriteByte('\n')
 		}
 		for i, l := range src.Lines {
 			if b.Len()+len(l)+1 > sourceBudget {

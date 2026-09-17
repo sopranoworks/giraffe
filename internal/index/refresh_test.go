@@ -1247,7 +1247,7 @@ func TestRefresh_CallSitesAreIndexedAndCarriedForward(t *testing.T) {
 	writeFile(t, root, "a.go", "package p\n\ntype M struct{ metrics *N }\n\nfunc Run(m *M) { m.metrics.Snapshot() }\n")
 	gitCommit(t, root, "go.mod", "a.go", "b.go")
 	s := mustRefresh(t, root)
-	want := []entry.Call{{Path: "a.go", Name: "Snapshot", Line: 5, Via: "metrics"}}
+	want := []entry.Call{{Path: "a.go", Name: "Snapshot", Line: 5, Via: "metrics", Text: "func Run(m *M) { m.metrics.Snapshot() }"}}
 	if got := s.Callers("Snapshot"); len(got) != 1 || got[0] != want[0] {
 		t.Fatalf("Callers(Snapshot) = %+v, want %+v", got, want)
 	}
@@ -1269,5 +1269,46 @@ func TestRefresh_CallSitesAreIndexedAndCarriedForward(t *testing.T) {
 	}
 	if got := s2.Callers("Snapshot"); len(got) != 1 || got[0] != want[0] {
 		t.Errorf("after carry-forward, Callers(Snapshot) = %+v, want %+v", got, want)
+	}
+}
+
+// TestRefresh_TestFilesAreIndexedAndMarked (directive 051 §1): a
+// "_test.go" file is no longer excluded — it is scanned, extracted and
+// stored like any other Go file, its own entry and its declarations
+// carrying Test true through the store's own encoding (not just the
+// in-memory struct), and its call sites reach the callers list of what
+// it calls.
+func TestRefresh_TestFilesAreIndexedAndMarked(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, "go.mod", "module example.com/p\n")
+	writeFile(t, root, "a.go", "package p\n\nfunc Helper() int { return 1 }\n")
+	writeFile(t, root, "a_test.go", "package p\n\nimport \"testing\"\n\nfunc TestHelper(t *testing.T) {\n\tHelper()\n}\n")
+	gitCommit(t, root, "go.mod", "a.go", "a_test.go")
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
+
+	var testFileEntry, testFuncEntry, prodFuncEntry entry.Entry
+	var found int
+	for e := range s.All() {
+		switch {
+		case e.Kind == entry.KindFile && e.Path == "a_test.go":
+			testFileEntry, found = e, found+1
+		case e.Name == "TestHelper":
+			testFuncEntry, found = e, found+1
+		case e.Name == "Helper":
+			prodFuncEntry, found = e, found+1
+		}
+	}
+	if found != 3 {
+		t.Fatalf("expected to find a_test.go's file entry, TestHelper and Helper; found %d of 3", found)
+	}
+	if !testFileEntry.Test || !testFuncEntry.Test {
+		t.Errorf("a_test.go's file entry and TestHelper: Test = %v, %v, want true, true", testFileEntry.Test, testFuncEntry.Test)
+	}
+	if prodFuncEntry.Test {
+		t.Error("Helper (in a.go): Test = true, want false")
+	}
+	if got := s.Callers("Helper"); len(got) != 1 || got[0].Path != "a_test.go" {
+		t.Errorf("Callers(Helper) = %+v, want one site in a_test.go", got)
 	}
 }

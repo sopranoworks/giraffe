@@ -45,7 +45,7 @@ const storeFilename = "store.bolt"
 // A change in what an encoded field means is a change of shape too: an
 // index that decoded fine but held ranges computed the old way would
 // keep them for every file that has not changed since.
-const schemaVersion = "5" // 3: EndLine joined the entry encoding (directive 042); 4: Line starts at the doc comment (043); 5: the calls and callers buckets (050)
+const schemaVersion = "6" // 3: EndLine joined the entry encoding (directive 042); 4: Line starts at the doc comment (043); 5: the calls and callers buckets (050); 6: Entry.Test and Call.Text (051)
 
 var (
 	bucketMeta         = []byte("meta")
@@ -521,14 +521,16 @@ func (s *Store) callsOf(path string) []entry.Call {
 }
 
 // encodeCalls and decodeCalls render a list of call sites one per
-// line, tab-separated path, name, line and via — the same one-fact-
-// one-line, tab-between-fields shape encodeEntry uses, so a path or
-// name is sanitized the same way (sanitize) and nothing in a field can
-// split it. Both buckets hold the same shape: a file's calls carry
-// their own path on every line (redundant there, one encoding), a
-// name's callers carry the name on every line likewise. Empty in,
-// nil out; a malformed line is skipped, since this file's own pair
-// wrote it.
+// line, tab-separated path, name, line, via and text — the same one-
+// fact-one-line, tab-between-fields shape encodeEntry uses, so a field
+// is sanitized the same way (sanitize) and nothing in it can split the
+// line — text included: a call's own source line can itself hold a
+// literal tab (Go source commonly does), which sanitize folds to a
+// space the same as it would in Doc or LineText. Both buckets hold the
+// same shape: a file's calls carry their own path on every line
+// (redundant there, one encoding), a name's callers carry the name on
+// every line likewise. Empty in, nil out; a malformed line is skipped,
+// since this file's own pair wrote it.
 func encodeCalls(calls []entry.Call) []byte {
 	var b strings.Builder
 	for i, c := range calls {
@@ -542,6 +544,8 @@ func encodeCalls(calls []entry.Call) []byte {
 		b.WriteString(strconv.Itoa(c.Line))
 		b.WriteByte('\t')
 		b.WriteString(sanitize(c.Via))
+		b.WriteByte('\t')
+		b.WriteString(sanitize(c.Text))
 	}
 	return []byte(b.String())
 }
@@ -554,14 +558,14 @@ func decodeCalls(v []byte) []entry.Call {
 	calls := make([]entry.Call, 0, len(lines))
 	for _, l := range lines {
 		f := strings.Split(l, "\t")
-		if len(f) != 4 {
+		if len(f) != 5 {
 			continue
 		}
 		line, err := strconv.Atoi(f[2])
 		if err != nil {
 			continue
 		}
-		calls = append(calls, entry.Call{Path: f[0], Name: f[1], Line: line, Via: f[3]})
+		calls = append(calls, entry.Call{Path: f[0], Name: f[1], Line: line, Via: f[3], Text: f[4]})
 	}
 	return calls
 }
@@ -1040,14 +1044,15 @@ func encodeEntry(e entry.Entry) []byte {
 		strconv.Itoa(e.Line),
 		sanitize(e.LineText),
 		strconv.Itoa(e.EndLine),
+		encodeBool(e.Test),
 	}
 	return []byte(strings.Join(fields, "\t"))
 }
 
 func decodeEntry(v []byte) (entry.Entry, error) {
 	fields := strings.Split(string(v), "\t")
-	if len(fields) != 15 {
-		return entry.Entry{}, fmt.Errorf("expected 15 tab-separated fields, got %d", len(fields))
+	if len(fields) != 16 {
+		return entry.Entry{}, fmt.Errorf("expected 16 tab-separated fields, got %d", len(fields))
 	}
 	size, err1 := strconv.ParseInt(fields[10], 10, 64)
 	declCount, err2 := strconv.Atoi(fields[11])
@@ -1072,5 +1077,6 @@ func decodeEntry(v []byte) (entry.Entry, error) {
 		Line:      line,
 		LineText:  fields[13],
 		EndLine:   endLine,
+		Test:      fields[15] == "1",
 	}, nil
 }

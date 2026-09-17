@@ -372,20 +372,24 @@ func TestStore_CallersFollowTheFileThatCalls(t *testing.T) {
 }
 
 // TestEncodeCalls_RoundTrip: the one-fact-one-line encoding both
-// buckets share survives a round trip, in the stored order.
+// buckets share survives a round trip, in the stored order — Text
+// (directive 051 §1) included, sanitized the same way any other field
+// is if it holds a literal tab.
 func TestEncodeCalls_RoundTrip(t *testing.T) {
 	in := []entry.Call{
-		{Path: "cluster.go", Name: "Snapshot", Line: 4245, Via: "metrics"},
-		{Path: "internal/core/monitoring.go", Name: "Snapshot", Line: 106, Via: "Metrics"},
-		{Path: "x.go", Name: "Snapshot", Line: 1},
+		{Path: "cluster.go", Name: "Snapshot", Line: 4245, Via: "metrics", Text: "m.metrics.Snapshot(len(c.associations))"},
+		{Path: "internal/core/monitoring.go", Name: "Snapshot", Line: 106, Via: "Metrics", Text: "ms.provider.Metrics().Snapshot()"},
+		{Path: "x.go", Name: "Snapshot", Line: 1, Text: "a\tb"}, // a literal tab, folded to a space by sanitize
 	}
+	want := append([]entry.Call(nil), in...)
+	want[2].Text = "a b"
 	out := decodeCalls(encodeCalls(in))
-	if len(out) != len(in) {
+	if len(out) != len(want) {
 		t.Fatalf("round trip: %+v", out)
 	}
-	for i := range in {
-		if out[i] != in[i] {
-			t.Errorf("call %d = %+v, want %+v", i, out[i], in[i])
+	for i := range want {
+		if out[i] != want[i] {
+			t.Errorf("call %d = %+v, want %+v", i, out[i], want[i])
 		}
 	}
 	if decodeCalls(nil) != nil || len(encodeCalls(nil)) != 0 {

@@ -105,9 +105,10 @@ func TestScan_ResolvesTrackedAndWalked_AppliesExclude(t *testing.T) {
 	}
 
 	want := map[string]bool{
-		"main.go":    true,  // tracked
-		"pkg/new.go": false, // walked (untracked)
-		"README.md":  false, // walked, no extractor, still a candidate (directive 017 §2)
+		"main.go":          true,  // tracked
+		"pkg/util_test.go": true,  // tracked — no longer excluded by name (directive 051 §1)
+		"pkg/new.go":       false, // walked (untracked)
+		"README.md":        false, // walked, no extractor, still a candidate (directive 017 §2)
 	}
 	for path, tracked := range want {
 		hadHash, ok := got[path]
@@ -120,7 +121,7 @@ func TestScan_ResolvesTrackedAndWalked_AppliesExclude(t *testing.T) {
 		}
 	}
 
-	for excluded := range map[string]bool{"vendor/dep/dep.go": true, "pkg/util_test.go": true} {
+	for excluded := range map[string]bool{"vendor/dep/dep.go": true} {
 		if _, present := got[excluded]; present {
 			t.Errorf("expected %s to be excluded, but it was scanned", excluded)
 		}

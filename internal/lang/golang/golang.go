@@ -84,6 +84,11 @@ const (
 // called, so a method and a function of one name are one name here,
 // which is the cost §28 C-39's reference search was always going to
 // pay without go/types, and the reason a Call carries Via.
+//
+// A "_test.go" file is handled exactly like any other Go file (directive
+// 051 §1 — the scanner no longer excludes it, §28 C-39's gap): its
+// declarations and call sites are extracted the same way, each entry
+// carrying Test true (isTestFile).
 func Extract(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, calls []entry.Call, handled bool, err error) {
 	if !handles(f.Path) {
 		return nil, nil, false, nil
@@ -100,10 +105,12 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 		return nil, nil, false, fmt.Errorf("parse %s: %w", f.Path, err)
 	}
 	lines := strings.Split(string(content), "\n")
+	test := isTestFile(f.Path)
 
 	position := []entry.Position{{Name: "module", Value: path.Dir(f.Path)}}
 
 	decls := []entry.Entry{entry.FileEntry(f.Path, project, langName)}
+	decls[0].Test = test
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
@@ -170,20 +177,32 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 	for i := 1; i < len(decls); i++ {
 		decls[i].Ext = "go"
 		decls[i].Lang = langName
+		decls[i].Test = test
 	}
-	return decls, callSites(f.Path, file, fset), true, nil
+	return decls, callSites(f.Path, file, fset, lines), true, nil
+}
+
+// isTestFile reports whether p is a Go test file by its own name — the
+// one fact "_test.go" carries (directive 051 §1), the same convention
+// the scanner used to exclude it by (internal/scanner/exclude.go's
+// former defaultExclude entry) and now leaves for this module to
+// record instead of hide.
+func isTestFile(p string) bool {
+	return strings.HasSuffix(p, "_test.go")
 }
 
 // callSites is every call expression in file, one Call per distinct
 // (name, line) (directive 050): the name called — an identifier, or
 // the selected name of a selector, through parentheses, a generic
 // instantiation's brackets and a call's own result — and, for a
-// selector, the qualifier it hangs off (calledName). A call of a
+// selector, the qualifier it hangs off (calledName), plus the line's
+// own text (directive 051 §1 — Text — the same fact lineRange already
+// takes from a declaration's own first line). A call of a
 // predeclared identifier (len, append, string(x), panic) is not a call
 // site of anything the index holds and is not recorded; a call of a
 // literal or an anonymous func has no name to record. Sorted by line
 // then name, so the same file always yields the same list (§3 C5).
-func callSites(filePath string, file *ast.File, fset *token.FileSet) []entry.Call {
+func callSites(filePath string, file *ast.File, fset *token.FileSet, lines []string) []entry.Call {
 	type site struct {
 		name string
 		line int
@@ -204,7 +223,7 @@ func callSites(filePath string, file *ast.File, fset *token.FileSet) []entry.Cal
 			return true // the line is the place; a second call of the name on it adds nothing
 		}
 		seen[at] = true
-		calls = append(calls, entry.Call{Path: filePath, Name: name, Line: at.line, Via: via})
+		calls = append(calls, entry.Call{Path: filePath, Name: name, Line: at.line, Via: via, Text: lineText(lines, at.line)})
 		return true
 	})
 	sort.Slice(calls, func(i, j int) bool {
@@ -214,6 +233,18 @@ func callSites(filePath string, file *ast.File, fset *token.FileSet) []entry.Cal
 		return calls[i].Name < calls[j].Name
 	})
 	return calls
+}
+
+// lineText returns line's own text (1-based), trimmed of surrounding
+// whitespace, or "" when line falls outside lines — defensive only, the
+// same guard lineRange applies to a declaration's own line: fset always
+// resolves a parsed file's own node within lines split from that same
+// content.
+func lineText(lines []string, line int) string {
+	if line < 1 || line > len(lines) {
+		return ""
+	}
+	return strings.TrimSpace(lines[line-1])
 }
 
 // calledName resolves what a call expression's Fun names: the

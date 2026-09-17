@@ -115,6 +115,21 @@ type Entry struct {
 	// change to A never rewrites B's entries (§31.2). Nil when nothing
 	// calls the name, or for a file entry — absence, as everywhere here.
 	Callers []Call
+
+	// Test reports whether this declaration (or file) lives in a test
+	// file — Go's own "_test.go" convention (directive 051 §1). A
+	// language's own judgement, the way Exported is: false is the
+	// default and the common case, printed as test:true only when true
+	// (§6's absence-is-information rule, applied to a boolean here as it
+	// already is to Lang and Position). Directive 051 removed "*_test.go"
+	// from the scanner's default exclusion (§28 C-39's gap: two of the
+	// task's landing points and the tests around Snapshot were both call
+	// sites the index could not see because the files they live in were
+	// never scanned) — a test file's declarations and call sites are now
+	// indexed like any other file's, and this is the fact that lets a
+	// caller tell the two apart without knowing Go's own naming
+	// convention itself.
+	Test bool
 }
 
 // Call is one call site: the place in Path, at Line, where Name is
@@ -126,7 +141,10 @@ type Entry struct {
 // bounded list gets the sites that name the declaration's own type
 // first (query.orderCallers). A language module produces these
 // alongside its entries, one per (Name, Line) in a file; the index
-// holds them under the name.
+// holds them under the name. Whether the call is itself in a test file
+// is not a fact of Call: Path already carries it (Go's own "_test.go"
+// convention, visible on the printed site the same way it is on any
+// other path), so no second field would say anything Path does not.
 type Call struct {
 	// Path is the file the call is in, repo-relative.
 	Path string
@@ -136,6 +154,13 @@ type Call struct {
 	Line int
 	// Via is the qualifier the call hangs off; "" for a bare call.
 	Via string
+	// Text is the call's own line, trimmed of surrounding whitespace —
+	// directive 051 §1: what a caller grepped for before this existed,
+	// printed instead of re-derived (the same reason Entry.LineText
+	// exists beside Line). The line the call's parenthesis is on, not
+	// the whole (possibly multi-line) call expression — the same
+	// first-line-only treatment lineRange already gives a declaration.
+	Text string
 }
 
 // Place is the site as a result line prints it and --query callers:
