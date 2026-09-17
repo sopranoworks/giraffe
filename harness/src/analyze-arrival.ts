@@ -45,17 +45,8 @@
 
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
-import { readTranscript, type Turn } from "./transcript.js";
-
-interface ToolCallCost {
-  readonly index: number;
-  readonly turn: number;
-  readonly name: string;
-  readonly summary: string;
-  readonly resultBytes: number;
-  readonly added: number;
-  readonly carried: number;
-}
+import { readTranscript, toolCallCosts, type ToolCallCost } from "./transcript.js";
+import { scoreArrival, type Arrival, type LandingPoints } from "./landing.js";
 
 interface RunSummary {
   readonly file: string;
@@ -72,109 +63,6 @@ interface RunSummary {
   readonly skill: { bytes: number; tokens: number } | null;
   // Landing points hit, when --landing was given.
   readonly arrival: Arrival | null;
-}
-
-interface Arrival {
-  readonly hit: number;
-  readonly of: number;
-  readonly missed: readonly string[];
-}
-
-// A landing point is a place in the corpus: the file at path, or, with
-// lines, the range [from, to] of it (1-based, inclusive — a
-// declaration's whole extent as giraffe prints it). symbols are the
-// declarations at the place, as the corpus's own index lists them:
-// a bare name for a type, a func, a var or a const; Type.name for a
-// struct field; Type.name() for a method. For a file the symbols are
-// its top-level declarations — the names an answer uses to say "this
-// file"; a member belongs to its type, and a method name alone (Start,
-// Port) says nothing about which file. For a range, everything
-// declared in it, members included: the member is the place.
-interface LandingPoint {
-  readonly path: string;
-  readonly lines?: readonly [number, number];
-  readonly symbols?: readonly string[];
-}
-
-type LandingPoints = Record<string, LandingPoint>;
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// namesPath: the path itself, any suffix of it from a directory
-// boundary, or its basename — as a whole word, so metrics.go does not
-// match metrics_test.go or a longer name ending the same way.
-function namesPath(text: string, path: string): boolean {
-  const segments = path.split("/");
-  return segments.some((_, i) => new RegExp(`(?<![\\w/])${escapeRegExp(segments.slice(i).join("/"))}\\b`).test(text));
-}
-
-// namesLine: basename:N or basename:N-M (a hyphen or an en dash) with
-// the reference overlapping the range.
-function namesLine(text: string, path: string, [from, to]: readonly [number, number]): boolean {
-  const base = escapeRegExp(path.split("/").pop() ?? path);
-  for (const m of text.matchAll(new RegExp(`(?<!\\w)${base}:(\\d+)(?:[-–](\\d+))?`, "g"))) {
-    const a = Number(m[1]);
-    const b = m[2] === undefined ? a : Number(m[2]);
-    if (a <= to && b >= from) return true;
-  }
-  return false;
-}
-
-// namesSymbol: a bare name as a whole word; a field as Type.name or
-// v.name through a receiver variable; a method as Type.name, v.name( or
-// the call name( — the parenthesis is what tells a call of the method
-// from a type of the same name (core.MetricsSnapshot is the type,
-// MetricsSnapshot() the method). Two of 045's runs wrote exactly
-// "MetricsSnapshot() at line 4244".
-function namesSymbol(text: string, symbol: string): boolean {
-  const dot = symbol.indexOf(".");
-  if (dot < 0) return new RegExp(`\\b${escapeRegExp(symbol)}\\b`).test(text);
-  const type = escapeRegExp(symbol.slice(0, dot));
-  const isMethod = symbol.endsWith("()");
-  const member = escapeRegExp(isMethod ? symbol.slice(dot + 1, -2) : symbol.slice(dot + 1));
-  const viaReceiver = isMethod ? `\\b(?:[a-z_]\\w*\\.)?${member}\\(` : `\\b[a-z_]\\w*\\.${member}\\b`;
-  return new RegExp(`\\b${type}\\.${member}\\b|${viaReceiver}`).test(text);
-}
-
-function arrivesAt(text: string, p: LandingPoint): boolean {
-  const there = p.lines ? namesLine(text, p.path, p.lines) : namesPath(text, p.path);
-  return there || (p.symbols ?? []).some((s) => namesSymbol(text, s));
-}
-
-function scoreArrival(finalText: string, points: LandingPoints): Arrival {
-  const missed = Object.entries(points)
-    .filter(([, point]) => !arrivesAt(finalText, point))
-    .map(([name]) => name);
-  const of = Object.keys(points).length;
-  return { hit: of - missed.length, of, missed };
-}
-
-// The SDK streams one assistant message per content block, repeating the
-// message id and usage on each — turns are deduplicated by id, and the
-// tool_use blocks of every part with that id are collected together.
-function toolCallCosts(turns: readonly Turn[], results: ReadonlyMap<string, string>): ToolCallCost[] {
-  const out: ToolCallCost[] = [];
-  let index = 0;
-  for (const [i, t] of turns.entries()) {
-    if (t.toolUses.length === 0) continue;
-    const next = turns[i + 1];
-    // Growth between this turn's context and the next is attributed to
-    // this turn's tool calls together; several in one turn split it by
-    // their result sizes, since the SDK bills the turn, not the call.
-    const added = next ? Math.max(0, next.context - t.context) : 0;
-    const later = turns.length - (i + 1);
-    const totalBytes = t.toolUses.reduce((s, u) => s + (results.get(u.id) ?? "").length, 0);
-    for (const u of t.toolUses) {
-      index++;
-      const bytes = (results.get(u.id) ?? "").length;
-      const share = t.toolUses.length === 1 ? added : totalBytes === 0 ? added / t.toolUses.length : Math.round((added * bytes) / totalBytes);
-      const summary = u.command.replace(/\s+/g, " ").slice(0, 110);
-      out.push({ index, turn: i + 1, name: u.name, summary, resultBytes: bytes, added: share, carried: share * later });
-    }
-  }
-  return out;
 }
 
 // category names a tool call by what the agent was doing with it — the

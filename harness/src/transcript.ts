@@ -19,6 +19,9 @@ export interface ToolUse {
   // object for anything else. Verbatim and whole — a caller that wants
   // it short shortens it.
   readonly command: string;
+  // The call's input as the SDK recorded it, for what command leaves
+  // out — a Read's offset and limit, say (directive 049 §3).
+  readonly input: Readonly<Record<string, unknown>>;
 }
 
 export interface Turn {
@@ -73,7 +76,7 @@ export function readTranscript(path: string): Transcript {
         if (block.type === "tool_use") {
           const input = block.input as Record<string, unknown>;
           const command = typeof input.command === "string" ? input.command : typeof input.file_path === "string" ? input.file_path : JSON.stringify(input);
-          t.toolUses.push({ id: block.id as string, name: block.name as string, command });
+          t.toolUses.push({ id: block.id as string, name: block.name as string, command, input });
         }
         if (block.type === "text") t.text += block.text as string;
       }
@@ -98,6 +101,54 @@ export function readTranscript(path: string): Transcript {
     return { id: t.id, context: acc.context, output: acc.output, toolUses: acc.toolUses, text: acc.text };
   });
   return { turns: built, results, skillBodies, final };
+}
+
+// What one tool call cost the run, in tokens.
+//
+//   added   — the growth of the next assistant turn's context over the
+//             previous one, in tokens (the tool result plus whatever the
+//             model itself emitted in between); the direct size
+//   carried — added × the number of later turns, the number of times that
+//             growth was re-read afterwards; what the call actually
+//             contributed to the run's total
+//
+// Directive 041 §2 defined the two; analyze-arrival.ts held them until
+// directive 049 asked the same figure per call from account-output.ts.
+export interface ToolCallCost {
+  readonly id: string;
+  readonly index: number;
+  readonly turn: number;
+  readonly name: string;
+  readonly summary: string;
+  readonly resultBytes: number;
+  readonly added: number;
+  readonly carried: number;
+}
+
+// The SDK streams one assistant message per content block, repeating the
+// message id and usage on each — turns are deduplicated by id, and the
+// tool_use blocks of every part with that id are collected together.
+export function toolCallCosts(turns: readonly Turn[], results: ReadonlyMap<string, string>): ToolCallCost[] {
+  const out: ToolCallCost[] = [];
+  let index = 0;
+  for (const [i, t] of turns.entries()) {
+    if (t.toolUses.length === 0) continue;
+    const next = turns[i + 1];
+    // Growth between this turn's context and the next is attributed to
+    // this turn's tool calls together; several in one turn split it by
+    // their result sizes, since the SDK bills the turn, not the call.
+    const added = next ? Math.max(0, next.context - t.context) : 0;
+    const later = turns.length - (i + 1);
+    const totalBytes = t.toolUses.reduce((s, u) => s + (results.get(u.id) ?? "").length, 0);
+    for (const u of t.toolUses) {
+      index++;
+      const bytes = (results.get(u.id) ?? "").length;
+      const share = t.toolUses.length === 1 ? added : totalBytes === 0 ? added / t.toolUses.length : Math.round((added * bytes) / totalBytes);
+      const summary = u.command.replace(/\s+/g, " ").slice(0, 110);
+      out.push({ id: u.id, index, turn: i + 1, name: u.name, summary, resultBytes: bytes, added: share, carried: share * later });
+    }
+  }
+  return out;
 }
 
 // The text of a run's final answer, as the SDK's result message carries
