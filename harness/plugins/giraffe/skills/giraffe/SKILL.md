@@ -67,6 +67,18 @@ one of the places it offers into the query and search again.
 large result set you then grep is the state this command replaces. If
 you find yourself scanning output, you skipped a narrowing step.
 
+**A `callers:` line is the answer, not a lead.** Under a result, each
+site under `callers:` is printed as `file:line: ` followed by the
+call's own line of code, verbatim — the same text `grep` would show
+you for that line, already found, already read. Test files are indexed
+too, so a name's own tests are sites in this same list, told apart from
+production code by their own path (Go's `_test.go`) or a `test:true`
+on their result line — not a separate question you still owe a search.
+If you catch yourself about to `grep` a name `callers:` already printed
+— for what the call looks like, or for how many tests reference it —
+stop: rereading it from the answer costs nothing, and a second search
+for the same fact never turns up more than the first one gave you.
+
 ## 4. Narrowing
 
 Attributes in a result line are exactly what the query accepts. Copy
@@ -81,6 +93,8 @@ What they select:
   `type:Options` is every member of that type
 - `receiver:` for a method, the type it hangs off — that type's methods
 - `line:` the declaration's whole extent, to read exactly it
+- `test:` whether it lives in a test file — `test:true` to find how
+  something is tested, `test:false` to search production code alone
 
 `--query 'name:Prefix type:Options'` is the shape of "the member of
 this type called that", and it answers in one call what a search and a
