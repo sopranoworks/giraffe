@@ -13,7 +13,11 @@ import (
 )
 
 const (
-	maxResults = 8
+	// PageSize is how many results a page holds at most (§7's "8
+	// results"); a --page is that many entries into the ranking, and the
+	// window a caller enriches before printing (main attaches callers
+	// to exactly the page's entries, directive 050) is this wide.
+	PageSize   = 8
 	byteBudget = 2000
 	narrowByN  = 3 // how many groups the truncated section suggests narrowing by
 
@@ -40,6 +44,17 @@ const (
 	// the section says how many lines remain and the sed that prints
 	// them.
 	sourceBudget = 1500
+
+	// maxCallers bounds how many call sites a result's callers: line
+	// and a ## source header name (directive 050 §4): bounded because a
+	// list of eighty is not read, not to save bytes — the remainder is
+	// a count. Five: the sites query.orderCallers puts first are the
+	// ones whose qualifier names the declaration's own type, and on the
+	// measured corpus the two landing points of the task (049 §1) are
+	// the first two of Snapshot's eighty; five leaves room for a name
+	// with a few real callers to show all of them (MetricsSnapshot has
+	// two, Metrics four) and keeps the line to one line.
+	maxCallers = 5
 )
 
 // Source is one declaration's own text, read from disk by the caller
@@ -318,7 +333,7 @@ func FormatFrom(s Summary, matches []entry.Entry, page int) string {
 		page = 1
 	}
 	totalPages := pageCount(len(matches))
-	offset := (page - 1) * maxResults
+	offset := (page - 1) * PageSize
 
 	var b strings.Builder
 
@@ -568,13 +583,43 @@ func resultLine(e entry.Entry, showProject, showLang bool, extVaries map[string]
 	if e.Doc != "" {
 		fmt.Fprintf(&line, "  %s\n", e.Doc)
 	}
+	// Where the name is called (directive 050), after what it is and
+	// what it is for: the sites the caller would otherwise grep for —
+	// 049 counted that grep in 81 of 119 runs — as places to open,
+	// bounded, the rest a count. The label is the attribute --query
+	// takes (callers:), and each site is the value it matches.
+	if c := callersLine(e.Callers); c != "" {
+		fmt.Fprintf(&line, "  %s\n", c)
+	}
 	return line.String()
 }
 
+// callersLine renders callers: with at most maxCallers sites, path:line
+// each, and "+N more" for the rest; "" when there are none, so the line
+// is omitted like any other absent attribute.
+func callersLine(calls []entry.Call) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("callers:")
+	for i, c := range calls {
+		if i == maxCallers {
+			fmt.Fprintf(&b, " +%d more", len(calls)-i)
+			break
+		}
+		b.WriteByte(' ')
+		b.WriteString(quote(c.Place()))
+	}
+	return b.String()
+}
+
 // sourceSection renders ## source: each Source as a header naming what
-// it is (name, path and the range, paste-ready like a result line) and
-// then its lines verbatim, in the order given, until sourceBudget is
-// spent. The source that runs out of room ends with the count of lines
+// it is (name, path and the range, paste-ready like a result line),
+// its callers: line when it has one (directive 050 — the block is the
+// answer to a name typed exactly, and where that name is called is
+// part of it), and then its lines verbatim, in the order given, until
+// sourceBudget is spent. The source that runs out of room ends with the count of lines
 // left and the sed that prints them from where this stopped, so a
 // caller who wants the rest types that rather than opening the file
 // whole; nothing after it prints.
@@ -583,6 +628,10 @@ func sourceSection(sources []Source) string {
 	for _, src := range sources {
 		e := src.Entry
 		fmt.Fprintf(&b, "name:%s path:%s line:%s\n", quote(e.Name), quote(e.Path), e.LineRange())
+		if c := callersLine(e.Callers); c != "" {
+			b.WriteString(c)
+			b.WriteByte('\n')
+		}
 		for i, l := range src.Lines {
 			if b.Len()+len(l)+1 > sourceBudget {
 				fmt.Fprintf(&b, "... %d more lines: sed -n '%d,%dp' %s\n", len(src.Lines)-i, e.Line+i, e.EndLine, quote(e.Path))
@@ -604,19 +653,19 @@ func quote(s string) string {
 
 // pageCount reports how many --page-sized pages total matches spans, the
 // nominal count FormatFrom shows in ## truncated's "page X of Y" (§7,
-// directive 033): pages are sized by maxResults, the stable unit a page
+// directive 033): pages are sized by PageSize, the stable unit a page
 // number converts to and from, even though fit's own byteBudget can
-// occasionally show fewer than maxResults on one particular page — the
+// occasionally show fewer than PageSize on one particular page — the
 // caller's next --page N is still N, not something recomputed from how
 // many bytes an earlier page happened to fit.
 func pageCount(total int) int {
 	if total == 0 {
 		return 0
 	}
-	return (total + maxResults - 1) / maxResults
+	return (total + PageSize - 1) / PageSize
 }
 
-// fit selects a prefix of matches that stays within maxResults and, once
+// fit selects a prefix of matches that stays within PageSize and, once
 // at least one result is shown, within byteBudget total for the answer.
 // preambleLen is every byte the caller has already printed or is about
 // to print ahead of the first result line — §7's ## index line, the
@@ -638,7 +687,7 @@ func fit(matches []entry.Entry, showProject, showLang bool, extVaries map[string
 	matches = matches[offset:]
 	total := preambleLen
 	for i, e := range matches {
-		if i >= maxResults {
+		if i >= PageSize {
 			return matches[:i], matches[i:]
 		}
 		line := resultLine(e, showProject, showLang, extVaries)

@@ -350,8 +350,9 @@ func runFind(args []string, st searchState) int {
 		}
 		summary.TryNext = tryNext
 	}
+	withCallers(matches, page, st.entries)
 	if word != "" && page == 1 {
-		summary.Sources = exactSources(matches, word, st.rootOf)
+		summary.Sources = exactSources(matches, word, st.rootOf, st.entries)
 	}
 	// Directive 046: the ## index and ## warnings lines print once per
 	// session. What this session has seen comes from the record in the
@@ -373,6 +374,19 @@ func remember(shownDir, key string, summary output.Summary) {
 	}
 }
 
+// withCallers attaches where each result's name is called (directive
+// 050) to the entries page will print — output.PageSize of them from
+// the page's offset — and no other: a broad word ranks thousands, the
+// page shows eight, and a callers list is a store read each (see
+// query.Entries.Callers). The same enrichment-for-display exactSources
+// does with a declaration's text, one step earlier.
+func withCallers(matches []entry.Entry, page int, src query.Entries) {
+	first := (page - 1) * output.PageSize
+	for i := first; i < len(matches) && i < first+output.PageSize; i++ {
+		matches[i] = query.WithCallers(matches[i], src)
+	}
+}
+
 // maxSources caps how many exact matches ## source reads from disk
 // (directive 044): the section's own byte budget (output.sourceBudget)
 // bounds what prints, this bounds what is opened for it — a word that
@@ -388,8 +402,10 @@ const maxSources = 3
 // cannot be read, or whose project has no root here, is skipped
 // silently: the result line itself still names the range, and a
 // missing section is the answer's shape for "nothing to add", not an
-// error condition of the search.
-func exactSources(matches []entry.Entry, word string, rootOf map[string]string) []output.Source {
+// error condition of the search. Each source carries its callers
+// (directive 050): the block is the answer to a name typed exactly, and
+// its entry may sit past the page withCallers enriched.
+func exactSources(matches []entry.Entry, word string, rootOf map[string]string, src query.Entries) []output.Source {
 	var out []output.Source
 	for _, e := range matches {
 		if len(out) == maxSources {
@@ -406,7 +422,7 @@ func exactSources(matches []entry.Entry, word string, rootOf map[string]string) 
 		if err != nil {
 			continue // the range still prints on the result line; see above
 		}
-		out = append(out, output.Source{Entry: e, Lines: lines})
+		out = append(out, output.Source{Entry: query.WithCallers(e, src), Lines: lines})
 	}
 	return out
 }
@@ -441,7 +457,9 @@ func declarationLines(path string, first, last int) ([]string, error) {
 // kinds actually present in this repository's index follow it, from
 // the index itself (§6: "--help lists the four common attributes
 // always, plus the language-specific attributes actually present"),
-// see indexedAttributes.
+// see indexedAttributes. Directive 050 withdrew its last line, "Not
+// indexed: call sites - grep for those": they are, and callers: says
+// where.
 const helpText = `giraffe: an index of this repository's declarations (Go: types, funcs,
 methods, struct fields, consts, vars) and files, one entry each.
 
@@ -452,12 +470,12 @@ methods, struct fields, consts, vars) and files, one entry each.
   giraffe find ... --page N                    the next page of the same answer
 
 A result's line:A-B is the declaration's whole extent: sed -n 'A,Bp' <path>
-prints exactly it. Under each result: its source line, then its doc's
-first line - usually enough to judge it unopened. A result named exactly
-<word> also prints its text, under ## source. --query takes the attribute
-names result lines print (receiver: and type: for members); path: matches
-a substring, every other attribute exactly, no wildcards.
-Not indexed: call sites - grep for those.
+prints exactly it. Under each result: its source line, its doc's first
+line, and callers: where its name is called (file:line, likeliest first).
+A result named exactly <word> also prints its text, under ## source.
+--query takes the attribute names result lines print (receiver: and
+type: for members); path: and callers: match a substring, every other
+attribute exactly, no wildcards.
 `
 
 // isHelp reports whether args asks for help: --help, -h or help as the

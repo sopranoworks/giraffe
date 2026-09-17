@@ -830,3 +830,96 @@ func TestExactName(t *testing.T) {
 		}
 	}
 }
+
+// TestFilter_MatchesCallersBySite (directive 050): callers: matches a
+// site as the line prints it, or any substring of one — a file, to
+// keep what that file calls.
+func TestFilter_MatchesCallersBySite(t *testing.T) {
+	e := entry.Entry{Name: "Snapshot", Kind: "method", Callers: []entry.Call{
+		{Path: "cluster.go", Name: "Snapshot", Line: 4245, Via: "metrics"},
+		{Path: "internal/core/monitoring.go", Name: "Snapshot", Line: 106, Via: "Metrics"},
+	}}
+	for v, want := range map[string]bool{
+		"cluster.go:4245": true, "monitoring.go": true, "internal/core": true,
+		"cluster.go:4246": false, "metrics_test.go": false,
+	} {
+		if got := (Filter{"callers": {v}}).Match(e); got != want {
+			t.Errorf("callers:%s matched %v, want %v", v, got, want)
+		}
+	}
+	if (Filter{"callers": {"cluster.go"}}).Match(entry.Entry{Name: "Snapshot"}) {
+		t.Error("an entry with no callers matches no callers: value")
+	}
+	if !ValidAttributes(Slice(nil))["callers"] {
+		t.Error("callers is a common attribute, valid in every index")
+	}
+}
+
+// TestSearch_AttachesCallersOnlyWhenTheFilterAsks (directive 050): a
+// callers: constraint is applied to the sites the source holds; without
+// one, Search returns entries as decoded and leaves the page's callers
+// to the caller (main.withCallers) — a store read each, not spent on
+// entries never printed.
+func TestSearch_AttachesCallersOnlyWhenTheFilterAsks(t *testing.T) {
+	sites := []entry.Call{{Path: "a.go", Name: "Snapshot", Line: 1}}
+	src := Slice([]entry.Entry{
+		{Path: "b.go", Name: "Snapshot", Kind: "func", Project: "p", Exported: true, Callers: sites},
+		{Path: "c.go", Name: "Snapshots", Kind: "func", Project: "p", Exported: true},
+	})
+	got := Search(src, "snapshot", Filter{"callers": {"a.go"}}, "p")
+	if len(got) != 1 || got[0].Name != "Snapshot" || len(got[0].Callers) != 1 {
+		t.Fatalf("Search with callers:a.go = %+v, want Snapshot alone, carrying its site", got)
+	}
+	got = Browse(src, Filter{"callers": {"a.go"}}, "p")
+	if len(got) != 1 || got[0].Name != "Snapshot" {
+		t.Fatalf("Browse with callers:a.go = %+v, want Snapshot alone", got)
+	}
+	if got := Search(src, "snapshots", nil, "p"); len(got) != 1 || got[0].Callers != nil {
+		t.Errorf("Search without a callers constraint attached %+v", got)
+	}
+	if got := WithCallers(entry.Entry{Name: "Snapshot", Kind: "func"}, src); len(got.Callers) != 1 {
+		t.Errorf("WithCallers = %+v, want the one site", got.Callers)
+	}
+	if got := WithCallers(entry.Entry{Name: "Snapshot", Kind: entry.KindFile}, src); got.Callers != nil {
+		t.Errorf("a file entry is not called: %+v", got.Callers)
+	}
+}
+
+// TestOrderCallers_QualifierNamingThePositionComesFirst (directive 050):
+// among a name's sites, the ones whose qualifier names one of the
+// entry's own position values — the whole value or its last word,
+// case-insensitively — come first; the rest keep their stored order.
+// A one-letter qualifier that happens to end the value does not count.
+func TestOrderCallers_QualifierNamingThePositionComesFirst(t *testing.T) {
+	e := entry.Entry{Name: "Snapshot", Kind: "method", Position: []entry.Position{
+		{Name: "module", Value: "internal/core"}, {Name: "receiver", Value: "NodeMetrics"},
+	}}
+	stored := []entry.Call{
+		{Path: "cluster.go", Line: 3788, Via: "g"},
+		{Path: "cluster.go", Line: 4245, Via: "metrics"},
+		{Path: "cluster/ddata/ormap.go", Line: 305, Via: "s"},
+		{Path: "internal/core/monitoring.go", Line: 106, Via: "Metrics"},
+		{Path: "x.go", Line: 1},
+	}
+	got := orderCallers(e, stored)
+	wantLines := []int{4245, 106, 3788, 305, 1}
+	for i, w := range wantLines {
+		if got[i].Line != w {
+			t.Fatalf("order = %+v, want lines %v", got, wantLines)
+		}
+	}
+	if stored[0].Line != 3788 {
+		t.Error("orderCallers must not reorder the caller's slice")
+	}
+	for _, c := range []struct {
+		via, value string
+		want       bool
+	}{
+		{"metrics", "NodeMetrics", true}, {"Metrics", "Metrics", true}, {"provider", "ClusterProvider", true},
+		{"s", "NodeMetrics", false}, {"trics", "NodeMetrics", false}, {"", "NodeMetrics", false}, {"NodeMetricsX", "NodeMetrics", false},
+	} {
+		if got := namesValue(c.via, c.value); got != c.want {
+			t.Errorf("namesValue(%q, %q) = %v, want %v", c.via, c.value, got, c.want)
+		}
+	}
+}

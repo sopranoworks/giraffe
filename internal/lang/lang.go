@@ -19,8 +19,9 @@ import (
 
 // Extractor is what a language module is: given a scanned file, it
 // either handles the file and returns the entries it produced
-// (handled=true), or it does not, and the caller tries the next
-// module in the dispatch order. A module that recognises the file's
+// (handled=true) — and, since directive 050, the call sites in it,
+// nil for a module that reads no syntax — or it does not, and the
+// caller tries the next module in the dispatch order. A module that recognises the file's
 // extension but fails to parse its content still answers
 // handled=false — "not handled" covers both "this is not mine" and
 // "this was mine and its content did not parse" (directive 016 §1:
@@ -36,7 +37,7 @@ import (
 //
 // Declared here, in the package that consumes it, not beside any one
 // implementation (language-policy G2).
-type Extractor func(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, handled bool, err error)
+type Extractor func(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, calls []entry.Call, handled bool, err error)
 
 // module pairs a language's own display name — the lang attribute's
 // value (§24 C-20), unmapped per §6 — with its Extractor, for
@@ -71,8 +72,8 @@ var extractionModules = []module{
 var genericModule = module{name: "", extract: file.Extract}
 
 // Extract hands f to each module, in dispatchOrder(dirMarkers)'s
-// order, and returns the first one's entries once it answers
-// handled=true. dirMarkers is the set of root-marker basenames present
+// order, and returns the first one's entries and call sites once it
+// answers handled=true. dirMarkers is the set of root-marker basenames present
 // in f's own owning directory (scanner.OwningDir over scanner.MarkerDirs)
 // — nil or empty when none apply, which dispatches in plain
 // registration order. declined carries forward whatever diagnostic a
@@ -80,17 +81,17 @@ var genericModule = module{name: "", extract: file.Extract}
 // after a module's own extension matched — for the caller to report
 // (in ## warnings) alongside the entries a later module still
 // produced; it is not itself a failure of this call.
-func Extract(f scanner.File, project string, assignments map[string]string, dirMarkers map[string]bool) (entries []entry.Entry, declined error) {
+func Extract(f scanner.File, project string, assignments map[string]string, dirMarkers map[string]bool) (entries []entry.Entry, calls []entry.Call, declined error) {
 	for _, m := range dispatchOrder(dirMarkers) {
-		es, handled, err := m.extract(f, project, assignments)
+		es, cs, handled, err := m.extract(f, project, assignments)
 		if err != nil {
 			declined = err
 		}
 		if handled {
-			return es, declined
+			return es, cs, declined
 		}
 	}
-	return nil, declined // unreachable: file.Extract always handles
+	return nil, nil, declined // unreachable: file.Extract always handles
 }
 
 // dispatchOrder is exclusionModule, then extractionModules reordered

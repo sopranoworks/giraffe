@@ -12,7 +12,7 @@ import (
 // handled=true, no entries — decided from the path alone.
 func TestExtract_ClaimsADeniedExtension(t *testing.T) {
 	f := scanner.WithContent("logo.png", []byte("\x89PNG"))
-	entries, handled, err := Extract(f, "giraffe", nil)
+	entries, _, handled, err := Extract(f, "giraffe", nil)
 	if !handled || entries != nil || err != nil {
 		t.Errorf("Extract(logo.png) = %v, %v, %v, want nil, true, nil", entries, handled, err)
 	}
@@ -23,7 +23,7 @@ func TestExtract_ClaimsADeniedExtension(t *testing.T) {
 // a later module to answer.
 func TestExtract_DeclinesAnUnknownExtension(t *testing.T) {
 	f := scanner.WithContent("widget.cpp", []byte("int main() {}\n"))
-	entries, handled, err := Extract(f, "giraffe", nil)
+	entries, _, handled, err := Extract(f, "giraffe", nil)
 	if handled || entries != nil || err != nil {
 		t.Errorf("Extract(widget.cpp) = %v, %v, %v, want nil, false, nil", entries, handled, err)
 	}
@@ -34,7 +34,7 @@ func TestExtract_DeclinesAnUnknownExtension(t *testing.T) {
 // binary, so it is claimed (excluded) by default.
 func TestExtract_ClaimsAnUnknownExtensionlessFile(t *testing.T) {
 	f := scanner.WithContent("configure", []byte("#!/bin/sh\n"))
-	entries, handled, err := Extract(f, "giraffe", nil)
+	entries, _, handled, err := Extract(f, "giraffe", nil)
 	if !handled || entries != nil || err != nil {
 		t.Errorf("Extract(configure) = %v, %v, %v, want nil, true, nil", entries, handled, err)
 	}
@@ -47,7 +47,7 @@ func TestExtract_ClaimsAnUnknownExtensionlessFile(t *testing.T) {
 func TestExtract_DeclinesAKnownExtensionlessFile(t *testing.T) {
 	for _, path := range []string{"Makefile", "CMakeLists.txt"} {
 		f := scanner.WithContent(path, []byte("x"))
-		entries, handled, err := Extract(f, "giraffe", nil)
+		entries, _, handled, err := Extract(f, "giraffe", nil)
 		if handled || entries != nil || err != nil {
 			t.Errorf("Extract(%s) = %v, %v, %v, want nil, false, nil", path, entries, handled, err)
 		}
@@ -63,7 +63,7 @@ func TestExtract_DeclinesAKnownExtensionlessFile(t *testing.T) {
 func TestExtract_OperatorAssignmentOverridesTheDenyList(t *testing.T) {
 	f := scanner.WithContent("logo.png", []byte("\x89PNG"))
 	assignments := map[string]string{".png": "image"}
-	entries, handled, err := Extract(f, "giraffe", assignments)
+	entries, _, handled, err := Extract(f, "giraffe", assignments)
 	if handled || entries != nil || err != nil {
 		t.Errorf("Extract(logo.png, assigned) = %v, %v, %v, want nil, false, nil", entries, handled, err)
 	}
@@ -74,7 +74,7 @@ func TestExtract_OperatorAssignmentOverridesTheDenyList(t *testing.T) {
 func TestExtract_UnrelatedAssignmentDoesNotOverride(t *testing.T) {
 	f := scanner.WithContent("logo.png", []byte("\x89PNG"))
 	assignments := map[string]string{".inc": "c"}
-	entries, handled, err := Extract(f, "giraffe", assignments)
+	entries, _, handled, err := Extract(f, "giraffe", assignments)
 	if !handled || entries != nil || err != nil {
 		t.Errorf("Extract(logo.png, unrelated assignment) = %v, %v, %v, want nil, true, nil", entries, handled, err)
 	}
@@ -88,7 +88,7 @@ func TestExtract_UnrelatedAssignmentDoesNotOverride(t *testing.T) {
 func TestExtract_IndexOnlyAssignmentOverridesTheDenyList(t *testing.T) {
 	f := scanner.WithContent("logo.png", []byte("\x89PNG"))
 	assignments := map[string]string{".png": ""}
-	entries, handled, err := Extract(f, "giraffe", assignments)
+	entries, _, handled, err := Extract(f, "giraffe", assignments)
 	if handled || entries != nil || err != nil {
 		t.Errorf("Extract(logo.png, index-only assignment) = %v, %v, %v, want nil, false, nil", entries, handled, err)
 	}
@@ -102,7 +102,7 @@ func TestExtract_NeverReadsContent(t *testing.T) {
 	dir := t.TempDir()
 	for _, path := range []string{"missing.png", "missing.cpp"} {
 		f := scanner.Open(dir, scanner.FileMeta{Path: path})
-		if _, _, err := Extract(f, "giraffe", nil); err != nil {
+		if _, _, _, err := Extract(f, "giraffe", nil); err != nil {
 			t.Errorf("Extract(%s) returned an error, meaning content was read: %v", path, err)
 		}
 	}

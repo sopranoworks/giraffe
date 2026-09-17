@@ -30,7 +30,7 @@ import (
 // assigned" would, which is correct here — file.Extract's own contract
 // with a caller is "the label, or unknown", and an operator who
 // declined to name one is exactly the unknown case.
-func Extract(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, handled bool, err error) {
+func Extract(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, calls []entry.Call, handled bool, err error) {
 	lang := assignments[path.Ext(f.Path)]
-	return []entry.Entry{entry.FileEntry(f.Path, project, lang)}, true, nil
+	return []entry.Entry{entry.FileEntry(f.Path, project, lang)}, nil, true, nil
 }

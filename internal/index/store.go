@@ -45,7 +45,7 @@ const storeFilename = "store.bolt"
 // A change in what an encoded field means is a change of shape too: an
 // index that decoded fine but held ranges computed the old way would
 // keep them for every file that has not changed since.
-const schemaVersion = "4" // 3: EndLine joined the entry encoding (directive 042); 4: Line starts at the doc comment (043)
+const schemaVersion = "5" // 3: EndLine joined the entry encoding (directive 042); 4: Line starts at the doc comment (043); 5: the calls and callers buckets (050)
 
 var (
 	bucketMeta         = []byte("meta")
@@ -53,10 +53,21 @@ var (
 	bucketFiles        = []byte("files")
 	bucketEnum         = []byte("enum")
 	bucketNameTrigrams = []byte("name_trigrams")
-	keySchemaVersion   = []byte("schema_version")
-	keyEnumBlob        = []byte("blob")
-	keyWalkBlob        = []byte("walk")
-	keyNextID          = []byte("next_id")
+	// bucketCalls and bucketCallers are the call-site index's two
+	// directions (directive 050 §2): calls maps a file's path to every
+	// Call in it — the record commit reads back to know which names a
+	// changed file used to call — and callers maps a name to every Call
+	// of it anywhere, in path then line order, which Callers serves. A
+	// call in file A is a fact about a name declared in B, so neither is
+	// stored in an entry: a change to A rewrites A's calls record and
+	// the callers lists of the names A called before and calls now, and
+	// nothing of B's (see commit).
+	bucketCalls      = []byte("calls")
+	bucketCallers    = []byte("callers")
+	keySchemaVersion = []byte("schema_version")
+	keyEnumBlob      = []byte("blob")
+	keyWalkBlob      = []byte("walk")
+	keyNextID        = []byte("next_id")
 )
 
 // Store is one root's persistent state: extracted entries, the
@@ -138,7 +149,7 @@ func createStore(root string) (*Store, error) {
 		return nil, fmt.Errorf("create store: %w", err)
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bucketMeta, bucketEntries, bucketFiles, bucketEnum, bucketNameTrigrams} {
+		for _, name := range [][]byte{bucketMeta, bucketEntries, bucketFiles, bucketEnum, bucketNameTrigrams, bucketCalls, bucketCallers} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
@@ -466,6 +477,111 @@ func (s *Store) entriesByID(ids []uint64) []entry.Entry {
 	return out
 }
 
+// Callers returns every call site of name in this store, in path then
+// line order — what a result line's callers: carries (directive 050).
+// Nil when nothing calls the name. One key read, decoded on demand: the
+// list is attached to an entry only when a query reaches it
+// (query.Search, query.Browse), never on the whole-index walks All and
+// Candidates serve, so Summarize's pass over every entry pays nothing
+// for it.
+func (s *Store) Callers(name string) []entry.Call {
+	if s == nil {
+		return nil
+	}
+	var calls []entry.Call
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketCallers)
+		if b == nil {
+			return nil
+		}
+		calls = decodeCalls(b.Get([]byte(name)))
+		return nil
+	})
+	return calls
+}
+
+// callsOf returns the call sites recorded for path — a file's own
+// calls, carried forward with its entries when its content is unchanged
+// but its record must be rewritten (carryForward), the way entriesByID
+// carries the entries.
+func (s *Store) callsOf(path string) []entry.Call {
+	if s == nil {
+		return nil
+	}
+	var calls []entry.Call
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketCalls)
+		if b == nil {
+			return nil
+		}
+		calls = decodeCalls(b.Get([]byte(path)))
+		return nil
+	})
+	return calls
+}
+
+// encodeCalls and decodeCalls render a list of call sites one per
+// line, tab-separated path, name, line and via — the same one-fact-
+// one-line, tab-between-fields shape encodeEntry uses, so a path or
+// name is sanitized the same way (sanitize) and nothing in a field can
+// split it. Both buckets hold the same shape: a file's calls carry
+// their own path on every line (redundant there, one encoding), a
+// name's callers carry the name on every line likewise. Empty in,
+// nil out; a malformed line is skipped, since this file's own pair
+// wrote it.
+func encodeCalls(calls []entry.Call) []byte {
+	var b strings.Builder
+	for i, c := range calls {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(sanitize(c.Path))
+		b.WriteByte('\t')
+		b.WriteString(sanitize(c.Name))
+		b.WriteByte('\t')
+		b.WriteString(strconv.Itoa(c.Line))
+		b.WriteByte('\t')
+		b.WriteString(sanitize(c.Via))
+	}
+	return []byte(b.String())
+}
+
+func decodeCalls(v []byte) []entry.Call {
+	if len(v) == 0 {
+		return nil
+	}
+	lines := strings.Split(string(v), "\n")
+	calls := make([]entry.Call, 0, len(lines))
+	for _, l := range lines {
+		f := strings.Split(l, "\t")
+		if len(f) != 4 {
+			continue
+		}
+		line, err := strconv.Atoi(f[2])
+		if err != nil {
+			continue
+		}
+		calls = append(calls, entry.Call{Path: f[0], Name: f[1], Line: line, Via: f[3]})
+	}
+	return calls
+}
+
+// sortCalls orders call sites by path, then line, then name — the
+// stored order of a name's callers, and the order a file's calls are
+// written in, so the same tree writes the same bytes (§3 C5).
+func sortCalls(calls []entry.Call) {
+	sort.Slice(calls, func(i, j int) bool {
+		a, b := calls[i], calls[j]
+		if a.Path != b.Path {
+			return a.Path < b.Path
+		}
+		if a.Line != b.Line {
+			return a.Line < b.Line
+		}
+		return a.Name < b.Name
+	})
+}
+
 func encodeFileRecord(r Record) []byte {
 	ids := make([]string, len(r.EntryIDs))
 	for i, id := range r.EntryIDs {
@@ -498,6 +614,10 @@ type fileChange struct {
 	ModTime int64
 	Size    int64
 	Entries []entry.Entry
+	// Calls is every call site in the file (directive 050), written to
+	// the calls bucket under Path and merged into the callers bucket
+	// under each called name — see commit.
+	Calls []entry.Call
 }
 
 // cacheBlobs bundles commit's two cache-blob parameters — see commit's
@@ -540,8 +660,19 @@ const (
 // C-14's discard-and-rebuild ethos — one mechanism, not two that must be
 // kept in step by hand).
 //
+// The call-site index (directive 050 §2) follows the same rule with a
+// second dimension: a changed or deleted path's old calls record names
+// every callers list that held a site in that path, and its new calls
+// name every list that gains one. Each such name's list is read once,
+// stripped of every site in a changed or deleted path, given the new
+// sites, sorted and written back once — batched across the whole call
+// like the trigram postings below, for the same reason. A name nobody
+// in the change set called before or after is never opened; a path
+// outside the change set has its own calls record and its own
+// contribution to every callers list left exactly as they were.
+//
 // keysWritten counts distinct bbolt keys touched (Put or Delete) across
-// entries, files, name_trigrams and meta — the number directive 013's
+// entries, files, name_trigrams, calls, callers and meta — the number directive 013's
 // own completion report is required to give for "nothing changed / 5
 // files changed / full build": a Put and a Delete on the same key
 // within one call (an entry's trigram gram losing an old id and
@@ -590,11 +721,15 @@ func (s *Store) commit(changes []fileChange, deletes []string, caches cacheBlobs
 		eb := tx.Bucket(bucketEntries)
 		fb := tx.Bucket(bucketFiles)
 		tb := tx.Bucket(bucketNameTrigrams)
+		cb := tx.Bucket(bucketCalls)
+		rb := tx.Bucket(bucketCallers)
 		mb := tx.Bucket(bucketMeta)
 		if mode == commitBulk {
 			eb.FillPercent = 1.0
 			fb.FillPercent = 1.0
 			tb.FillPercent = 1.0
+			cb.FillPercent = 1.0
+			rb.FillPercent = 1.0
 		}
 
 		touched := make(map[string]struct{})
@@ -618,7 +753,20 @@ func (s *Store) commit(changes []fileChange, deletes []string, caches cacheBlobs
 		addIDs := make(map[string][]uint64)
 		removeIDs := make(map[string][]uint64)
 
+		// The call-site index's own batch (directive 050 §2): the paths
+		// whose sites every touched callers list must drop, the sites
+		// each such list gains, and the names whose lists are touched at
+		// all — applied once per name below, after every change and
+		// delete has been seen.
+		droppedPaths := make(map[string]bool)
+		addCalls := make(map[string][]entry.Call)
+		touchedNames := make(map[string]struct{})
+
 		removeOwned := func(path string) error {
+			droppedPaths[path] = true
+			for _, c := range decodeCalls(cb.Get([]byte(path))) {
+				touchedNames[c.Name] = struct{}{}
+			}
 			v := fb.Get([]byte(path))
 			if v == nil {
 				return nil
@@ -655,6 +803,12 @@ func (s *Store) commit(changes []fileChange, deletes []string, caches cacheBlobs
 				return err
 			}
 			touch('f', []byte(path))
+			if cb.Get([]byte(path)) != nil {
+				if err := cb.Delete([]byte(path)); err != nil {
+					return err
+				}
+				touch('c', []byte(path))
+			}
 		}
 
 		sortedChanges := append([]fileChange(nil), changes...)
@@ -681,6 +835,25 @@ func (s *Store) commit(changes []fileChange, deletes []string, caches cacheBlobs
 				return err
 			}
 			touch('f', []byte(c.Path))
+			if err := putCalls(cb, c.Path, c.Calls, touch); err != nil {
+				return err
+			}
+			for _, call := range c.Calls {
+				addCalls[call.Name] = append(addCalls[call.Name], call)
+				touchedNames[call.Name] = struct{}{}
+			}
+		}
+
+		sortedNames := make([]string, 0, len(touchedNames))
+		for n := range touchedNames {
+			sortedNames = append(sortedNames, n)
+		}
+		sort.Strings(sortedNames)
+		for _, n := range sortedNames {
+			if err := applyCallers(rb, n, droppedPaths, addCalls[n]); err != nil {
+				return err
+			}
+			touch('r', []byte(n))
 		}
 
 		grams := make(map[string]struct{}, len(addIDs)+len(removeIDs))
@@ -734,6 +907,49 @@ func (s *Store) commit(changes []fileChange, deletes []string, caches cacheBlobs
 		return nil
 	})
 	return keysWritten, err
+}
+
+// putCalls writes path's calls record, or deletes it when the file
+// calls nothing — an absent key and an empty list are one fact, as for
+// a trigram's postings. A file whose record was absent and stays absent
+// touches no key.
+func putCalls(cb *bolt.Bucket, path string, calls []entry.Call, touch func(byte, []byte)) error {
+	key := []byte(path)
+	if len(calls) == 0 {
+		if cb.Get(key) == nil {
+			return nil
+		}
+		touch('c', key)
+		return cb.Delete(key)
+	}
+	sorted := append([]entry.Call(nil), calls...)
+	sortCalls(sorted)
+	touch('c', key)
+	return cb.Put(key, encodeCalls(sorted))
+}
+
+// applyCallers reads name's callers list once, drops every site whose
+// path is in droppedPaths (a changed or deleted file's old sites, which
+// the file's own new calls re-add if they still exist), appends add,
+// sorts, and writes the result back once — deleting the key when
+// nothing calls the name any more, as applyPosting does for a gram. The
+// caller has batched every path and site the whole transaction touches
+// under this name, so a name called from a thousand places costs one
+// read and one write here.
+func applyCallers(rb *bolt.Bucket, name string, droppedPaths map[string]bool, add []entry.Call) error {
+	calls := decodeCalls(rb.Get([]byte(name)))
+	kept := calls[:0]
+	for _, c := range calls {
+		if !droppedPaths[c.Path] {
+			kept = append(kept, c)
+		}
+	}
+	calls = append(kept, add...)
+	if len(calls) == 0 {
+		return rb.Delete([]byte(name))
+	}
+	sortCalls(calls)
+	return rb.Put([]byte(name), encodeCalls(calls))
 }
 
 // applyPosting reads gram's current posting list once, removes every id

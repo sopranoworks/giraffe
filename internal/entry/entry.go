@@ -101,6 +101,43 @@ type Entry struct {
 	// run, because a start line alone cannot aim sed. Zero, like Line,
 	// on a file entry.
 	EndLine int
+
+	// Callers is where this declaration's name is called from (directive
+	// 050): every Call in the index whose Name is this entry's, ordered
+	// by query for the reader, closest evidence first. A fact about the
+	// name, not the declaration — matching is by name alone, never by
+	// resolved type, so a same-named method on another receiver is
+	// listed too, at the same false-positive cost ## source already
+	// carries for an exact name; each line is a place to open, not a
+	// claim about what calls what. Not part of the entry's own stored
+	// shape: a call in file A is a fact about a name declared in B, held
+	// by the index under the name and attached at query time, so a
+	// change to A never rewrites B's entries (§31.2). Nil when nothing
+	// calls the name, or for a file entry — absence, as everywhere here.
+	Callers []Call
+}
+
+// Call is one call site: the place in Path, at Line, where Name is
+// called (directive 050). Via is the identifier the call is qualified
+// by, when it has one — the last name before the dot in c.metrics.
+// Snapshot(...) is "metrics", in ms.provider.Metrics().Snapshot(...)
+// it is "Metrics", in a bare Snapshot(...) it is "" — the one fact a
+// call site carries about what it calls, recorded so a reader shown a
+// bounded list gets the sites that name the declaration's own type
+// first (query.orderCallers). A language module produces these
+// alongside its entries, one per (Name, Line) in a file; the index
+// holds them under the name.
+type Call struct {
+	Path string
+	Name string
+	Line int
+	Via  string
+}
+
+// Place is the site as a result line prints it and --query callers:
+// matches it: path:line, paste-ready (§7).
+func (c Call) Place() string {
+	return c.Path + ":" + strconv.Itoa(c.Line)
 }
 
 // LineRange is the one value the line attribute carries — printed on a

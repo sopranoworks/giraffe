@@ -68,14 +68,14 @@ var knownExtensionless = []string{
 // produces a labelled (or deliberately unlabelled) entry for it. This
 // is the same assignments map file.Extract already reads to label
 // Lang; no new coupling to scanner.Pattern is introduced to get it.
-func Extract(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, handled bool, err error) {
+func Extract(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, calls []entry.Call, handled bool, err error) {
 	if _, indexed := assignments[path.Ext(f.Path)]; indexed {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	if excluded(f.Path) {
-		return nil, true, nil
+		return nil, nil, true, nil
 	}
-	return nil, false, nil
+	return nil, nil, false, nil
 }
 
 func excluded(p string) bool {

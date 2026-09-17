@@ -1234,3 +1234,40 @@ func TestRefresh_WarningsAreSortedByPathRegardlessOfConcurrency(t *testing.T) {
 		}
 	}
 }
+
+// TestRefresh_CallSitesAreIndexedAndCarriedForward (directive 050): a
+// Go file's call sites reach the store's callers lists through Refresh,
+// and survive the carry-forward path (a marker change re-stamps every
+// unchanged file's Project without re-extracting it — its calls must
+// come along, or the callers of everything it calls would vanish).
+func TestRefresh_CallSitesAreIndexedAndCarriedForward(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, "go.mod", "module example.com/p\n")
+	writeFile(t, root, "b.go", "package p\n\ntype N struct{}\n\nfunc (n *N) Snapshot() {}\n")
+	writeFile(t, root, "a.go", "package p\n\ntype M struct{ metrics *N }\n\nfunc Run(m *M) { m.metrics.Snapshot() }\n")
+	gitCommit(t, root, "go.mod", "a.go", "b.go")
+	s := mustRefresh(t, root)
+	want := []entry.Call{{Path: "a.go", Name: "Snapshot", Line: 5, Via: "metrics"}}
+	if got := s.Callers("Snapshot"); len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("Callers(Snapshot) = %+v, want %+v", got, want)
+	}
+	closeStore(t, s)
+
+	// The marker moves: every file is carried forward, none re-extracted.
+	writeFile(t, root, "go.mod", "module example.com/q\n")
+	gitCommit(t, root, "go.mod")
+	s2, stats, err := Refresh(context.Background(), root, scope(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(t, s2)
+	// The marker itself is a scanned file and is dispatched (to the
+	// generic module); the two Go files are carried forward, not
+	// re-extracted — which is the path this test is about.
+	if stats.Dispatched != 1 {
+		t.Fatalf("Dispatched = %d, want 1 (go.mod alone) — a marker change carries the Go files forward", stats.Dispatched)
+	}
+	if got := s2.Callers("Snapshot"); len(got) != 1 || got[0] != want[0] {
+		t.Errorf("after carry-forward, Callers(Snapshot) = %+v, want %+v", got, want)
+	}
+}

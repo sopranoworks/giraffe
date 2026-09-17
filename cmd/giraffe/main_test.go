@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"giraffe/internal/entry"
+	"giraffe/internal/query"
 )
 
 // TestParseArgs_Page (directive 033, replacing 032's --offset): --page
@@ -103,13 +104,15 @@ func TestIsHelp(t *testing.T) {
 // once by every caller and then re-read on every later turn of theirs;
 // it is bounded the way a result page is, so that explaining the tool
 // never costs more than one answer from it. And it says what the range
-// on a result line is for.
+// on a result line is for, and that callers: is where a name is called
+// (directive 050 — the line that said call sites were not indexed is
+// gone with the gap).
 func TestHelpText_StaysSmall(t *testing.T) {
 	const limit = 1000
 	if len(helpText) > limit {
 		t.Fatalf("helpText is %d bytes, over the %d-byte limit", len(helpText), limit)
 	}
-	for _, must := range []string{"find <word>", "--query", "--page", "browse a place", "line:A-B", "sed -n 'A,Bp'", "Not indexed: call sites"} {
+	for _, must := range []string{"find <word>", "--query", "--page", "browse a place", "line:A-B", "sed -n 'A,Bp'", "callers:"} {
 		if !strings.Contains(helpText, must) {
 			t.Errorf("helpText does not mention %q", must)
 		}
@@ -134,7 +137,7 @@ func TestExactSources(t *testing.T) {
 		{Path: "a.go", Name: "X", Kind: "func", Project: "p", Line: 3, EndLine: 40}, // exact, range past the file's end
 		{Path: "a.go", Name: "x", Kind: "method", Project: "p", Line: 6, EndLine: 6},
 	}
-	got := exactSources(matches, "x", map[string]string{"p": root})
+	got := exactSources(matches, "x", map[string]string{"p": root}, query.Slice(nil))
 	if len(got) != 2 || got[0].Entry.Name != "X" || got[0].Entry.Kind != "type" || got[1].Entry.Kind != "method" {
 		t.Fatalf("exactSources = %+v, want X (type) then x (method)", got)
 	}
@@ -148,7 +151,7 @@ func TestExactSources(t *testing.T) {
 	for range maxSources + 2 {
 		many = append(many, x)
 	}
-	if got := exactSources(many, "X", map[string]string{"p": root}); len(got) != maxSources {
+	if got := exactSources(many, "X", map[string]string{"p": root}, query.Slice(nil)); len(got) != maxSources {
 		t.Errorf("%d exact matches read %d sources, want maxSources (%d)", len(many), len(got), maxSources)
 	}
 }

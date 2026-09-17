@@ -210,7 +210,11 @@ func carryForward(fc fileContext, m scanner.FileMeta, modTime, size int64, oldRe
 		entries = append(entries, e)
 	}
 	patchFileEntry(entries, size)
-	return extracted{change: fileChange{Path: m.Path, ModTime: modTime, Size: size, Entries: entries}}
+	// The file's calls carry forward with its entries (directive 050):
+	// commit replaces a changed path's calls record whole, so a record
+	// rewritten for its Project must bring its call sites along or lose
+	// them.
+	return extracted{change: fileChange{Path: m.Path, ModTime: modTime, Size: size, Entries: entries, Calls: ro.callsOf(m.Path)}}
 }
 
 // extractWorker is the pipeline's extract stage: extractWorkers
@@ -233,10 +237,10 @@ func extractWorker(fc fileContext, extractCh <-chan produceItem, resultCh chan<-
 		f := scanner.Open(fc.root, item.meta)
 		project := scanner.ProjectFor(item.meta.Path, fc.markerDirs, fc.projectNames, fc.fallbackProject)
 		dirMarkers := fc.markersByDir[scanner.OwningDir(item.meta.Path, fc.markerDirs)]
-		entries, declined := lang.Extract(f, project, fc.assignments, dirMarkers)
+		entries, calls, declined := lang.Extract(f, project, fc.assignments, dirMarkers)
 		patchFileEntry(entries, item.size)
 		res := extracted{
-			change:     fileChange{Path: item.meta.Path, ModTime: item.modTime, Size: item.size, Entries: entries},
+			change:     fileChange{Path: item.meta.Path, ModTime: item.modTime, Size: item.size, Entries: entries, Calls: calls},
 			dispatched: true,
 		}
 		if declined != nil {
