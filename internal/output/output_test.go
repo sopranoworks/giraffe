@@ -558,3 +558,35 @@ func TestFormat_NoticesRenderWithoutTheUnparsedLabel(t *testing.T) {
 		t.Fatalf("a notice must not be labelled as a parse failure:\n%s", out)
 	}
 }
+
+// TestFormatWords (directive 062): several words share one ## index and
+// one ## warnings, each gets a block under its own header, a declaration
+// already shown is not shown again, and a word that matched nothing says
+// so and what it was matched against.
+func TestFormatWords(t *testing.T) {
+	x := entry.Entry{Path: "a/x.go", Name: "MailBox", Kind: "type", Line: 3, Exported: true}
+	y := entry.Entry{Path: "a/y.go", Name: "Mailer", Kind: "func", Line: 9, Exported: true}
+	s := Summary{Commit: "abc1234", Symbols: 42, Notices: []string{"a notice"}}
+	out := FormatWords(s, []WordAnswer{
+		{Word: "mail", Matches: []entry.Entry{x, y}},
+		{Word: "box", Matches: []entry.Entry{x}},
+		{Word: "smtp", TryNext: []string{"names in the index starting the same way: Smt"}},
+	}, 1)
+	for _, want := range []string{
+		"## results: mail\nname:MailBox",
+		"## results: box\nevery match is shown above\n",
+		"## results: smtp\nnone: no name, doc line or path among the index's 42 entries contains smtp",
+		"## try next: smtp\nnames in the index",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("answer lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Count(out, "## index") != 1 || strings.Count(out, "a notice") != 1 || strings.Count(out, "name:MailBox") != 1 {
+		t.Errorf("something printed more than once:\n%s", out)
+	}
+	one := FormatWords(s, []WordAnswer{{Word: "smtp"}}, 1)
+	if !strings.Contains(one, "\n## results\nnone: ") {
+		t.Errorf("a single word's empty answer does not say so:\n%s", one)
+	}
+}

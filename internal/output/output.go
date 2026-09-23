@@ -7,6 +7,7 @@ import (
 	"iter"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 
 	"giraffe/internal/entry"
@@ -281,10 +282,32 @@ func Format(s Summary, matches []entry.Entry) string {
 // unit — fit already had exactly the right primitive (skip N entries),
 // it was only ever reachable through the wrong-unit flag.
 func FormatFrom(s Summary, matches []entry.Entry, page int) string {
+	return FormatWords(s, []WordAnswer{{Matches: matches, TryNext: s.TryNext}}, page)
+}
+
+// WordAnswer is one search word's share of an answer (directive 062):
+// its ranked matches and, when there are none, its direction. Word is
+// "" for the one unnamed answer of a browse or a single-answer caller.
+type WordAnswer struct {
+	Word    string
+	Matches []entry.Entry
+	TryNext []string
+}
+
+// FormatWords renders one find call's answer for every word it was
+// given, at page (directive 062): the ## index block once, then each
+// word's results, truncation and direction under headers naming the
+// word when there is more than one, then ## warnings once. Before
+// this, a caller with three words ran giraffe three times and read the
+// index block and the warnings three times. A declaration an earlier
+// word already showed on this page is not printed again. A named word
+// that matched nothing says so, and what it was matched against,
+// rather than leaving an answer with no results section to be read as
+// one.
+func FormatWords(s Summary, answers []WordAnswer, page int) string {
 	if page < 1 {
 		page = 1
 	}
-	totalPages := pageCount(len(matches))
 	offset := (page - 1) * maxResults
 
 	var b strings.Builder
@@ -306,39 +329,63 @@ func FormatFrom(s Summary, matches []entry.Entry, page int) string {
 	// counts against it — b.Len() at this point is exactly that: the
 	// "## index" header, the index line, and (when present) the
 	// languages: and by-ext: lines, none of which fit's own preambleLen
-	// used to see. The "## results" header itself is also printed, but
-	// only once shown turns out non-empty, so its length is added here
-	// too, conditional on there being anything to show.
-	preambleLen := b.Len()
-	const resultsHeader = "\n## results\n"
-	if len(matches) > 0 {
-		preambleLen += len(resultsHeader)
-	}
-	shown, remainder := fit(matches, s.ShowProject, s.ShowLang, s.ExtVaries, preambleLen, offset)
-
-	if len(shown) > 0 {
-		b.WriteString(resultsHeader)
-		for _, e := range shown {
-			b.WriteString(resultLine(e, s.ShowProject, s.ShowLang, s.ExtVaries))
+	// used to see. With several words each word's block gets the same
+	// budget, the shared preamble counted against every one of them.
+	preamble := b.Len()
+	named := len(answers) > 1
+	shownBefore := make(map[string]bool)
+	for _, a := range answers {
+		header := func(section string) string {
+			if named {
+				return fmt.Sprintf("\n## %s: %s\n", section, quote(a.Word))
+			}
+			return fmt.Sprintf("\n## %s\n", section)
 		}
-	}
+		var fresh []entry.Entry
+		for _, e := range a.Matches {
+			if !shownBefore[entryKey(e)] {
+				fresh = append(fresh, e)
+			}
+		}
+		resultsHeader := header("results")
+		preambleLen := preamble
+		if len(fresh) > 0 {
+			preambleLen += len(resultsHeader)
+		}
+		shown, remainder := fit(fresh, s.ShowProject, s.ShowLang, s.ExtVaries, preambleLen, offset)
 
-	if len(remainder) > 0 {
-		b.WriteString("\n## truncated\n")
-		b.WriteString(truncatedLine(remainder, page, totalPages))
-		b.WriteByte('\n')
-	}
+		switch {
+		case len(shown) > 0:
+			b.WriteString(resultsHeader)
+			for _, e := range shown {
+				shownBefore[entryKey(e)] = true
+				b.WriteString(resultLine(e, s.ShowProject, s.ShowLang, s.ExtVaries))
+			}
+		case a.Word != "" && len(a.Matches) == 0:
+			b.WriteString(resultsHeader)
+			fmt.Fprintf(&b, "none: no name, doc line or path among the index's %d entries contains %s (text inside bodies is not indexed)\n", s.Symbols, quote(a.Word))
+		case a.Word != "" && len(fresh) == 0:
+			b.WriteString(resultsHeader)
+			b.WriteString("every match is shown above\n")
+		}
 
-	// §22: `## truncated` already tells a caller how to narrow the same
-	// question. Nothing told it how to switch to a different one, and a
-	// zero-result answer carried no direction at all. Only emitted when
-	// there is something to show — TryNext is populated exclusively from
-	// evidence in the index (query.Suggest), never a fixed list, so an
-	// unfed empty search stays silent rather than inventing advice.
-	if len(matches) == 0 && len(s.TryNext) > 0 {
-		b.WriteString("\n## try next\n")
-		for _, line := range s.TryNext {
-			fmt.Fprintf(&b, "%s\n", line)
+		if len(remainder) > 0 {
+			b.WriteString(header("truncated"))
+			b.WriteString(truncatedLine(remainder, page, pageCount(len(fresh))))
+			b.WriteByte('\n')
+		}
+
+		// §22: `## truncated` already tells a caller how to narrow the
+		// same question. Nothing told it how to switch to a different
+		// one, and a zero-result answer carried no direction at all.
+		// Only emitted when there is something to show — TryNext is
+		// populated exclusively from evidence in the index
+		// (query.Suggest), never a fixed list.
+		if len(a.Matches) == 0 && len(a.TryNext) > 0 {
+			b.WriteString(header("try next"))
+			for _, line := range a.TryNext {
+				fmt.Fprintf(&b, "%s\n", line)
+			}
 		}
 	}
 
@@ -356,6 +403,11 @@ func FormatFrom(s Summary, matches []entry.Entry, page int) string {
 	}
 
 	return b.String()
+}
+
+// entryKey identifies an entry across the words of one answer.
+func entryKey(e entry.Entry) string {
+	return e.Project + "\x00" + e.Path + "\x00" + e.Kind + "\x00" + e.Name + "\x00" + strconv.Itoa(e.Line)
 }
 
 // resultLine renders one result. line prints whenever the entry has one

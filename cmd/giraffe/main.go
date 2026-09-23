@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 
-	"giraffe/internal/entry"
 	"giraffe/internal/index"
 	"giraffe/internal/lang"
 	"giraffe/internal/limits"
@@ -299,13 +298,13 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 // empty filter too), so it now gets direction on a miss the same as a
 // search does — before this directive it got none at all.
 func runFind(args []string, st searchState) int {
-	word, queryRaw, page, err := parseArgs(args)
+	words, queryRaw, page, err := parseArgs(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "giraffe:", err)
 		return 2
 	}
-	if word == "" && queryRaw == "" {
-		fmt.Fprintln(os.Stderr, "usage: giraffe find <word> [--query '<attr>:<value> ...'] [--page N] | giraffe find --query '<attr>:<value> ...' [--page N]; giraffe --help explains")
+	if len(words) == 0 && queryRaw == "" {
+		fmt.Fprintln(os.Stderr, "usage: giraffe find <word>... [--query '<attr>:<value> ...'] [--page N] | giraffe find --query '<attr>:<value> ...' [--page N]; giraffe --help explains")
 		return 2
 	}
 
@@ -320,25 +319,31 @@ func runFind(args []string, st searchState) int {
 
 	summary := output.Summarize(st.entries.All(), st.commitLine, st.dispatched, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
 
-	var matches []entry.Entry
-	if word == "" {
+	if len(words) == 0 {
 		// Browsing a place (§31.3): no search word to rank against.
-		matches = query.Browse(st.entries, filter, st.invocationProject)
-	} else {
-		matches = query.Search(st.entries, word, filter, st.invocationProject)
+		matches := query.Browse(st.entries, filter, st.invocationProject)
+		if len(matches) == 0 {
+			summary.TryNext = query.DiagnoseFilter(st.entries, filter)
+		}
+		fmt.Print(output.FormatFrom(summary, matches, page))
+		return 0
 	}
 
-	if len(matches) == 0 {
-		var tryNext []string
-		if len(filter) > 0 {
-			tryNext = append(tryNext, query.DiagnoseFilter(st.entries, filter)...)
+	// Every word is its own search, answered in the one reply
+	// (directive 062): a caller who already knows the three words it
+	// will try pays for one index block, not three.
+	answers := make([]output.WordAnswer, 0, len(words))
+	for _, word := range words {
+		a := output.WordAnswer{Word: word, Matches: query.Search(st.entries, word, filter, st.invocationProject)}
+		if len(a.Matches) == 0 {
+			if len(filter) > 0 {
+				a.TryNext = append(a.TryNext, query.DiagnoseFilter(st.entries, filter)...)
+			}
+			a.TryNext = append(a.TryNext, query.Suggest(st.entries, word, st.invocationProject)...)
 		}
-		if word != "" {
-			tryNext = append(tryNext, query.Suggest(st.entries, word, st.invocationProject)...)
-		}
-		summary.TryNext = tryNext
+		answers = append(answers, a)
 	}
-	fmt.Print(output.FormatFrom(summary, matches, page))
+	fmt.Print(output.FormatWords(summary, answers, page))
 	return 0
 }
 
@@ -360,8 +365,9 @@ func runFind(args []string, st searchState) int {
 const helpText = `giraffe: an index of this repository's declarations (Go: types, funcs,
 methods, struct fields, consts, vars) and files, one entry each.
 
-  giraffe find <word>                          entries whose name, doc line or
-                                               path contains <word>, closest first
+  giraffe find <word>...                       entries whose name, doc line or
+                                               path contains <word>, closest first;
+                                               several words, one answer each
   giraffe find <word> --query 'attr:value ...' the same, narrowed
   giraffe find --query 'attr:value ...'        browse a place: everything at it,
                                                in file order
@@ -369,9 +375,8 @@ methods, struct fields, consts, vars) and files, one entry each.
 
 A result's line:A-B is the declaration's whole extent: sed -n 'A,Bp' <path>
 prints exactly it. Under each result: its source line, then its doc's
-first line - usually enough to judge it unopened. --query takes the
-attribute names result lines print (receiver: and type: for members);
-path: matches a substring, every other attribute exactly, no wildcards.
+first line. --query takes the attribute names result lines print;
+path: matches a substring, every other attribute exactly.
 Not indexed: call sites and bodies - grep for those.
 `
 
@@ -525,33 +530,33 @@ func notIgnored(ctx context.Context, root, relPath string) bool {
 // page directly, 1-indexed — page defaults to 1, the top of the ranking,
 // unchanged from before either flag existed, and matches the unit
 // ## truncated's "page X of Y" now shows (output.FormatFrom).
-func parseArgs(args []string) (word, queryRaw string, page int, err error) {
+func parseArgs(args []string) (words []string, queryRaw string, page int, err error) {
 	page = 1
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--query":
 			if i+1 >= len(args) {
-				return "", "", 0, fmt.Errorf("--query requires a value")
+				return nil, "", 0, fmt.Errorf("--query requires a value")
 			}
 			queryRaw = args[i+1]
 			i++
 		case args[i] == "--page":
 			if i+1 >= len(args) {
-				return "", "", 0, fmt.Errorf("--page requires a value")
+				return nil, "", 0, fmt.Errorf("--page requires a value")
 			}
 			n, convErr := strconv.Atoi(args[i+1])
 			if convErr != nil || n < 1 {
-				return "", "", 0, fmt.Errorf("--page must be a positive integer, got %q", args[i+1])
+				return nil, "", 0, fmt.Errorf("--page must be a positive integer, got %q", args[i+1])
 			}
 			page = n
 			i++
-		case word == "":
-			word = args[i]
+		case strings.HasPrefix(args[i], "--"):
+			return nil, "", 0, fmt.Errorf("unexpected argument %q", args[i])
 		default:
-			return "", "", 0, fmt.Errorf("unexpected argument %q", args[i])
+			words = append(words, args[i])
 		}
 	}
-	return word, queryRaw, page, nil
+	return words, queryRaw, page, nil
 }
 
 func commitHash(ctx context.Context, root string) (string, error) {

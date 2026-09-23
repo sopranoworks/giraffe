@@ -28,7 +28,8 @@ func TestParseArgs_Page(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			word, _, page, err := parseArgs(tt.args)
+			words, _, page, err := parseArgs(tt.args)
+			word := strings.Join(words, " ")
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected an error for args %v, got word=%q page=%d", tt.args, word, page)
@@ -46,13 +47,27 @@ func TestParseArgs_Page(t *testing.T) {
 	}
 }
 
+// TestParseArgs_SeveralWords (directive 062): every positional argument
+// is a word of its own, in order, around the flags; an unknown flag is
+// still an error, not a word.
+func TestParseArgs_SeveralWords(t *testing.T) {
+	words, _, page, err := parseArgs([]string{"metrics", "--page", "2", "actor", "count"})
+	if err != nil || strings.Join(words, ",") != "metrics,actor,count" || page != 2 {
+		t.Fatalf("got words=%v page=%d err=%v", words, page, err)
+	}
+	if _, _, _, err := parseArgs([]string{"metrics", "--offset", "8"}); err == nil {
+		t.Fatalf("an unknown flag was taken as a word")
+	}
+}
+
 // TestParseArgs_QueryAndPageTogether: the two flags are independent, same
 // as --query already coexists with a positional word.
 func TestParseArgs_QueryAndPageTogether(t *testing.T) {
-	word, queryRaw, page, err := parseArgs([]string{"--query", "type:LogsOptions", "--page", "2"})
+	words, queryRaw, page, err := parseArgs([]string{"--query", "type:LogsOptions", "--page", "2"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	word := strings.Join(words, " ")
 	if word != "" || queryRaw != "type:LogsOptions" || page != 2 {
 		t.Fatalf("got word=%q queryRaw=%q page=%d", word, queryRaw, page)
 	}
