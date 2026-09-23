@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type SDKMessage, type SdkPluginConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { RunConfig, RunRecord } from "./types.js";
 
 function sdkVersion(): string {
@@ -48,8 +48,11 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
   let actualModel: string | null = null;
   let actualTools: readonly string[] | null = null;
   let actualPermissionMode: string | null = null;
+  let actualSkills: readonly string[] | null = null;
+  let actualPlugins: readonly { name: string; path: string }[] | null = null;
   let claudeCodeVersion: string | null = null;
   let apiKeySource: string | null = null;
+  let contextSkills: unknown = null;
 
   let numTurns: number | null = null;
   let durationMs: number | null = null;
@@ -67,22 +70,26 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
   // on the result message (there isn't one — see types.ts).
   let toolUseCount = 0;
 
-  for await (const message of query({
+  const session = query({
     prompt: config.prompt,
     options: {
       cwd: config.cwd,
       model: config.model,
-      tools: config.tools as string[] | undefined,
+      tools: config.tools as never,
       allowedTools: config.allowedTools as string[] | undefined,
       disallowedTools: config.disallowedTools as string[] | undefined,
       permissionMode: config.permissionMode as never,
       settingSources: config.settingSources as never,
       strictMcpConfig: config.strictMcpConfig,
+      plugins: config.plugins as SdkPluginConfig[] | undefined,
+      skills: config.skills as never,
+      systemPrompt: config.systemPrompt,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       sandbox: config.sandbox as any,
       maxTurns: config.maxTurns,
     },
-  }) as AsyncIterable<SDKMessage>) {
+  });
+  for await (const message of session as AsyncIterable<SDKMessage>) {
     // §1: the full transcript, as data — every message the SDK emits,
     // written as it arrives, not summarized and not buffered until the
     // end (a crash mid-run still leaves everything received so far).
@@ -94,8 +101,22 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
       actualModel = message.model;
       actualTools = message.tools;
       actualPermissionMode = message.permissionMode;
+      actualSkills = message.skills;
+      actualPlugins = message.plugins;
       claudeCodeVersion = message.claude_code_version;
       apiKeySource = message.apiKeySource as unknown as string;
+      // Directive 055 §2: init's skills array is every skill the session
+      // discovered, the CLI's bundled ones included — not what the model
+      // is shown. The `skills` option filters the listing the model
+      // reads, and the context-usage breakdown is the one place that
+      // reports that listing: which skills put tokens in front of the
+      // model, and how many. 'summary' answers from local estimates, so
+      // it adds no API call and no turn.
+      try {
+        contextSkills = (await session.getContextUsage({ detail: "summary" })).skills ?? [];
+      } catch (err) {
+        contextSkills = { error: String(err) };
+      }
     }
 
     if (message.type === "assistant") {
@@ -150,6 +171,9 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
       permissionMode: config.permissionMode,
       settingSources: config.settingSources,
       strictMcpConfig: config.strictMcpConfig,
+      plugins: config.plugins,
+      skills: config.skills,
+      systemPrompt: config.systemPrompt,
       sandbox: config.sandbox,
       corpus: config.corpus,
     },
@@ -158,6 +182,9 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
       model: actualModel,
       tools: actualTools,
       permissionMode: actualPermissionMode,
+      skills: actualSkills,
+      plugins: actualPlugins,
+      contextSkills,
     },
     usage: {
       numTurns,

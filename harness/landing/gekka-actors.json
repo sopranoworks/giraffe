@@ -1,0 +1,6 @@
+{
+  "metrics.go": "internal/core/metrics\\.go|core/metrics\\.go|\\bmetrics\\.go\\b",
+  "monitoring.go": "monitoring\\.go|ClusterProvider|handleMetrics",
+  "cluster.go:4244": "cluster\\.go:42\\d\\d|cluster\\.go:4\\d{3}|MetricsSnapshot\\(\\)|\\.MetricsSnapshot\\(",
+  "Cluster.actors": "\\bc\\.actors\\b|Cluster\\.actors|\\bactors\\b map|c\\.actorsMu|len\\(c\\.actors\\)"
+}

@@ -16,10 +16,22 @@
 //             growth was re-read afterwards; what the call actually
 //             contributed to totalTokens
 //
-// Usage: tsx src/analyze-arrival.ts <transcript.jsonl>...
+// Usage: tsx src/analyze-arrival.ts [--landing <points.json>] <transcript.jsonl>...
 // One transcript: the per-call table. Several: one line per run
 // (tokens/turns/tool calls) and the median and range per arm, the
 // distribution 041 §1 asks for.
+//
+// Directive 045 (code-manners D6: 040, 041 and 044 each scored arrival
+// with a one-off script, and the third copy forces extraction):
+// --landing names a JSON file of {"landing point": "regex"} — the
+// task's own list, e.g. landing/gekka-actors.json — and each run's
+// final answer is scored against it, hits out of points, the way 041
+// did. The score is a grep of the agent's answer, not a judgement of
+// it; the report says what the points are.
+//
+// Also 045: a Skill tool call is its own category, and the run line
+// says whether the run loaded a skill and how many bytes it was — the
+// directive's "count its cost".
 
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
@@ -55,15 +67,42 @@ interface RunSummary {
   readonly turns: number;
   readonly toolCalls: number;
   readonly costUsd: number | null;
+  // The first skill the run loaded: the bytes of its body and the
+  // tokens the load added to the next turn's context. Null when the run
+  // made no Skill call. The body is not the tool result (that is one
+  // line, "Launching skill: ...") — the SDK delivers it as a user
+  // message of its own, prefixed "Base directory for this skill:".
+  readonly skill: { bytes: number; tokens: number } | null;
+  // Landing points hit, when --landing was given.
+  readonly arrival: Arrival | null;
+}
+
+interface Arrival {
+  readonly hit: number;
+  readonly of: number;
+  readonly missed: readonly string[];
+}
+
+type LandingPoints = Record<string, string>;
+
+function scoreArrival(finalText: string, points: LandingPoints): Arrival {
+  const missed = Object.entries(points)
+    .filter(([, pattern]) => !new RegExp(pattern).test(finalText))
+    .map(([name]) => name);
+  const of = Object.keys(points).length;
+  return { hit: of - missed.length, of, missed };
 }
 
 // The SDK streams one assistant message per content block, repeating the
 // message id and usage on each — turns are deduplicated by id, and the
 // tool_use blocks of every part with that id are collected together.
-function readTranscript(path: string): { turns: Turn[]; results: Map<string, number>; final: unknown } {
+const SKILL_BODY_PREFIX = "Base directory for this skill:";
+
+function readTranscript(path: string): { turns: Turn[]; results: Map<string, number>; skillBodies: number[]; final: unknown } {
   const turns: Turn[] = [];
   const byId = new Map<string, { context: number; output: number; toolUses: ToolUse[]; text: string }>();
   const results = new Map<string, number>();
+  const skillBodies: number[] = [];
   let final: unknown = null;
   for (const line of readFileSync(path, "utf8").split("\n")) {
     if (line.trim() === "") continue;
@@ -100,6 +139,9 @@ function readTranscript(path: string): { turns: Turn[]; results: Map<string, num
           const text = typeof c === "string" ? c : Array.isArray(c) ? c.map((x: { text?: string }) => x.text ?? "").join("") : JSON.stringify(c);
           results.set(block.tool_use_id as string, text.length);
         }
+        if (block.type === "text" && typeof block.text === "string" && block.text.startsWith(SKILL_BODY_PREFIX)) {
+          skillBodies.push(block.text.length);
+        }
       }
     }
     if (m.type === "result") final = m;
@@ -109,7 +151,7 @@ function readTranscript(path: string): { turns: Turn[]; results: Map<string, num
     const acc = byId.get(t.id)!;
     return { id: t.id, context: acc.context, output: acc.output, toolUses: acc.toolUses, text: acc.text };
   });
-  return { turns: built, results, final };
+  return { turns: built, results, skillBodies, final };
 }
 
 function toolCallCosts(turns: readonly Turn[], results: Map<string, number>): ToolCallCost[] {
@@ -140,6 +182,7 @@ function toolCallCosts(turns: readonly Turn[], results: Map<string, number>): To
 // command text alone; a compound command is named by its first
 // command, since that is what the agent reached for.
 function category(name: string, summary: string): string {
+  if (name === "Skill") return "skill";
   if (summary.includes("giraffe")) return "giraffe";
   if (name === "Read") return "read";
   const first = summary.replace(/^cd \S+ && /, "").split(/\s+/)[0] ?? "";
@@ -166,13 +209,14 @@ function printCategories(costs: readonly ToolCallCost[]) {
   }
 }
 
-function summarize(path: string): RunSummary {
-  const { turns, final } = readTranscript(path);
-  const f = final as { num_turns?: number; usage?: Record<string, number>; total_cost_usd?: number } | null;
+function summarize(path: string, landing: LandingPoints | null): RunSummary {
+  const { turns, results, skillBodies, final } = readTranscript(path);
+  const f = final as { num_turns?: number; usage?: Record<string, number>; total_cost_usd?: number; result?: string } | null;
   const u = f?.usage ?? {};
   const totalTokens = (u.input_tokens ?? 0) + (u.output_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
   const name = basename(path);
   const arm = name.includes("-aided-") ? "aided" : name.includes("-unaided-") ? "unaided" : "?";
+  const skillCall = toolCallCosts(turns, results).find((c) => c.name === "Skill");
   return {
     file: name,
     arm,
@@ -180,6 +224,8 @@ function summarize(path: string): RunSummary {
     turns: f?.num_turns ?? turns.length,
     toolCalls: turns.reduce((s, t) => s + t.toolUses.length, 0),
     costUsd: f?.total_cost_usd ?? null,
+    skill: skillCall ? { bytes: skillBodies[0] ?? 0, tokens: skillCall.added } : null,
+    arrival: landing ? scoreArrival(f?.result ?? "", landing) : null,
   };
 }
 
@@ -190,11 +236,15 @@ function median(xs: number[]): number {
   return s.length % 2 === 1 ? at(mid) : Math.round((at(mid - 1) + at(mid)) / 2);
 }
 
-function printOne(path: string) {
+function arrivalText(a: Arrival | null): string {
+  return a ? `${a.hit}/${a.of}${a.missed.length ? " missed " + a.missed.join(",") : ""}` : "";
+}
+
+function printOne(path: string, landing: LandingPoints | null) {
   const { turns, results } = readTranscript(path);
   const costs = toolCallCosts(turns, results);
-  const s = summarize(path);
-  console.log(`${s.file}: ${s.totalTokens} tokens, ${s.turns} turns, ${s.toolCalls} tool calls, $${s.costUsd?.toFixed(3)}`);
+  const s = summarize(path, landing);
+  console.log(`${s.file}: ${s.totalTokens} tokens, ${s.turns} turns, ${s.toolCalls} tool calls, $${s.costUsd?.toFixed(3)}${s.skill ? `, skill ${s.skill.bytes} bytes / ${s.skill.tokens} tokens` : ""}${s.arrival ? `, arrival ${arrivalText(s.arrival)}` : ""}`);
   console.log("");
   console.log("call  turn  added  carried  bytes  tool  command");
   for (const c of costs) {
@@ -212,10 +262,14 @@ function printOne(path: string) {
   console.log(`context re-read total ${contextSum}, first turn context ${turns[0]?.context ?? 0}, last turn context ${turns[turns.length - 1]?.context ?? 0}`);
 }
 
-function printMany(paths: string[]) {
-  const rows = paths.map(summarize);
-  console.log("run  arm      tokens   turns  calls  cost");
-  rows.forEach((r, i) => console.log(`${String(i + 1).padStart(3)}  ${r.arm.padEnd(8)} ${String(r.totalTokens).padStart(7)}  ${String(r.turns).padStart(5)}  ${String(r.toolCalls).padStart(5)}  $${r.costUsd?.toFixed(3)}`));
+function printMany(paths: string[], landing: LandingPoints | null) {
+  const rows = paths.map((p) => summarize(p, landing));
+  console.log("run  arm      tokens   turns  calls  cost    skill(bytes/tokens)  arrival");
+  rows.forEach((r, i) =>
+    console.log(
+      `${String(i + 1).padStart(3)}  ${r.arm.padEnd(8)} ${String(r.totalTokens).padStart(7)}  ${String(r.turns).padStart(5)}  ${String(r.toolCalls).padStart(5)}  $${r.costUsd?.toFixed(3)}  ${(r.skill ? `${r.skill.bytes}/${r.skill.tokens}` : "-").padStart(19)}  ${arrivalText(r.arrival)}`
+    )
+  );
   console.log("");
   const arms: Record<string, RunSummary[]> = {};
   for (const r of rows) (arms[r.arm] ??= []).push(r);
@@ -226,19 +280,33 @@ function printMany(paths: string[]) {
     const calls = rs.map((r) => r.toolCalls);
     med[arm] = median(toks);
     console.log(`${arm}: n=${rs.length} tokens median ${median(toks)} range ${Math.min(...toks)}-${Math.max(...toks)}; turns median ${median(turns)} range ${Math.min(...turns)}-${Math.max(...turns)}; calls median ${median(calls)} range ${Math.min(...calls)}-${Math.max(...calls)}`);
+    const loaded = rs.filter((r) => r.skill != null);
+    if (loaded.length > 0) console.log(`${arm}: skill loaded in ${loaded.length} of ${rs.length}, median ${median(loaded.map((r) => r.skill!.tokens))} tokens added`);
+    if (landing) {
+      const of = Object.keys(landing).length;
+      const all = rs.filter((r) => r.arrival?.hit === of).length;
+      const missedCounts = new Map<string, number>();
+      for (const r of rs) for (const m of r.arrival?.missed ?? []) missedCounts.set(m, (missedCounts.get(m) ?? 0) + 1);
+      const missedText = [...missedCounts.entries()].map(([k, v]) => `${k} ${v}`).join(", ");
+      console.log(`${arm}: arrival ${of}/${of} in ${all} of ${rs.length}${missedText ? "; missed: " + missedText : ""}`);
+    }
   }
   if (med.aided != null && med.unaided != null) {
     console.log(`aided median / unaided median = ${((100 * med.aided) / med.unaided).toFixed(1)}%`);
   }
 }
 
-const args = process.argv.slice(2);
+const argv = process.argv.slice(2);
+const landingAt = argv.indexOf("--landing");
+const landingFile = landingAt >= 0 ? argv[landingAt + 1] : undefined;
+const landing: LandingPoints | null = landingFile ? (JSON.parse(readFileSync(landingFile, "utf8")) as LandingPoints) : null;
+const args = landingAt >= 0 ? argv.filter((_, i) => i !== landingAt && i !== landingAt + 1) : argv;
 const only = args.length === 1 ? args[0] : undefined;
 if (only !== undefined) {
-  printOne(only);
+  printOne(only, landing);
 } else if (args.length > 1) {
-  printMany(args);
+  printMany(args, landing);
 } else {
-  console.error("usage: tsx src/analyze-arrival.ts <transcript.jsonl>...");
+  console.error("usage: tsx src/analyze-arrival.ts [--landing <points.json>] <transcript.jsonl>...");
   process.exitCode = 2;
 }

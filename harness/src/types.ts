@@ -3,6 +3,13 @@
 // are scoped to class-based TypeScript; a plain functional module sidesteps
 // them by construction, the same instinct behind giraffe's own Go style).
 
+import type { SdkPluginConfig } from "@anthropic-ai/claude-agent-sdk";
+
+export interface ToolsPreset {
+  readonly type: "preset";
+  readonly preset: "claude_code";
+}
+
 export interface RunConfig {
   readonly runId: string;
   readonly label: string;
@@ -14,7 +21,9 @@ export interface RunConfig {
   // makes an arm's tool set closed rather than "everything ambient minus
   // a few names"; allowedTools/disallowedTools below only scope
   // permission within whatever `tools` grants.
-  readonly tools?: readonly string[];
+  // Directive 058 §1: or the SDK's own preset — every tool the CLI
+  // gives a real session, not a closed list.
+  readonly tools?: readonly string[] | ToolsPreset;
   readonly allowedTools?: readonly string[];
   readonly disallowedTools?: readonly string[];
   readonly permissionMode?: string;
@@ -31,6 +40,19 @@ export interface RunConfig {
   // for a closed arm — see tool-lists.ts.
   readonly settingSources?: readonly string[];
   readonly strictMcpConfig?: boolean;
+  // Directive 045 §3: what carries a skill into an arm. With
+  // settingSources [] the SDK reads no skill from this host, so a
+  // plugin directory — the SDK's own shape, passed through verbatim —
+  // is the one explicit carrier, and `skills` names which of the
+  // discovered skills the model is shown (the SDK hides the rest from
+  // its listing). Both absent: the arm has what 029 gave it and
+  // nothing more.
+  readonly plugins?: readonly SdkPluginConfig[];
+  readonly skills?: readonly string[] | "all";
+  // Directive 058 §1: the system prompt. Absent, the SDK sends its
+  // minimal one — every run from 030 to 056 did; the preset is the
+  // prompt a real Claude Code session runs under.
+  readonly systemPrompt?: { readonly type: "preset"; readonly preset: "claude_code" };
   // Passed through verbatim to the SDK's `sandbox` option. Left untyped
   // here (not re-declared) so this file does not drift from the SDK's own
   // SandboxSettings shape — see harness.ts's import instead.
@@ -61,12 +83,15 @@ export interface RunRecord {
     readonly prompt: string;
     readonly cwd: string;
     readonly model: string | undefined;
-    readonly tools: readonly string[] | undefined;
+    readonly tools: RunConfig["tools"];
     readonly allowedTools: readonly string[] | undefined;
     readonly disallowedTools: readonly string[] | undefined;
     readonly permissionMode: string | undefined;
     readonly settingSources: readonly string[] | undefined;
     readonly strictMcpConfig: boolean | undefined;
+    readonly plugins: readonly SdkPluginConfig[] | undefined;
+    readonly skills: RunConfig["skills"];
+    readonly systemPrompt: RunConfig["systemPrompt"];
     readonly sandbox: unknown;
     readonly corpus: RunConfig["corpus"];
   };
@@ -79,6 +104,17 @@ export interface RunRecord {
     readonly model: string | null;
     readonly tools: readonly string[] | null;
     readonly permissionMode: string | null;
+    // Directive 045 §3: the skills the session lists and the plugins it
+    // loaded, as init reports them — 029's rule, verify against what the
+    // model was given. A skill's body still only reaches the model when
+    // it asks for it (a Skill tool call in the transcript); this says it
+    // was offered.
+    readonly skills: readonly string[] | null;
+    readonly plugins: readonly { name: string; path: string }[] | null;
+    // Directive 055 §2: the skills the model's listing actually carried,
+    // from the context-usage breakdown taken at init — init's own
+    // skills array above lists every discovered skill, shown or not.
+    readonly contextSkills: unknown;
   };
 
   // Straight from the SDK's final "result" message. Never computed by
