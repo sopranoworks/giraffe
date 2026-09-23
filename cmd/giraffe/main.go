@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"giraffe/internal/entry"
 	"giraffe/internal/index"
 	"giraffe/internal/lang"
 	"giraffe/internal/limits"
@@ -99,14 +100,21 @@ func run(ctx context.Context, args []string) int {
 		fmt.Print(indexedAttributes(ctx))
 		return 0
 	}
-	// find and prepare are mandatory and never implied (§4): a bare word
-	// is not treated as a search term, since both are themselves
-	// plausible identifiers in real code.
-	if args[0] != "find" && args[0] != "prepare" {
-		fmt.Fprint(os.Stderr, helpText)
-		return 2
-	}
+	// Anything that is not a subcommand or a flag is a search (directive
+	// 062, h1): a caller told only that giraffe "searches this codebase"
+	// runs `giraffe <what it wants>` — every such call in the measured
+	// runs that did not first read --help — and until now got the help
+	// on stderr and exit 2, and went back to grep. `giraffe find <word>`
+	// is unchanged; `giraffe prepare` still prepares, so a search for the
+	// word "prepare" or "find" is spelled `giraffe find prepare`.
 	sub, rest := args[0], args[1:]
+	if sub != "find" && sub != "prepare" {
+		if strings.HasPrefix(sub, "-") {
+			fmt.Fprint(os.Stderr, helpText)
+			return 2
+		}
+		sub, rest = "find", args
+	}
 
 	st, code := buildSearchState(ctx)
 	defer func() {
@@ -332,7 +340,27 @@ func runFind(args []string, st searchState) int {
 	// Every word is its own search, answered in the one reply
 	// (directive 062): a caller who already knows the three words it
 	// will try pays for one index block, not three.
-	answers := make([]output.WordAnswer, 0, len(words))
+	answers := make([]output.WordAnswer, 0, len(words)+1)
+	// Several words: first the entries that carry every one of them, in
+	// name, doc line or path, ranked as the first word ranks them — what
+	// "cluster metrics" asks for before either word alone.
+	if len(words) > 1 {
+		var all []entry.Entry
+		for _, e := range query.Search(st.entries, words[0], filter, st.invocationProject) {
+			text := strings.ToLower(e.Name + " " + e.Doc + " " + e.Path)
+			every := true
+			for _, w := range words[1:] {
+				if !strings.Contains(text, strings.ToLower(w)) {
+					every = false
+					break
+				}
+			}
+			if every {
+				all = append(all, e)
+			}
+		}
+		answers = append(answers, output.WordAnswer{Word: strings.Join(words, " "), Matches: all})
+	}
 	for _, word := range words {
 		a := output.WordAnswer{Word: word, Matches: query.Search(st.entries, word, filter, st.invocationProject)}
 		if len(a.Matches) == 0 {
@@ -365,7 +393,7 @@ func runFind(args []string, st searchState) int {
 const helpText = `giraffe: an index of this repository's declarations (Go: types, funcs,
 methods, struct fields, consts, vars) and files, one entry each.
 
-  giraffe find <word>...                       entries whose name, doc line or
+  giraffe [find] <word>...                     entries whose name, doc line or
                                                path contains <word>, closest first;
                                                several words, one answer each
   giraffe find <word> --query 'attr:value ...' the same, narrowed
@@ -553,7 +581,8 @@ func parseArgs(args []string) (words []string, queryRaw string, page int, err er
 		case strings.HasPrefix(args[i], "--"):
 			return nil, "", 0, fmt.Errorf("unexpected argument %q", args[i])
 		default:
-			words = append(words, args[i])
+			// "cluster metrics", quoted as one argument, is two words.
+			words = append(words, strings.Fields(args[i])...)
 		}
 	}
 	return words, queryRaw, page, nil
