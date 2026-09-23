@@ -18,6 +18,11 @@ const (
 	byteBudget = 2000
 	narrowByN  = 3 // how many groups the truncated section suggests narrowing by
 
+	// minShareResults and minShareBudget are the least one word of a
+	// several-word answer gets (directive 062, h3).
+	minShareResults = 3
+	minShareBudget  = 1000
+
 	// declCountThreshold gates declarations: on a file result (directive
 	// 009 item 3): a caller deciding whether to open the file or narrow
 	// it first with --query wants to know when it holds unusually many,
@@ -352,7 +357,7 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 		if len(fresh) > 0 {
 			preambleLen += len(resultsHeader)
 		}
-		shown, remainder := fit(fresh, s.ShowProject, s.ShowLang, s.ExtVaries, preambleLen, offset)
+		shown, remainder := fitShare(fresh, s.ShowProject, s.ShowLang, s.ExtVaries, preambleLen, offset, len(answers))
 
 		switch {
 		case len(shown) > 0:
@@ -537,17 +542,26 @@ func pageCount(total int) int {
 // yields no results and no remainder, not an error — the caller asked to
 // see further than there is anything to see.
 func fit(matches []entry.Entry, showProject, showLang bool, extVaries map[string]bool, preambleLen, offset int) (shown, remainder []entry.Entry) {
+	return fitShare(matches, showProject, showLang, extVaries, preambleLen, offset, 1)
+}
+
+// fitShare is fit for one of share words sharing one page (directive
+// 062, h3): each gets its share of the results and of the byte budget,
+// never fewer than minShareResults results or minShareBudget bytes, so a
+// six-word call costs about what a one-word call does.
+func fitShare(matches []entry.Entry, showProject, showLang bool, extVaries map[string]bool, preambleLen, offset, share int) (shown, remainder []entry.Entry) {
 	if offset >= len(matches) {
 		return nil, nil
 	}
+	limit, budget := max(maxResults/share, minShareResults), max(byteBudget/share, minShareBudget)
 	matches = matches[offset:]
 	total := preambleLen
 	for i, e := range matches {
-		if i >= maxResults {
+		if i >= limit {
 			return matches[:i], matches[i:]
 		}
 		line := resultLine(e, showProject, showLang, extVaries)
-		if i > 0 && total+len(line) > byteBudget {
+		if i > 0 && total+len(line) > budget {
 			return matches[:i], matches[i:]
 		}
 		total += len(line)

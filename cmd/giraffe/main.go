@@ -81,6 +81,15 @@ type searchState struct {
 	// output.Summarize can give a registered-but-absent language
 	// visibility (§25 C-24: "go 0, unknown 181099" for llvm-project).
 	knownLanguages []string
+	// roots pairs each root directory with its own store, so a path an
+	// argument names is resolved where repo-relative paths are relative
+	// to (directive 062, h3).
+	roots []rootSource
+}
+
+type rootSource struct {
+	dir string
+	src query.Entries
 }
 
 func run(ctx context.Context, args []string) int {
@@ -255,9 +264,11 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 	exclusionSet := make(map[string]bool)
 	sources := make([]query.Entries, len(results))
 	stores := make([]*index.Store, len(results))
+	roots := make([]rootSource, len(results))
 	for i, r := range results {
 		sources[i] = r.store
 		stores[i] = r.store
+		roots[i] = rootSource{dir: r.root, src: r.store}
 		totalDispatched += r.stats.Dispatched
 		warnings = append(warnings, r.stats.Warnings...)
 		commitParts = append(commitParts, fmt.Sprintf("%s@%s", filepath.Base(r.root), r.commit))
@@ -294,6 +305,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 		ignoreWarnings:    ignoreWarnings,
 		exclusions:        exclusions,
 		knownLanguages:    knownLanguages,
+		roots:             roots,
 	}, 0
 }
 
@@ -317,6 +329,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 // empty filter too), so it now gets direction on a miss the same as a
 // search does — before this directive it got none at all.
 func runFind(args []string, st searchState) int {
+	args, paths := pathArgs(args, st.roots)
 	words, queryRaw, page, err := parseArgs(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "giraffe:", err)
@@ -334,6 +347,12 @@ func runFind(args []string, st searchState) int {
 			fmt.Fprintln(os.Stderr, "giraffe:", err)
 			return 2
 		}
+	}
+	if len(paths) > 0 {
+		if filter == nil {
+			filter = make(query.Filter)
+		}
+		filter["path"] = append(filter["path"], paths...)
 	}
 
 	summary := output.Summarize(st.entries.All(), st.commitLine, st.dispatched, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
@@ -600,6 +619,49 @@ func parseArgs(args []string) (words []string, queryRaw string, page int, err er
 		}
 	}
 	return words, queryRaw, page, nil
+}
+
+// pathArgs takes out of args every positional argument that names a
+// file or directory under a root, the way grep's operands do (directive
+// 062, h3): `giraffe Send actor/mailbox.go` searches for Send in that
+// file. They come back as repo-relative paths, for --query path:.
+func pathArgs(args []string, roots []rootSource) (rest, paths []string) {
+	cwd, _ := os.Getwd()
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--query" || a == "--page" {
+			rest = append(rest, a)
+			if i+1 < len(args) {
+				rest = append(rest, args[i+1])
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(a, "-") || !strings.ContainsAny(a, "/.") {
+			rest = append(rest, a)
+			continue
+		}
+		found := false
+		for _, r := range roots {
+			abs := a
+			if !filepath.IsAbs(abs) {
+				abs = filepath.Join(cwd, a)
+			}
+			rel, err := filepath.Rel(r.dir, abs)
+			if err != nil || strings.HasPrefix(rel, "..") {
+				continue
+			}
+			if _, err := os.Stat(abs); err == nil {
+				paths = append(paths, filepath.ToSlash(strings.TrimSuffix(rel, "/")))
+				found = true
+				break
+			}
+		}
+		if !found {
+			rest = append(rest, a)
+		}
+	}
+	return rest, paths
 }
 
 // searchWord is what a search word is made of; anything else in an
