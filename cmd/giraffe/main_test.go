@@ -55,8 +55,10 @@ func TestParseArgs_SeveralWords(t *testing.T) {
 	if err != nil || strings.Join(words, ",") != "metrics,actor,count" || page != 2 {
 		t.Fatalf("got words=%v page=%d err=%v", words, page, err)
 	}
-	if _, _, _, err := parseArgs([]string{"metrics", "--offset", "8"}); err == nil {
-		t.Fatalf("an unknown flag was taken as a word")
+	// h3: an unknown flag is dropped; a pattern is its words.
+	words, _, _, err = parseArgs([]string{"-i", "email\\|mail.*send", "--type", "Classic Actor"})
+	if err != nil || strings.Join(words, ",") != "email,mail,send,type,Classic,Actor" && strings.Join(words, ",") != "email,mail,send,Classic,Actor" {
+		t.Fatalf("got words=%v err=%v", words, err)
 	}
 }
 
@@ -73,15 +75,14 @@ func TestParseArgs_QueryAndPageTogether(t *testing.T) {
 	}
 }
 
-// TestParseArgs_OffsetIsGone (directive 033): --offset shipped one
-// directive ago and nothing depended on it (confirmed by grep before
-// this directive's change); it is no longer a recognized flag, and is
-// now just an unexpected positional-style argument like any other
-// unrecognized token.
+// TestParseArgs_OffsetIsGone (directive 033): --offset is not a
+// recognized flag. Since directive 062 h3 an unrecognized flag is
+// dropped rather than refused, so --offset pages nothing: the page
+// stays 1.
 func TestParseArgs_OffsetIsGone(t *testing.T) {
-	_, _, _, err := parseArgs([]string{"prefix", "--offset", "8"})
-	if err == nil {
-		t.Fatalf("expected --offset to be rejected as an unrecognized flag")
+	_, _, page, err := parseArgs([]string{"prefix", "--offset", "8"})
+	if err != nil || page != 1 {
+		t.Fatalf("--offset changed the page or failed: page=%d err=%v", page, err)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -113,15 +114,17 @@ func run(ctx context.Context, args []string) int {
 		// writes grep's flags in front (-i, -r, -n): case is already
 		// ignored and every file already searched, so they are dropped
 		// rather than refused.
-		words := args
-		for len(words) > 0 && len(words[0]) == 2 && words[0][0] == '-' && words[0] != "-h" {
-			words = words[1:]
+		anyWord := false
+		for _, a := range args {
+			if !strings.HasPrefix(a, "-") && len(wordsOf(a)) > 0 {
+				anyWord = true
+			}
 		}
-		if len(words) == 0 || strings.HasPrefix(words[0], "-") {
+		if !anyWord {
 			fmt.Fprint(os.Stderr, helpText)
 			return 2
 		}
-		sub, rest = "find", words
+		sub, rest = "find", args
 	}
 
 	st, code := buildSearchState(ctx)
@@ -586,17 +589,33 @@ func parseArgs(args []string) (words []string, queryRaw string, page int, err er
 			}
 			page = n
 			i++
-		case strings.HasPrefix(args[i], "--"):
-			return nil, "", 0, fmt.Errorf("unexpected argument %q", args[i])
+		case strings.HasPrefix(args[i], "-"):
+			// A flag giraffe does not have — grep's -i, -r, -n, rg's
+			// --type — is written by a caller who reached for giraffe the
+			// way it reaches for grep (directive 062, h3). Case is already
+			// ignored and every indexed file already searched, so it is
+			// dropped rather than refused.
 		default:
-			// "cluster metrics", quoted as one argument, is two words, and
-			// grep's alternation "email\|mail" is two words as well.
-			for _, w := range strings.Fields(strings.NewReplacer(`\|`, " ", "|", " ").Replace(args[i])) {
-				words = append(words, w)
-			}
+			words = append(words, wordsOf(args[i])...)
 		}
 	}
 	return words, queryRaw, page, nil
+}
+
+// searchWord is what a search word is made of; anything else in an
+// argument separates words.
+var searchWord = regexp.MustCompile(`[\pL\pN_][\pL\pN_-]*`)
+
+// wordsOf splits one argument into search words (directive 062, h3):
+// "cluster metrics" quoted as one argument is two words, and so are
+// grep's alternation "email\|mail" and a pattern "mail.*send" — a
+// search for words, not a regular expression engine.
+func wordsOf(arg string) []string {
+	var out []string
+	for _, w := range searchWord.FindAllString(arg, -1) {
+		out = append(out, strings.TrimRight(w, "-"))
+	}
+	return out
 }
 
 func commitHash(ctx context.Context, root string) (string, error) {
