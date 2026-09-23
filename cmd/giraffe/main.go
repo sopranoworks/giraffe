@@ -363,7 +363,8 @@ methods, struct fields, consts, vars) and files, one entry each.
   giraffe find <word>                          entries whose name, doc line or
                                                path contains <word>, closest first
   giraffe find <word> --query 'attr:value ...' the same, narrowed
-  giraffe find --query 'attr:value ...'        browse a place: everything at it
+  giraffe find --query 'attr:value ...'        browse a place: everything at it,
+                                               in file order
   giraffe find ... --page N                    the next page of the same answer
 
 A result's line:A-B is the declaration's whole extent: sed -n 'A,Bp' <path>
