@@ -109,11 +109,19 @@ func run(ctx context.Context, args []string) int {
 	// word "prepare" or "find" is spelled `giraffe find prepare`.
 	sub, rest := args[0], args[1:]
 	if sub != "find" && sub != "prepare" {
-		if strings.HasPrefix(sub, "-") {
+		// A caller that reaches for giraffe the way it reaches for grep
+		// writes grep's flags in front (-i, -r, -n): case is already
+		// ignored and every file already searched, so they are dropped
+		// rather than refused.
+		words := args
+		for len(words) > 0 && len(words[0]) == 2 && words[0][0] == '-' && words[0] != "-h" {
+			words = words[1:]
+		}
+		if len(words) == 0 || strings.HasPrefix(words[0], "-") {
 			fmt.Fprint(os.Stderr, helpText)
 			return 2
 		}
-		sub, rest = "find", args
+		sub, rest = "find", words
 	}
 
 	st, code := buildSearchState(ctx)
@@ -581,8 +589,11 @@ func parseArgs(args []string) (words []string, queryRaw string, page int, err er
 		case strings.HasPrefix(args[i], "--"):
 			return nil, "", 0, fmt.Errorf("unexpected argument %q", args[i])
 		default:
-			// "cluster metrics", quoted as one argument, is two words.
-			words = append(words, strings.Fields(args[i])...)
+			// "cluster metrics", quoted as one argument, is two words, and
+			// grep's alternation "email\|mail" is two words as well.
+			for _, w := range strings.Fields(strings.NewReplacer(`\|`, " ", "|", " ").Replace(args[i])) {
+				words = append(words, w)
+			}
 		}
 	}
 	return words, queryRaw, page, nil
