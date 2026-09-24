@@ -100,11 +100,6 @@ type Summary struct {
 	// what to try instead). Never fabricated: populated only from
 	// something actually observed in the index (query.Suggest).
 	TryNext []string
-	// About and Top are the repository's own orientation (directive 062,
-	// h7): its README's first paragraph and its top-level entries — what
-	// a caller otherwise reads README and runs ls for. "" prints nothing.
-	About string
-	Top   string
 }
 
 // Summarize computes a Summary from the full current entry set and the
@@ -332,12 +327,6 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 	}
 	if s.ByExt != "" {
 		fmt.Fprintf(&b, "by ext:    %s\n", s.ByExt)
-	}
-	if s.About != "" {
-		fmt.Fprintf(&b, "about:     %s\n", s.About)
-	}
-	if s.Top != "" {
-		fmt.Fprintf(&b, "top:       %s\n", s.Top)
 	}
 
 	// §26 C-30: the byte budget is a safety limit, and a safety limit

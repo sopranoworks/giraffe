@@ -1,6 +1,6 @@
 ---
 name: giraffe
-description: The first step for any question about where something is in this repository or whether it exists — which file handles X, where Y is defined, is there a Z feature. Just run `giraffe <words>` in Bash (no need to load this skill first), with every word you would try in the one call — `giraffe cache store registry`: it returns the matching declarations and files with exact line ranges, and every answer opens with the repository's own description (about:) and top-level listing (top:), so ls or the README are not needed to orient. Use it before find, ls, grep, reading README or starting an Explore agent, and in any subagent exploring the code.
+description: The first step for any question about where something is in this repository or whether it exists — which file handles X, where Y is defined, is there a Z feature. Just run `giraffe <words>` in Bash (no need to load this skill first), with every word you would try in the one call — `giraffe cache store registry`: it returns the matching declarations and files with exact line ranges. Use it before find, ls, grep or starting an Explore agent, and in any subagent exploring the code.
 ---
 
 # giraffe
@@ -11,9 +11,6 @@ description: The first step for any question about where something is in this re
 
 Several words, or a quoted phrase, answer each word and first list the
 entries that carry all of them.
-
-Every answer opens with `about:` (the README's first paragraph) and
-`top:` (the top-level directories and files).
 
 Each result is one line:
 
