@@ -363,7 +363,15 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 		if len(fresh) > 0 {
 			preambleLen += len(resultsHeader)
 		}
-		shown, remainder := fitShare(fresh, a.Words, s.ShowProject, s.ShowLang, s.ExtVaries, preambleLen, offset, len(answers))
+		// The entries several words carry together get a page of their
+		// own; each word's own answer shares the rest (directive 065).
+		share := len(answers)
+		if len(a.Counts) > 0 {
+			share = 1
+		} else if len(answers) > 1 && len(answers[0].Counts) > 0 {
+			share = len(answers) - 1
+		}
+		shown, remainder := fitShare(fresh, a.Words, s.ShowProject, s.ShowLang, s.ExtVaries, preambleLen, offset, share)
 
 		switch {
 		case len(shown) > 0:
