@@ -85,6 +85,7 @@ type searchState struct {
 	// argument names is resolved where repo-relative paths are relative
 	// to (directive 062, h3).
 	roots []rootSource
+	home  string // the home root: where orientation is read from (directive 062, h7)
 }
 
 type rootSource struct {
@@ -306,6 +307,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 		exclusions:        exclusions,
 		knownLanguages:    knownLanguages,
 		roots:             roots,
+		home:              homeRoot,
 	}, 0
 }
 
@@ -401,8 +403,105 @@ func runFind(args []string, st searchState) int {
 		}
 		answers = append(answers, a)
 	}
+	summary.About, summary.Top = orientation(ctx0(st))
 	fmt.Print(output.FormatWords(summary, answers, page))
 	return 0
+}
+
+func ctx0(st searchState) string { return st.home }
+
+// orientation reads the home root's own description of itself
+// (directive 062, h7): the first prose paragraph of its README, markdown
+// links reduced to their text, cut to maxAbout, and its top-level
+// directories and files — the two things measured callers fetched with
+// cat README and ls before anything else, in any language.
+func orientation(root string) (about, top string) {
+	if root == "" {
+		return "", ""
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", ""
+	}
+	var dirs, files []string
+	readme := ""
+	for _, e := range entries {
+		n := e.Name()
+		if strings.HasPrefix(n, ".") {
+			continue
+		}
+		if e.IsDir() {
+			dirs = append(dirs, n+"/")
+			continue
+		}
+		files = append(files, n)
+		if readme == "" && strings.HasPrefix(strings.ToUpper(n), "README") {
+			readme = n
+		}
+	}
+	// Files of the root's most common extension are counted, not named:
+	// a Go package root holds dozens of .go files and a listing of them
+	// says less than the number does.
+	byExt := make(map[string]int)
+	for _, f := range files {
+		byExt[filepath.Ext(f)]++
+	}
+	common, n := "", 0
+	for e, c := range byExt {
+		if e != "" && (c > n || c == n && e < common) {
+			common, n = e, c
+		}
+	}
+	var named []string
+	for _, f := range files {
+		if n < 5 || filepath.Ext(f) != common {
+			named = append(named, f)
+		}
+	}
+	top = strings.Join(append(dirs, named...), " ")
+	if n >= 5 {
+		top += fmt.Sprintf(" +%d %s", n, common)
+	}
+	if len(top) > maxTop {
+		top = top[:maxTop] + " ..."
+	}
+	if readme != "" {
+		if data, err := os.ReadFile(filepath.Join(root, readme)); err == nil {
+			about = firstParagraph(string(data))
+		}
+	}
+	return about, top
+}
+
+const (
+	maxAbout = 300
+	maxTop   = 600
+)
+
+var mdLink = regexp.MustCompile(`!?\[([^\]]*)\]\([^)]*\)`)
+
+// firstParagraph is the first run of prose lines in a README: headings,
+// badges, rules, HTML and blank lines skipped.
+func firstParagraph(text string) string {
+	var para []string
+	for _, l := range strings.Split(text, "\n") {
+		t := strings.TrimSpace(l)
+		prose := t != "" && !strings.HasPrefix(t, "#") && !strings.HasPrefix(t, "<") &&
+			!strings.HasPrefix(t, "---") && !strings.HasPrefix(t, "===") && !strings.HasPrefix(t, "![") &&
+			!strings.HasPrefix(t, "[![") && !strings.HasPrefix(t, "|")
+		if prose {
+			para = append(para, t)
+			continue
+		}
+		if len(para) > 0 {
+			break
+		}
+	}
+	p := strings.TrimSpace(mdLink.ReplaceAllString(strings.Join(para, " "), "$1"))
+	if len(p) > maxAbout {
+		p = p[:maxAbout] + "..."
+	}
+	return p
 }
 
 // helpText is what --help, -h, help, and a bare or misused invocation
