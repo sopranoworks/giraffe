@@ -87,6 +87,10 @@ export async function runOne(config: RunConfig, outDir: string): Promise<RunReco
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       sandbox: config.sandbox as any,
       maxTurns: config.maxTurns,
+      // Directive 062: subagents' own text and thinking are recorded too,
+      // not only their tool calls (the SDK's default), so a transcript
+      // shows what a subagent was told and what it made of it.
+      forwardSubagentText: true,
     },
   });
   for await (const message of session as AsyncIterable<SDKMessage>) {
