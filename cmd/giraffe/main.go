@@ -494,30 +494,49 @@ func firstInSession(root string) bool {
 }
 
 const (
-	maxAbout = 900
+	maxAbout = 1500
 	maxTop   = 600
 )
 
 var mdLink = regexp.MustCompile(`!?\[([^\]]*)\]\([^)]*\)`)
 
-// firstParagraph is the first run of prose lines in a README: headings,
-// badges, rules, HTML and blank lines skipped.
+// firstParagraph is the README's lead and table of contents (directive
+// 062, h13): the prose before its first section heading, then every
+// section heading in order — what the project is and what it covers,
+// without any one section's text. Code, badges, HTML, rules and tables
+// are left out, markdown links reduced to their text, cut to maxAbout.
 func firstParagraph(text string) string {
-	var para []string
+	var lead, heads []string
+	fence, inLead := false, true
 	for _, l := range strings.Split(text, "\n") {
 		t := strings.TrimSpace(l)
-		prose := t != "" && !strings.HasPrefix(t, "#") && !strings.HasPrefix(t, "<") &&
-			!strings.HasPrefix(t, "---") && !strings.HasPrefix(t, "===") && !strings.HasPrefix(t, "![") &&
-			!strings.HasPrefix(t, "[![") && !strings.HasPrefix(t, "|")
-		if prose {
-			para = append(para, t)
+		if strings.HasPrefix(t, "```") {
+			fence = !fence
 			continue
 		}
-		if len(para) > 0 && len(strings.Join(para, " ")) >= maxAbout {
-			break
+		if fence || t == "" {
+			continue
 		}
+		if strings.HasPrefix(t, "#") {
+			level := len(t) - len(strings.TrimLeft(t, "#"))
+			h := strings.TrimSpace(mdLink.ReplaceAllString(strings.TrimSpace(t[level:]), "$1"))
+			if level == 1 && inLead && len(lead) == 0 {
+				continue // the title repeats the project name
+			}
+			inLead = false
+			heads = append(heads, h)
+			continue
+		}
+		if !inLead || strings.HasPrefix(t, "<") || strings.HasPrefix(t, "---") || strings.HasPrefix(t, "===") ||
+			strings.HasPrefix(t, "![") || strings.HasPrefix(t, "[![") || strings.HasPrefix(t, "|") {
+			continue
+		}
+		lead = append(lead, strings.TrimSpace(mdLink.ReplaceAllString(t, "$1")))
 	}
-	p := strings.TrimSpace(mdLink.ReplaceAllString(strings.Join(para, " "), "$1"))
+	p := strings.Join(lead, " ")
+	if len(heads) > 0 {
+		p += " Sections: " + strings.Join(heads, "; ") + "."
+	}
 	if len(p) > maxAbout {
 		p = p[:maxAbout] + "..."
 	}
