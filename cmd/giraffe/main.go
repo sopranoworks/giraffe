@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 
-	"giraffe/internal/entry"
 	"giraffe/internal/index"
 	"giraffe/internal/lang"
 	"giraffe/internal/limits"
@@ -369,30 +368,17 @@ func runFind(args []string, st searchState) int {
 
 	// Every word is its own search, answered in the one reply
 	// (directive 062): a caller who already knows the three words it
-	// will try pays for one index block, not three.
+	// will try pays for one index block, not three. Several words are
+	// first ranked together (directive 065): the entries that carry two
+	// or more of them, more and rarer ones first, with how many entries
+	// each word matched on its own.
 	answers := make([]output.WordAnswer, 0, len(words)+1)
-	// Several words: first the entries that carry every one of them, in
-	// name, doc line or path, ranked as the first word ranks them — what
-	// "cluster metrics" asks for before either word alone.
 	if len(words) > 1 {
-		var all []entry.Entry
-		for _, e := range query.Search(st.entries, words[0], filter, st.invocationProject) {
-			text := strings.ToLower(e.Name + " " + e.Doc + " " + e.Path)
-			every := true
-			for _, w := range words[1:] {
-				if !strings.Contains(text, strings.ToLower(w)) {
-					every = false
-					break
-				}
-			}
-			if every {
-				all = append(all, e)
-			}
-		}
-		answers = append(answers, output.WordAnswer{Word: strings.Join(words, " "), Matches: all})
+		matches, counts := query.Ranked(st.entries, words, filter, st.invocationProject)
+		answers = append(answers, output.WordAnswer{Word: strings.Join(words, " "), Words: words, Counts: counts, Matches: matches})
 	}
 	for _, word := range words {
-		a := output.WordAnswer{Word: word, Matches: query.Search(st.entries, word, filter, st.invocationProject)}
+		a := output.WordAnswer{Word: word, Words: []string{word}, Matches: query.Search(st.entries, word, filter, st.invocationProject)}
 		if len(a.Matches) == 0 {
 			if len(filter) > 0 {
 				a.TryNext = append(a.TryNext, query.DiagnoseFilter(st.entries, filter)...)
@@ -423,17 +409,17 @@ func runFind(args []string, st searchState) int {
 const helpText = `giraffe: an index of this repository's declarations (Go: types, funcs,
 methods, struct fields, consts, vars) and files, one entry each.
 
-  giraffe [find] <word>...                     entries whose name, doc line or
-                                               path contains <word>, closest first;
-                                               several words, one answer each
+  giraffe [find] <word>...                     entries whose name, doc or path
+                                               contains <word>, closest first;
+                                               several: two or more first
   giraffe find <word> --query 'attr:value ...' the same, narrowed
   giraffe find --query 'attr:value ...'        browse a place: everything at it,
                                                in file order
   giraffe find ... --page N                    the next page of the same answer
 
 A result's line:A-B is the declaration's whole extent: sed -n 'A,Bp' <path>
-prints exactly it. Under each result: its source line, then its doc's
-first line. --query takes the attribute names result lines print;
+prints it. Under each result: its source line, then the doc line
+the words are on. --query takes the attribute names result lines print;
 path: matches a substring, every other attribute exactly.
 Not indexed: call sites and bodies - grep for those.
 `

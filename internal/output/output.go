@@ -297,6 +297,12 @@ type WordAnswer struct {
 	Word    string
 	Matches []entry.Entry
 	TryNext []string
+	// Words are the search words the answer is for, and Counts, when
+	// several words were ranked together (directive 065), how many
+	// entries each matched on its own. A result prints the doc line
+	// that carries most of Words.
+	Words  []string
+	Counts []int
 }
 
 // FormatWords renders one find call's answer for every word it was
@@ -337,9 +343,9 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 	// used to see. With several words each word's block gets the same
 	// budget, the shared preamble counted against every one of them.
 	preamble := b.Len()
-	named := len(answers) > 1
 	shownBefore := make(map[string]bool)
 	for _, a := range answers {
+		named := len(answers) > 1
 		header := func(section string) string {
 			if named {
 				return fmt.Sprintf("\n## %s: %s\n", section, quote(a.Word))
@@ -357,18 +363,25 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 		if len(fresh) > 0 {
 			preambleLen += len(resultsHeader)
 		}
-		shown, remainder := fitShare(fresh, s.ShowProject, s.ShowLang, s.ExtVaries, preambleLen, offset, len(answers))
+		shown, remainder := fitShare(fresh, a.Words, s.ShowProject, s.ShowLang, s.ExtVaries, preambleLen, offset, len(answers))
 
 		switch {
 		case len(shown) > 0:
 			b.WriteString(resultsHeader)
+			if len(a.Counts) > 0 {
+				b.WriteString(countsLine(a.Words, a.Counts))
+			}
 			for _, e := range shown {
 				shownBefore[entryKey(e)] = true
-				b.WriteString(resultLine(e, s.ShowProject, s.ShowLang, s.ExtVaries))
+				b.WriteString(resultLine(e, a.Words, s.ShowProject, s.ShowLang, s.ExtVaries))
 			}
+		case a.Word != "" && len(a.Matches) == 0 && len(a.Counts) > 0:
+			b.WriteString(resultsHeader)
+			b.WriteString(countsLine(a.Words, a.Counts))
+			fmt.Fprintf(&b, "none: no name, doc comment or path among the index's %d entries contains two of these words (text inside bodies is not indexed)\n", s.Symbols)
 		case a.Word != "" && len(a.Matches) == 0:
 			b.WriteString(resultsHeader)
-			fmt.Fprintf(&b, "none: no name, doc line or path among the index's %d entries contains %s (text inside bodies is not indexed)\n", s.Symbols, quote(a.Word))
+			fmt.Fprintf(&b, "none: no name, doc comment or path among the index's %d entries contains %s (text inside bodies is not indexed)\n", s.Symbols, quote(a.Word))
 		case a.Word != "" && len(fresh) == 0:
 			b.WriteString(resultsHeader)
 			b.WriteString("every match is shown above\n")
@@ -432,7 +445,7 @@ func entryKey(e entry.Entry) string {
 // exactly what this section exists to avoid. A language position prints
 // only when it does not repeat the path's own directory (directive
 // 047), by the same rule.
-func resultLine(e entry.Entry, showProject, showLang bool, extVaries map[string]bool) string {
+func resultLine(e entry.Entry, words []string, showProject, showLang bool, extVaries map[string]bool) string {
 	var line strings.Builder
 	fmt.Fprintf(&line, "name:%s kind:%s path:%s", quote(e.Name), quote(e.Kind), quote(e.Path))
 	if r := e.LineRange(); r != "" {
@@ -499,10 +512,47 @@ func resultLine(e entry.Entry, showProject, showLang bool, extVaries map[string]
 	if e.LineText != "" {
 		fmt.Fprintf(&line, "  %s\n", e.LineText)
 	}
-	if e.Doc != "" {
-		fmt.Fprintf(&line, "  %s\n", e.Doc)
+	if d := docLine(e, words); d != "" {
+		fmt.Fprintf(&line, "  %s\n", d)
 	}
 	return line.String()
+}
+
+// docLine is the line of e's documentation a result prints (directive
+// 065): the one that carries the most of words, the first line when
+// none carries any.
+func docLine(e entry.Entry, words []string) string {
+	text := e.DocText
+	if text == "" {
+		return e.Doc
+	}
+	best, bestN := e.Doc, 0
+	for _, l := range strings.Split(text, "\n") {
+		ll, n := strings.ToLower(l), 0
+		for _, w := range words {
+			if w != "" && strings.Contains(ll, strings.ToLower(w)) {
+				n++
+			}
+		}
+		if n > bestN {
+			best, bestN = strings.TrimSpace(l), n
+		}
+	}
+	return best
+}
+
+// countsLine says how many entries each of several ranked words matched
+// on its own (directive 065) — "none" for a word that matched nothing.
+func countsLine(words []string, counts []int) string {
+	parts := make([]string, len(words))
+	for i, w := range words {
+		if counts[i] == 0 {
+			parts[i] = quote(w) + " none"
+			continue
+		}
+		parts[i] = fmt.Sprintf("%s %d", quote(w), counts[i])
+	}
+	return "entries per word: " + strings.Join(parts, " | ") + "\n"
 }
 
 func quote(s string) string {
@@ -542,14 +592,14 @@ func pageCount(total int) int {
 // yields no results and no remainder, not an error — the caller asked to
 // see further than there is anything to see.
 func fit(matches []entry.Entry, showProject, showLang bool, extVaries map[string]bool, preambleLen, offset int) (shown, remainder []entry.Entry) {
-	return fitShare(matches, showProject, showLang, extVaries, preambleLen, offset, 1)
+	return fitShare(matches, nil, showProject, showLang, extVaries, preambleLen, offset, 1)
 }
 
 // fitShare is fit for one of share words sharing one page (directive
 // 062, h3): each gets its share of the results and of the byte budget,
 // never fewer than minShareResults results or minShareBudget bytes, so a
 // six-word call costs about what a one-word call does.
-func fitShare(matches []entry.Entry, showProject, showLang bool, extVaries map[string]bool, preambleLen, offset, share int) (shown, remainder []entry.Entry) {
+func fitShare(matches []entry.Entry, words []string, showProject, showLang bool, extVaries map[string]bool, preambleLen, offset, share int) (shown, remainder []entry.Entry) {
 	if offset >= len(matches) {
 		return nil, nil
 	}
@@ -560,7 +610,7 @@ func fitShare(matches []entry.Entry, showProject, showLang bool, extVaries map[s
 		if i >= limit {
 			return matches[:i], matches[i:]
 		}
-		line := resultLine(e, showProject, showLang, extVaries)
+		line := resultLine(e, words, showProject, showLang, extVaries)
 		if i > 0 && total+len(line) > budget {
 			return matches[:i], matches[i:]
 		}

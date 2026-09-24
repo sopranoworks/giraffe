@@ -114,6 +114,7 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 				Scope:    scopeOf(exported),
 				Exported: exported,
 				Doc:      firstLine(d.Doc),
+				DocText:  docText(d.Doc),
 				Position: position,
 				Line:     line,
 				LineText: text,
@@ -140,6 +141,7 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 					Scope:    scopeOf(exported),
 					Exported: exported,
 					Doc:      firstLine(preferDoc(ownDoc, d.Doc)),
+					DocText:  docText(preferDoc(ownDoc, d.Doc)),
 					Position: position,
 					Line:     line,
 					LineText: text,
@@ -229,6 +231,7 @@ func methodEntry(path, project string, d *ast.FuncDecl, base []entry.Position, f
 		Scope:    scopeOf(exported),
 		Exported: exported,
 		Doc:      firstLine(d.Doc),
+		DocText:  docText(d.Doc),
 		Position: withPosition(base, "receiver", recv),
 		Line:     line,
 		LineText: text,
@@ -270,6 +273,7 @@ func fieldEntries(path, project string, ts *ast.TypeSpec, base []entry.Position,
 				Scope:    scopeOf(exported),
 				Exported: exported,
 				Doc:      firstLine(field.Doc),
+				DocText:  docText(field.Doc),
 				Position: position,
 				Line:     line,
 				LineText: text,
@@ -388,6 +392,15 @@ func preferDoc(specDoc, groupDoc *ast.CommentGroup) *ast.CommentGroup {
 		return specDoc
 	}
 	return groupDoc
+}
+
+// docText is doc's whole text, trimmed (directive 065): what
+// entry.DocText holds.
+func docText(doc *ast.CommentGroup) string {
+	if doc == nil {
+		return ""
+	}
+	return strings.TrimSpace(doc.Text())
 }
 
 func firstLine(doc *ast.CommentGroup) string {

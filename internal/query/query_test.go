@@ -808,3 +808,37 @@ func names(entries []entry.Entry) []string {
 	}
 	return out
 }
+
+// Directive 065: several words ranked together — an entry carrying two
+// of them comes first, the rarer word weighs more, an entry carrying
+// one is left to that word's own answer, and a word matching nothing
+// counts 0.
+func TestRanked_TwoOrMoreWordsRarerFirst(t *testing.T) {
+	src := Slice([]entry.Entry{
+		{Name: "Queue", Path: "a/queue.go", Exported: true, DocText: "Queue holds messages.\nA full queue drops the newest."},
+		{Name: "Drop", Path: "a/drop.go", Exported: true, Doc: "Drop discards a message."},
+		{Name: "Message", Path: "a/msg.go", Exported: true},
+		{Name: "MessageBus", Path: "b/bus.go", Exported: true, Doc: "MessageBus carries a message."},
+		{Name: "Other", Path: "c/other.go", Exported: true},
+	})
+	got, counts := Ranked(src, []string{"message", "drop", "smtp"}, nil, "")
+	var names []string
+	for _, e := range got {
+		names = append(names, e.Name)
+	}
+	if strings.Join(names, " ") != "Drop Queue" {
+		t.Errorf("ranked = %v, want [Drop Queue]", names)
+	}
+	if counts[0] != 4 || counts[1] != 2 || counts[2] != 0 {
+		t.Errorf("counts = %v, want [4 2 0]", counts)
+	}
+}
+
+// Directive 065: a search matches the whole doc comment, not only its
+// first line.
+func TestSearch_MatchesTheWholeDocComment(t *testing.T) {
+	src := Slice([]entry.Entry{{Name: "Tell", Path: "ref.go", Exported: true, Doc: "Tell sends msg.", DocText: "Tell sends msg.\nA full mailbox sends it to dead letters."}})
+	if got := Search(src, "dead letters", nil, ""); len(got) != 1 {
+		t.Errorf("Search on a later doc line found %d entries, want 1", len(got))
+	}
+}

@@ -5,6 +5,7 @@ package query
 import (
 	"fmt"
 	"iter"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -341,12 +342,21 @@ func nameTier(e entry.Entry, lowerWord string) (int, bool) {
 // found, and Search preserves that by construction (see Search).
 func docPathTier(e entry.Entry, lowerWord string) (int, bool) {
 	switch {
-	case strings.Contains(strings.ToLower(e.Doc), lowerWord):
+	case strings.Contains(strings.ToLower(DocOf(e)), lowerWord):
 		return 4, true
 	case strings.Contains(strings.ToLower(e.Path), lowerWord):
 		return 5, true
 	}
 	return 0, false
+}
+
+// DocOf is the documentation a search matches: the whole of it
+// (entry.DocText, directive 065), or Doc for an entry built without it.
+func DocOf(e entry.Entry) string {
+	if e.DocText != "" {
+		return e.DocText
+	}
+	return e.Doc
 }
 
 // isMember reports whether e is a method or field rather than a
@@ -512,6 +522,97 @@ func Search(src Entries, word string, filter Filter, invocationProject string) [
 	}
 	return matches
 }
+
+// Ranked answers several words together (directive 065): every entry
+// that carries at least two of them, those carrying more of them
+// first — what each word's own answer cannot show. Each word an entry carries adds its weight: how rare the word
+// is in this index (ln(1 + entries/matches) — a word on 8 entries says
+// more about the one that carries it than a word on 2,000 does) times
+// how it matched there, by Search's own tiers (a name says more than a
+// doc comment, a doc comment more than a path). Ties keep Search's
+// order for the word that matched best. counts[i] is how many entries
+// words[i] matched on its own, so a word that matched nothing is
+// visible as 0 beside the ones that did.
+//
+// Nothing here knows a language: the words are matched as text, the
+// same way Search matches one word, over whatever name, doc and path
+// the language module (or none) gave an entry.
+func Ranked(src Entries, words []string, filter Filter, invocationProject string) (matches []entry.Entry, counts []int) {
+	total := 0
+	for range src.All() {
+		total++
+	}
+	type scored struct {
+		e        entry.Entry
+		score    float64
+		hits     int
+		best     int // the best tier any word matched at
+		declFile int
+		scope    int
+	}
+	byKey := make(map[string]*scored)
+	var order []*scored
+	counts = make([]int, len(words))
+	for i, w := range words {
+		lw := strings.ToLower(w)
+		found := Search(src, w, filter, invocationProject)
+		counts[i] = len(found)
+		if len(found) == 0 {
+			continue
+		}
+		idf := math.Log(1 + float64(total)/float64(len(found)))
+		for _, e := range found {
+			t := tier(e, lw)
+			k := dedupKey(e) + "\x00" + strconv.Itoa(e.Line)
+			sc := byKey[k]
+			if sc == nil {
+				sc = &scored{e: e, best: noMatch, declFile: declFileRank(e), scope: scopeRank(e)}
+				byKey[k] = sc
+				order = append(order, sc)
+			}
+			sc.score += idf * tierWeight[t]
+			sc.hits++
+			sc.best = min(sc.best, t)
+		}
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		a, b := order[i], order[j]
+		if a.score != b.score {
+			return a.score > b.score
+		}
+		if a.hits != b.hits {
+			return a.hits > b.hits
+		}
+		if a.best != b.best {
+			return a.best < b.best
+		}
+		if a.declFile != b.declFile {
+			return a.declFile < b.declFile
+		}
+		if a.scope != b.scope {
+			return a.scope < b.scope
+		}
+		if len(a.e.Name) != len(b.e.Name) {
+			return len(a.e.Name) < len(b.e.Name)
+		}
+		if a.e.Name != b.e.Name {
+			return a.e.Name < b.e.Name
+		}
+		return a.e.Path < b.e.Path
+	})
+	for _, sc := range order {
+		if sc.hits >= 2 {
+			matches = append(matches, sc.e)
+		}
+	}
+	return matches, counts
+}
+
+// tierWeight is how much a word says about an entry by where it
+// matched there (Ranked), indexed by tier: an exact name, a name it is
+// part of, a member's exact name, a member's name it is part of, the
+// doc comment, the path.
+var tierWeight = [...]float64{0: 3, 1: 2, 2: 2, 3: 1.5, 4: 1, 5: 0.5}
 
 // rankedEntry pairs a matched entry with its ranking, computed once
 // (see Search) rather than recomputed on every pairwise comparison

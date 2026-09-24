@@ -575,7 +575,7 @@ func TestFormatWords(t *testing.T) {
 	for _, want := range []string{
 		"## results: mail\nname:MailBox",
 		"## results: box\nevery match is shown above\n",
-		"## results: smtp\nnone: no name, doc line or path among the index's 42 entries contains smtp",
+		"## results: smtp\nnone: no name, doc comment or path among the index's 42 entries contains smtp",
 		"## try next: smtp\nnames in the index",
 	} {
 		if !strings.Contains(out, want) {
@@ -588,5 +588,17 @@ func TestFormatWords(t *testing.T) {
 	one := FormatWords(s, []WordAnswer{{Word: "smtp"}}, 1)
 	if !strings.Contains(one, "\n## results\nnone: ") {
 		t.Errorf("a single word's empty answer does not say so:\n%s", one)
+	}
+}
+
+// Directive 065: a result prints the doc line the search words are on,
+// else the first.
+func TestDocLine_TheLineTheWordsAreOn(t *testing.T) {
+	e := entry.Entry{Doc: "Tell sends msg.", DocText: "Tell sends msg.\nA full mailbox sends it to dead letters.\nSee Ask."}
+	if got := docLine(e, []string{"mailbox", "full"}); got != "A full mailbox sends it to dead letters." {
+		t.Errorf("docLine = %q", got)
+	}
+	if got := docLine(e, []string{"smtp"}); got != "Tell sends msg." {
+		t.Errorf("docLine with no word on any line = %q, want the first line", got)
 	}
 }

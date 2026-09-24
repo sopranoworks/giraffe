@@ -9,8 +9,9 @@ description: The first step for any question about where something is in this re
 
     giraffe <words>          e.g.  giraffe metrics      giraffe "mailbox overflow"
 
-Several words, or a quoted phrase, answer each word and first list the
-entries that carry all of them.
+Several words, or a quoted phrase, first list the entries that carry two
+or more of them (more, and rarer, words first; with how many entries each
+word matches), then answer each word.
 
 Each result is one line:
 
@@ -18,11 +19,12 @@ Each result is one line:
 
 `line:A-B` is the declaration's whole extent — read exactly that with
 `sed -n 'A,Bp' <path>` (or Read with that offset and limit) instead of
-opening the whole file. Under each result: its source line and the first
-line of its doc comment, usually enough to judge it without opening it.
+opening the whole file. Under each result: its source line and the line
+of its doc comment the words are on (else its first), usually enough to
+judge it without opening it.
 
-An answer with no results says `none:` — no name, doc line or path in the
-index contains the word. Bodies are not indexed: grep only for text
+An answer with no results says `none:` — no name, doc comment or path in
+the index contains the word. Bodies are not indexed: grep only for text
 inside functions (call sites, string literals).
 
 Ask for the next page of the same answer with `--page 2`.

@@ -25,6 +25,16 @@ type Entry struct {
 	Project string // repository / project root this entry belongs to
 	Doc     string // first line of the declaration's documentation; "" if undocumented
 
+	// DocText is the declaration's whole documentation as the language
+	// module read it, its lines separated by "\n" (directive 065); Doc
+	// is its first line. A search matches the whole of it, and a result
+	// prints the line of it the search words are on: what a comment
+	// says beyond its first line — the error a call returns, the cause
+	// a drop is reported under — is as much what the declaration is for
+	// as the first line is. "" when undocumented, and for any language
+	// without an extractor, which has no declarations at all.
+	DocText string
+
 	// Ext is the file extension, without the leading dot ("go", "h",
 	// "md"). A fact about every file, requiring no judgement (§25
 	// C-24) — always present, unlike Lang below.

@@ -289,3 +289,15 @@ func TestStore_BulkFillPercent_SameContent(t *testing.T) {
 		}
 	}
 }
+
+// Directive 065: DocText survives the store with its line breaks.
+func TestEncodeEntry_DocTextKeepsItsLines(t *testing.T) {
+	e := entry.Entry{Path: "a.go", Name: "A", Kind: "func", Doc: "A does x.", DocText: "A does x.\nThen\ty."}
+	got, err := decodeEntry(encodeEntry(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DocText != "A does x.\nThen y." {
+		t.Errorf("DocText = %q", got.DocText)
+	}
+}

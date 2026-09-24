@@ -45,7 +45,7 @@ const storeFilename = "store.bolt"
 // A change in what an encoded field means is a change of shape too: an
 // index that decoded fine but held ranges computed the old way would
 // keep them for every file that has not changed since.
-const schemaVersion = "4" // 3: EndLine joined the entry encoding (directive 042); 4: Line starts at the doc comment (043)
+const schemaVersion = "5" // 3: EndLine joined the entry encoding (directive 042); 4: Line starts at the doc comment (043); 5: DocText joined it (065)
 
 var (
 	bucketMeta         = []byte("meta")
@@ -824,14 +824,17 @@ func encodeEntry(e entry.Entry) []byte {
 		strconv.Itoa(e.Line),
 		sanitize(e.LineText),
 		strconv.Itoa(e.EndLine),
+		// DocText keeps its line breaks, as \x1f: sanitize would fold
+		// them into spaces, and a result prints one of its lines.
+		strings.ReplaceAll(strings.ReplaceAll(e.DocText, "\t", " "), "\n", "\x1f"),
 	}
 	return []byte(strings.Join(fields, "\t"))
 }
 
 func decodeEntry(v []byte) (entry.Entry, error) {
 	fields := strings.Split(string(v), "\t")
-	if len(fields) != 15 {
-		return entry.Entry{}, fmt.Errorf("expected 15 tab-separated fields, got %d", len(fields))
+	if len(fields) != 16 {
+		return entry.Entry{}, fmt.Errorf("expected 16 tab-separated fields, got %d", len(fields))
 	}
 	size, err1 := strconv.ParseInt(fields[10], 10, 64)
 	declCount, err2 := strconv.Atoi(fields[11])
@@ -856,5 +859,6 @@ func decodeEntry(v []byte) (entry.Entry, error) {
 		Line:      line,
 		LineText:  fields[13],
 		EndLine:   endLine,
+		DocText:   strings.ReplaceAll(fields[15], "\x1f", "\n"),
 	}, nil
 }
