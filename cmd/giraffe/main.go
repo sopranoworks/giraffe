@@ -403,7 +403,9 @@ func runFind(args []string, st searchState) int {
 		}
 		answers = append(answers, a)
 	}
-	summary.About, summary.Top = orientation(ctx0(st))
+	if firstInSession(ctx0(st)) {
+		summary.About, summary.Top = orientation(ctx0(st))
+	}
 	fmt.Print(output.FormatWords(summary, answers, page))
 	return 0
 }
@@ -473,8 +475,26 @@ func orientation(root string) (about, top string) {
 	return about, top
 }
 
+// firstInSession reports whether this is the first answer giraffe gives
+// in the caller's session (directive 062, h11): the orientation it opens
+// with is the same every time, so it is printed once. A caller with no
+// session (CLAUDE_CODE_SESSION_ID unset, or the mark cannot be written)
+// gets it every time.
+func firstInSession(root string) bool {
+	id := os.Getenv("CLAUDE_CODE_SESSION_ID")
+	if id == "" || root == "" {
+		return true
+	}
+	mark := filepath.Join(root, index.Dir, "cache", "oriented-"+regexp.MustCompile(`[^A-Za-z0-9_-]`).ReplaceAllString(id, "_"))
+	if _, err := os.Stat(mark); err == nil {
+		return false
+	}
+	_ = os.WriteFile(mark, nil, 0o644)
+	return true
+}
+
 const (
-	maxAbout = 300
+	maxAbout = 900
 	maxTop   = 600
 )
 
@@ -493,7 +513,7 @@ func firstParagraph(text string) string {
 			para = append(para, t)
 			continue
 		}
-		if len(para) > 0 {
+		if len(para) > 0 && len(strings.Join(para, " ")) >= maxAbout {
 			break
 		}
 	}
