@@ -91,10 +91,12 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 		return nil, false, fmt.Errorf("parse %s: %w", f.Path, err)
 	}
 	lines := strings.Split(string(content), "\n")
+	test := isTestFile(f.Path)
 
 	position := []entry.Position{{Name: "module", Value: path.Dir(f.Path)}}
 
 	decls := []entry.Entry{entry.FileEntry(f.Path, project, langName)}
+	decls[0].Test = test
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
@@ -163,8 +165,18 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 	for i := 1; i < len(decls); i++ {
 		decls[i].Ext = "go"
 		decls[i].Lang = langName
+		decls[i].Test = test
 	}
 	return decls, true, nil
+}
+
+// isTestFile reports whether p is a Go test file by its own name — the
+// one fact "_test.go" carries (directive 065, g42), the convention the
+// scanner used to exclude it by (internal/scanner/exclude.go's former
+// defaultExclude entry) and now leaves for this module to record
+// instead of hide.
+func isTestFile(p string) bool {
+	return strings.HasSuffix(p, "_test.go")
 }
 
 // handles reports whether path is one this module claims, by

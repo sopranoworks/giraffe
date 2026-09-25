@@ -130,6 +130,7 @@ func ValidAttributes(src Entries) map[string]bool {
 		"path": true, "name": true, "kind": true, "project": true,
 		"scope": true, "lang": true, "ext": true,
 		"size": true, "declarations": true, "line": true,
+		"test": true,
 	}
 	for e := range src.All() {
 		for _, p := range e.Position {
@@ -256,6 +257,14 @@ func matchesAny(name string, e entry.Entry, values []string) bool {
 			}
 		case "declarations":
 			if strconv.Itoa(e.DeclCount) == v {
+				return true
+			}
+		case "test":
+			// A boolean fact printed only when true (entry.Entry.Test's
+			// own doc) but filterable both ways — a caller who wants only
+			// production code types test:false, not the absence of a
+			// constraint (directive 065, g42).
+			if strconv.FormatBool(e.Test) == v {
 				return true
 			}
 		case "line":

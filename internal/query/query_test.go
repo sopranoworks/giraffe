@@ -842,3 +842,25 @@ func TestSearch_MatchesTheWholeDocComment(t *testing.T) {
 		t.Errorf("Search on a later doc line found %d entries, want 1", len(got))
 	}
 }
+
+// Directive 065, g42: test: filters both ways, as a boolean fact a
+// result prints only when true.
+func TestFilter_MatchesTestBothWays(t *testing.T) {
+	valid := ValidAttributes(Slice(nil))
+	if !valid["test"] {
+		t.Fatal("test is not a filterable attribute")
+	}
+	prod := entry.Entry{Name: "Send", Path: "a.go"}
+	tst := entry.Entry{Name: "TestSend", Path: "a_test.go", Test: true}
+	f, err := Parse("test:true", valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Match(prod) || !f.Match(tst) {
+		t.Errorf("test:true matched prod=%v tst=%v", f.Match(prod), f.Match(tst))
+	}
+	f, _ = Parse("test:false", valid)
+	if !f.Match(prod) || f.Match(tst) {
+		t.Errorf("test:false matched prod=%v tst=%v", f.Match(prod), f.Match(tst))
+	}
+}

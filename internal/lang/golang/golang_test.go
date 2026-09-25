@@ -278,3 +278,25 @@ func names(entries []entry.Entry) []string {
 	}
 	return ns
 }
+
+// TestExtract_TestFileMarksEveryEntry (directive 065, g42): a "_test.go"
+// file is handled exactly like any other Go file — its declarations
+// are extracted the same way — with Test true on every one of them,
+// the file entry included; a non-test file's entries carry Test false.
+func TestExtract_TestFileMarksEveryEntry(t *testing.T) {
+	const src = "package sample\n\nimport \"testing\"\n\n// TestHelper exercises Helper.\nfunc TestHelper(t *testing.T) {}\n\ntype fixture struct{ n int }\n"
+	for _, c := range []struct {
+		path string
+		want bool
+	}{{"pkg/thing_test.go", true}, {"pkg/thing.go", false}} {
+		entries, handled, err := Extract(scanner.WithContent(c.path, []byte(src)), "giraffe", nil)
+		if err != nil || !handled || len(entries) < 3 {
+			t.Fatalf("%s: handled=%v err=%v entries=%d", c.path, handled, err, len(entries))
+		}
+		for _, e := range entries {
+			if e.Test != c.want {
+				t.Errorf("%s: entry %s (%s): Test = %v, want %v", c.path, e.Name, e.Kind, e.Test, c.want)
+			}
+		}
+	}
+}

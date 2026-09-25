@@ -301,3 +301,16 @@ func TestEncodeEntry_DocTextKeepsItsLines(t *testing.T) {
 		t.Errorf("DocText = %q", got.DocText)
 	}
 }
+
+// Directive 065, g42: Test survives the store.
+func TestEncodeEntry_TestRoundTrips(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		got, err := decodeEntry(encodeEntry(entry.Entry{Path: "a_test.go", Name: "TestA", Kind: "func", Test: want}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Test != want {
+			t.Errorf("Test = %v, want %v", got.Test, want)
+		}
+	}
+}

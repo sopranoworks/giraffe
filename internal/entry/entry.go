@@ -111,6 +111,15 @@ type Entry struct {
 	// run, because a start line alone cannot aim sed. Zero, like Line,
 	// on a file entry.
 	EndLine int
+
+	// Test reports whether this declaration (or file) lives in a test
+	// file — a language module's own judgement, the way Exported is
+	// (directive 065, g42; Go's "_test.go" convention). False is the
+	// default and the common case, printed as test:true only when true
+	// (§6's absence-is-information rule). Test files are indexed like
+	// any other file; this is the fact that lets a caller tell the two
+	// apart without knowing a language's own naming convention.
+	Test bool
 }
 
 // LineRange is the one value the line attribute carries — printed on a

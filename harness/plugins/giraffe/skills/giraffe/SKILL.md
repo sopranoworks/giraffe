@@ -13,6 +13,8 @@ Several words, or a quoted phrase, first list the entries that carry two
 or more of them (more, and rarer, words first; with how many entries each
 word matches), then answer each word.
 
+Test files are indexed too; a result from one carries `test:true`.
+
 Each result is one line:
 
     name:NodeMetrics kind:type path:internal/core/metrics.go line:16-60

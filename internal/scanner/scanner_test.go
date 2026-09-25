@@ -120,7 +120,7 @@ func TestScan_ResolvesTrackedAndWalked_AppliesExclude(t *testing.T) {
 		}
 	}
 
-	for excluded := range map[string]bool{"vendor/dep/dep.go": true, "pkg/util_test.go": true} {
+	for excluded := range map[string]bool{"vendor/dep/dep.go": true} {
 		if _, present := got[excluded]; present {
 			t.Errorf("expected %s to be excluded, but it was scanned", excluded)
 		}

@@ -602,3 +602,16 @@ func TestDocLine_TheLineTheWordsAreOn(t *testing.T) {
 		t.Errorf("docLine with no word on any line = %q, want the first line", got)
 	}
 }
+
+// Directive 065, g42: a result from a test file carries test:true, and
+// one from production code says nothing.
+func TestResultLine_TestOnlyWhenTrue(t *testing.T) {
+	e := entry.Entry{Path: "a/x_test.go", Name: "TestX", Kind: "func", Line: 3, EndLine: 5, Exported: true, Test: true}
+	if got := resultLine(e, nil, false, false, nil); !strings.Contains(got, " test:true") {
+		t.Errorf("a test's result line lacks test:true: %q", got)
+	}
+	e.Test = false
+	if got := resultLine(e, nil, false, false, nil); strings.Contains(got, "test:") {
+		t.Errorf("a production result line names test: %q", got)
+	}
+}

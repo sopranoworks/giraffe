@@ -520,6 +520,14 @@ func resultLine(e entry.Entry, words []string, showProject, showLang bool, extVa
 	if !e.Exported {
 		fmt.Fprintf(&line, " scope:%s", quote(e.Scope))
 	}
+	// Test is the same "only the informative case costs a line" rule as
+	// scope above: production is the overwhelming default, so test:true
+	// prints and test:false never does (directive 065, g42) — the fact
+	// a caller needs to tell a test's declarations apart from production
+	// code's, now that both are indexed.
+	if e.Test {
+		line.WriteString(" test:true")
+	}
 	// Size and DeclCount are facts about the file, not the declaration
 	// (entry.Entry's own doc comment), so only a Kind==KindFile result
 	// carries them: size: always, since a file result is the one kind

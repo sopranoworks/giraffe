@@ -26,9 +26,17 @@ var defaultExclude = []string{
 	"node_modules/",
 	"testdata/",
 	"examples/",
-	"*_test.go",
 	"*.pb.go",
 }
+
+// "*_test.go" stood here through directive 064: a reuse search gets
+// nothing from a generated file, but a test file is not that — it
+// holds real declarations, and a test's name says what behaviour it
+// exercises, which is the evidence a question about behaviour asks for.
+// Removed in directive 065 (g42); a Go test file is an ordinary
+// candidate, marked by the golang module (entry.Entry.Test,
+// golang.isTestFile) rather than hidden by the scanner, and a language
+// with no extractor never had its tests hidden in the first place.
 
 // GitignoreRule is one exclusion rule discovered from a .gitignore
 // file, scoped to the directory that declared it (directive 022 item
