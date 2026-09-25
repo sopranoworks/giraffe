@@ -39,6 +39,38 @@ const (
 	declCountThreshold = 40
 )
 
+// Source is one declaration's text for ## source: the entry and the
+// lines of its range.
+type Source struct {
+	Entry entry.Entry
+	Lines []string
+}
+
+// sourceBudget bounds ## source the way byteBudget bounds a page.
+const sourceBudget = 2000
+
+// sourceSection renders ## source: each source's name, path and range,
+// paste-ready like a result line, then its lines verbatim, until
+// sourceBudget is spent. The source that runs out of room ends with the
+// count of lines left and the sed that prints them from where it
+// stopped; nothing after it prints.
+func sourceSection(sources []Source) string {
+	var b strings.Builder
+	for _, src := range sources {
+		e := src.Entry
+		fmt.Fprintf(&b, "name:%s path:%s line:%s\n", quote(e.Name), quote(e.Path), e.LineRange())
+		for i, l := range src.Lines {
+			if b.Len()+len(l)+1 > sourceBudget {
+				fmt.Fprintf(&b, "... %d more lines: sed -n '%d,%dp' %s\n", len(src.Lines)-i, e.Line+i, e.EndLine, quote(e.Path))
+				return b.String()
+			}
+			b.WriteString(l)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
 // Summary is the evidence carried on the always-present ## index line: it
 // is what the caller pastes into a report to show the command actually
 // ran, so it is whole-index totals, not counts scoped to one query — the
@@ -82,6 +114,11 @@ type Summary struct {
 	// still benefits from ext distinguishing .h from .cpp even though
 	// lang itself never needs printing.
 	ExtVaries map[string]bool
+	// Sources are the declarations whose name is exactly one of the
+	// search words, with their text (directive 065, g23; 044's ##
+	// source): printed under ## source after the answers, within
+	// sourceBudget.
+	Sources []Source
 	// Languages and ByExt are the two ## index breakdowns (§25 C-24):
 	// what turns "0 symbols" into "go 0 | unknown 181099" for a
 	// repository giraffe cannot extract from at all, plus the raw
@@ -413,6 +450,11 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 				fmt.Fprintf(&b, "%s\n", line)
 			}
 		}
+	}
+
+	if len(s.Sources) > 0 && page == 1 {
+		b.WriteString("\n## source\n")
+		b.WriteString(sourceSection(s.Sources))
 	}
 
 	if len(s.Warnings) > 0 || len(s.Notices) > 0 || len(s.Exclusions) > 0 {

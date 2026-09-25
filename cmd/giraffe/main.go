@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"giraffe/internal/entry"
 	"giraffe/internal/index"
 	"giraffe/internal/lang"
 	"giraffe/internal/limits"
@@ -387,8 +388,72 @@ func runFind(args []string, st searchState) int {
 		}
 		answers = append(answers, a)
 	}
+	summary.Sources = st.exactSources(words, answers)
 	fmt.Print(output.FormatWords(summary, answers, page))
 	return 0
+}
+
+// maxSources caps how many exact matches ## source reads from disk: the
+// section's byte budget bounds what prints, this bounds what is opened
+// for it - a word that names a method on forty types should not cost
+// forty file reads.
+const maxSources = 3
+
+// exactSources reads the text of the declarations whose name is exactly
+// one of words (directive 065, g23; 044's ## source), rarer words'
+// first and each word's in its own answer's rank order, up to
+// maxSources: a caller handed a
+// result's range reads the file anyway, and a name typed exactly is
+// most often typed to see that declaration. A declaration whose file
+// cannot be read is skipped - its result line still names the range.
+func (st searchState) exactSources(words []string, answers []output.WordAnswer) []output.Source {
+	var out []output.Source
+	seen := make(map[string]bool)
+	// Rarer words first: a word that is the name of one declaration
+	// among a few says more about what was asked than one on thousands.
+	own := make([]output.WordAnswer, 0, len(answers))
+	for _, a := range answers {
+		if len(a.Counts) == 0 { // not the several-word block
+			own = append(own, a)
+		}
+	}
+	sort.SliceStable(own, func(i, j int) bool { return len(own[i].Matches) < len(own[j].Matches) })
+	for _, a := range own {
+		for _, e := range a.Matches {
+			if len(out) == maxSources {
+				return out
+			}
+			if e.Kind == entry.KindFile || e.EndLine == 0 || !strings.EqualFold(e.Name, a.Word) {
+				continue
+			}
+			k := e.Path + "\x00" + strconv.Itoa(e.Line)
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			if lines, ok := st.declarationLines(e); ok {
+				out = append(out, output.Source{Entry: e, Lines: lines})
+			}
+		}
+	}
+	return out
+}
+
+// declarationLines returns e's range from its file, under whichever
+// root holds it.
+func (st searchState) declarationLines(e entry.Entry) ([]string, bool) {
+	for _, r := range st.roots {
+		content, err := os.ReadFile(filepath.Join(r.dir, filepath.FromSlash(e.Path)))
+		if err != nil {
+			continue
+		}
+		lines := strings.Split(strings.TrimSuffix(string(content), "\n"), "\n")
+		if e.Line < 1 || e.EndLine < e.Line || e.EndLine > len(lines) {
+			return nil, false
+		}
+		return lines[e.Line-1 : e.EndLine], true
+	}
+	return nil, false
 }
 
 // helpText is what --help, -h, help, and a bare or misused invocation

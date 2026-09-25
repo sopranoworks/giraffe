@@ -21,7 +21,8 @@ Each result is one line:
 `sed -n 'A,Bp' <path>` (or Read with that offset and limit) instead of
 opening the whole file. Under each result: its source line and the line
 of its doc comment the words are on (else its first), usually enough to
-judge it without opening it.
+judge it without opening it. A result named exactly one of the words also
+prints its text, under ## source.
 
 An answer with no results says `none:` — no name, doc comment or path in
 the index contains the word. Bodies are not indexed: grep only for text
