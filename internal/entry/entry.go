@@ -133,6 +133,13 @@ type Entry struct {
 	// change to A never rewrites B's entries (§31.2). Nil when nothing
 	// calls the name, or for a file entry — absence, as everywhere here.
 	Callers []Call
+	// Foreign marks an entry from a root other than the invocation's own
+	// (directive 072; query.Foreign stamps it): the one place §21 C-6's
+	// hiding of unexported declarations still applies. Within the home
+	// root nothing is hidden — a repository holding several modules is
+	// one codebase to whoever searches it. Display and search state
+	// only, never stored.
+	Foreign bool
 }
 
 // Call is one call site: the place in Path, at Line, where Name is

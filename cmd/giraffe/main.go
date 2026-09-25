@@ -65,14 +65,13 @@ type rootResult struct {
 // that shared setup in one place rather than copies that would drift
 // (code-manners M1).
 type searchState struct {
-	entries           query.Entries  // §30 C-46: every root's store, merged; nothing decoded until Search/Suggest/Browse/Summarize actually range over it
-	stores            []*index.Store // closed once this invocation is done querying — see run
-	invocationProject string         // §21 C-6: home root's own project; unexported entries elsewhere are hidden unless a search runs from within them
-	commitLine        string
-	dispatched        int
-	warnings          []string
-	ignoreWarnings    []string
-	exclusions        []string
+	entries        query.Entries  // §30 C-46: every root's store, merged; nothing decoded until Search/Suggest/Browse/Summarize actually range over it
+	stores         []*index.Store // closed once this invocation is done querying — see run
+	commitLine     string
+	dispatched     int
+	warnings       []string
+	ignoreWarnings []string
+	exclusions     []string
 	// knownLanguages names every language this invocation could possibly
 	// report — every registered extractor's own name, plus every
 	// operator assignment from every root's .giraffe/exclude — so
@@ -314,11 +313,6 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 		return searchState{}, 2
 	}
 
-	// §21 C-6: unexported results are hidden outside their own project.
-	// The invocation's project is the home root's own — results[0],
-	// since resolveRoots always puts it first.
-	invocationProject := results[0].stats.RootProject
-
 	var totalDispatched int
 	var warnings []string
 	var commitParts []string
@@ -327,7 +321,14 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 	stores := make([]*index.Store, len(results))
 	roots := make([]rootSource, len(results))
 	for i, r := range results {
+		// The home root is results[0] (resolveRoots puts it first) and is
+		// searched whole; every other root is presented as foreign, its
+		// unexported declarations hidden (§21 C-6, narrowed by directive
+		// 072 to other roots).
 		sources[i] = r.store
+		if i > 0 {
+			sources[i] = query.Foreign(r.store)
+		}
 		stores[i] = r.store
 		roots[i] = rootSource{dir: r.root, src: r.store}
 		totalDispatched += r.stats.Dispatched
@@ -357,16 +358,15 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 	sort.Strings(knownLanguages)
 
 	return searchState{
-		entries:           query.Concat(sources...),
-		stores:            stores,
-		invocationProject: invocationProject,
-		commitLine:        commitLine,
-		dispatched:        totalDispatched,
-		warnings:          warnings,
-		ignoreWarnings:    ignoreWarnings,
-		exclusions:        exclusions,
-		knownLanguages:    knownLanguages,
-		roots:             roots,
+		entries:        query.Concat(sources...),
+		stores:         stores,
+		commitLine:     commitLine,
+		dispatched:     totalDispatched,
+		warnings:       warnings,
+		ignoreWarnings: ignoreWarnings,
+		exclusions:     exclusions,
+		knownLanguages: knownLanguages,
+		roots:          roots,
 	}, 0
 }
 
@@ -408,7 +408,7 @@ func runFind(words []string, opts options, st searchState) int {
 
 	if len(words) == 0 {
 		// Browsing a place (§31.3): no search word to rank against.
-		matches := query.Browse(st.entries, filter, st.invocationProject)
+		matches := query.Browse(st.entries, filter)
 		if len(matches) == 0 {
 			summary.TryNext = query.DiagnoseFilter(st.entries, filter)
 		}
@@ -424,16 +424,16 @@ func runFind(words []string, opts options, st searchState) int {
 	// each word matched on its own.
 	answers := make([]output.WordAnswer, 0, len(words)+1)
 	if len(words) > 1 {
-		matches, counts := query.Ranked(st.entries, words, filter, st.invocationProject)
+		matches, counts := query.Ranked(st.entries, words, filter)
 		answers = append(answers, output.WordAnswer{Word: strings.Join(words, " "), Words: words, Counts: counts, Matches: matches})
 	}
 	for _, word := range words {
-		a := output.WordAnswer{Word: word, Words: []string{word}, Matches: query.Search(st.entries, word, filter, st.invocationProject)}
+		a := output.WordAnswer{Word: word, Words: []string{word}, Matches: query.Search(st.entries, word, filter)}
 		if len(a.Matches) == 0 {
 			if len(filter) > 0 {
 				a.TryNext = append(a.TryNext, query.DiagnoseFilter(st.entries, filter)...)
 			}
-			a.TryNext = append(a.TryNext, query.Suggest(st.entries, word, st.invocationProject)...)
+			a.TryNext = append(a.TryNext, query.Suggest(st.entries, word)...)
 		}
 		answers = append(answers, a)
 	}

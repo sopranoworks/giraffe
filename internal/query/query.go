@@ -455,13 +455,49 @@ func scopeRank(e entry.Entry) int {
 	return 1
 }
 
-// visible reports whether e may appear in search results from an
-// invocation in invocationProject. A declaration not referenceable
-// outside its own module cannot be reused elsewhere, so it is hidden
-// there — surfacing it would be noise the response budget cannot afford
-// (§21 C-6, §7). Exported entries are always visible.
-func visible(e entry.Entry, invocationProject string) bool {
-	return e.Exported || e.Project == invocationProject
+// visible reports whether e may appear in search results. §21 C-6 hid a
+// declaration not referenceable outside its own project, as noise the
+// response budget cannot afford; directive 072 narrows that to entries
+// of another root (Foreign): a repository that holds several modules —
+// kubernetes' staging tree is a module per directory — is one codebase
+// to the person searching it, and an unexported function of a sibling
+// module is exactly what a "where is it" question is after (five of
+// twenty runs grepped for one giraffe had hidden). Exported entries are
+// always visible; a foreign root's unexported ones are not.
+func visible(e entry.Entry) bool {
+	return e.Exported || !e.Foreign
+}
+
+// Foreign presents another root's store as Entries whose every entry is
+// marked Foreign (directive 072), so visible hides what that root does
+// not export. Callers pass through: a call site is a fact about a name.
+func Foreign(src Entries) Entries {
+	return foreignEntries{src}
+}
+
+type foreignEntries struct{ src Entries }
+
+func (f foreignEntries) All() iter.Seq[entry.Entry] {
+	return markForeign(f.src.All())
+}
+
+func (f foreignEntries) Candidates(word string) iter.Seq[entry.Entry] {
+	return markForeign(f.src.Candidates(word))
+}
+
+func (f foreignEntries) Callers(name string) []entry.Call {
+	return f.src.Callers(name)
+}
+
+func markForeign(seq iter.Seq[entry.Entry]) iter.Seq[entry.Entry] {
+	return func(yield func(entry.Entry) bool) {
+		for e := range seq {
+			e.Foreign = true
+			if !yield(e) {
+				return
+			}
+		}
+	}
 }
 
 // Search returns the entries matching word and every attribute in
@@ -493,7 +529,6 @@ func visible(e entry.Entry, invocationProject string) bool {
 // real queries. 041 built and measured this, and reverted it under its
 // own token-median rule; 042 takes it on this ground instead.
 //
-// invocationProject is the project the caller is searching from;
 // package-scope entries outside it are excluded before ranking, not
 // merely ranked low.
 //
@@ -506,7 +541,7 @@ func visible(e entry.Entry, invocationProject string) bool {
 // oversight) — but every entry visited there is decoded lazily from the
 // store's mmap, not out of a slice already fully materialized in
 // memory, so nothing not actually returned as a match is ever GC-owned.
-func Search(src Entries, word string, filter Filter, invocationProject string) []entry.Entry {
+func Search(src Entries, word string, filter Filter) []entry.Entry {
 	lw := strings.ToLower(word)
 	var ranked []rankedEntry
 	// nameMatched records every entry nameTier already accounted for
@@ -521,7 +556,7 @@ func Search(src Entries, word string, filter Filter, invocationProject string) [
 	// would be if built from src.All()).
 	nameMatched := make(map[string]bool)
 	for e := range src.Candidates(word) {
-		if !visible(e, invocationProject) {
+		if !visible(e) {
 			continue
 		}
 		t, ok := nameTier(e, lw)
@@ -541,7 +576,7 @@ func Search(src Entries, word string, filter Filter, invocationProject string) [
 		if nameMatched[dedupKey(e)] {
 			continue
 		}
-		if !visible(e, invocationProject) {
+		if !visible(e) {
 			continue
 		}
 		t, ok := docPathTier(e, lw)
@@ -616,7 +651,7 @@ func Search(src Entries, word string, filter Filter, invocationProject string) [
 // Nothing here knows a language: the words are matched as text, the
 // same way Search matches one word, over whatever name, doc and path
 // the language module (or none) gave an entry.
-func Ranked(src Entries, words []string, filter Filter, invocationProject string) (matches []entry.Entry, counts []int) {
+func Ranked(src Entries, words []string, filter Filter) (matches []entry.Entry, counts []int) {
 	total := 0
 	for range src.All() {
 		total++
@@ -634,7 +669,7 @@ func Ranked(src Entries, words []string, filter Filter, invocationProject string
 	counts = make([]int, len(words))
 	for i, w := range words {
 		lw := strings.ToLower(w)
-		found := Search(src, w, filter, invocationProject)
+		found := Search(src, w, filter)
 		counts[i] = len(found)
 		if len(found) == 0 {
 			continue
@@ -713,8 +748,8 @@ func dedupKey(e entry.Entry) string {
 	return e.Path + "\x00" + e.Name + "\x00" + e.Kind
 }
 
-// Browse returns every entry matching filter and visible from
-// invocationProject, ordered by path, then line, then name (§31.3:
+// Browse returns every entry matching filter and visible (visible),
+// ordered by path, then line, then name (§31.3:
 // browsing a place — find with no search word and a --query — lists
 // what is there; there is no search word to rank matches against, so
 // file order stands in for relevance order). Within one file the order
@@ -727,10 +762,10 @@ func dedupKey(e entry.Entry) string {
 // filter must be non-empty; the caller (main.runFind) rejects an empty
 // one, since browsing always names a place rather than dumping the
 // whole index.
-func Browse(src Entries, filter Filter, invocationProject string) []entry.Entry {
+func Browse(src Entries, filter Filter) []entry.Entry {
 	var out []entry.Entry
 	for e := range src.All() {
-		if !visible(e, invocationProject) {
+		if !visible(e) {
 			continue
 		}
 		if filter.constrainsCallers() {
@@ -1036,9 +1071,9 @@ func sharesToken(name string, wordTokens map[string]bool) bool {
 // Three things are cheap to check and are backed by the index rather
 // than invented:
 //
-//   - a match exists but is hidden from invocationProject because it is
-//     not exported elsewhere — the caller is looking from the wrong
-//     project, not at a name that does not exist
+//   - a match exists but is hidden because it is another root's and not
+//     exported there — the caller is looking from the wrong repository,
+//     not at a name that does not exist
 //   - a name elsewhere in the index shares word's leading characters —
 //     worth trying if the word was a small typo
 //   - a name elsewhere shares an identifier token with word once both
@@ -1076,7 +1111,7 @@ func sharesToken(name string, wordTokens map[string]bool) bool {
 // produces a false negative, only an occasional false positive
 // (TestCouldShareToken_NecessaryButNotSufficient) that the real,
 // boundary-aware check below still filters out correctly.
-func Suggest(src Entries, word, invocationProject string) []string {
+func Suggest(src Entries, word string) []string {
 	lw := strings.ToLower(word)
 	pl := prefixLen(lw)
 	wordTokenList := identifierTokens(word)
@@ -1096,7 +1131,7 @@ func Suggest(src Entries, word, invocationProject string) []string {
 	// 011 already measured Suggest was never the miss-path bottleneck.
 	for e := range src.All() {
 		if tier(e, lw) != noMatch {
-			if !visible(e, invocationProject) {
+			if !visible(e) {
 				hiddenIn[e.Project]++
 			}
 			continue
