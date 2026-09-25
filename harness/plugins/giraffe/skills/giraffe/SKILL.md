@@ -8,6 +8,7 @@ description: The first step for any question about where something is in this re
 `giraffe` is an index of this repository. Run it through Bash:
 
     giraffe <words>          e.g.  giraffe metrics      giraffe "mailbox overflow"
+    giraffe                  builds or refreshes the index (also --prepare); a search does it itself when needed
 
 Several words, or a quoted phrase, first list the entries that carry two
 or more of them (more, and rarer, words first; with how many entries each

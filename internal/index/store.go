@@ -16,6 +16,7 @@
 package index
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"iter"
@@ -45,7 +46,7 @@ const storeFilename = "store.bolt"
 // A change in what an encoded field means is a change of shape too: an
 // index that decoded fine but held ranges computed the old way would
 // keep them for every file that has not changed since.
-const schemaVersion = "8" // 3: EndLine joined the entry encoding (directive 042); 4: Line starts at the doc comment (043); 5: DocText joined it (065); 6: Test joined it (065, g42); 7: the calls and callers buckets (050, ported in 065 g47); 8: Call.Text and Call.In (065, g48)
+const schemaVersion = "9" // 3: EndLine joined the entry encoding (directive 042); 4: Line starts at the doc comment (043); 5: DocText joined it (065); 6: Test joined it (065, g42); 7: the calls and callers buckets (050, ported in 065 g47); 8: Call.Text and Call.In (065, g48); 9: callers keyed by name and path (067)
 
 var (
 	bucketMeta         = []byte("meta")
@@ -56,18 +57,29 @@ var (
 	// bucketCalls and bucketCallers are the call-site index's two
 	// directions (directive 050 §2): calls maps a file's path to every
 	// Call in it — the record commit reads back to know which names a
-	// changed file used to call — and callers maps a name to every Call
-	// of it anywhere, in path then line order, which Callers serves. A
+	// changed file used to call — and callers holds, under the key
+	// name+NUL+path (callersKey), the calls of that name in that file,
+	// so every site of a name is one prefix scan in path then line
+	// order, which Callers serves (directive 067: one key per name and
+	// file, written once with the file, so a build never holds every
+	// site of every name in memory to write a name's list once). A
 	// call in file A is a fact about a name declared in B, so neither is
 	// stored in an entry: a change to A rewrites A's calls record and
-	// the callers lists of the names A called before and calls now, and
-	// nothing of B's (see commit).
+	// A's own keys under the names A called before and calls now, and
+	// nothing of B's (see commitBatch).
 	bucketCalls      = []byte("calls")
 	bucketCallers    = []byte("callers")
 	keySchemaVersion = []byte("schema_version")
 	keyEnumBlob      = []byte("blob")
 	keyWalkBlob      = []byte("walk")
 	keyNextID        = []byte("next_id")
+	// keyComplete is present exactly when every write the store has
+	// seen ran to its end (directive 067): a batch's first transaction
+	// removes it and its last puts it back, so a store whose build or
+	// update was cut short — a timeout, a kill — opens as no store at
+	// all (openStore) and is rebuilt whole, never read with its files
+	// bucket ahead of its postings.
+	keyComplete = []byte("complete")
 )
 
 // Store is one root's persistent state: extracted entries, the
@@ -82,8 +94,10 @@ type Store struct {
 }
 
 // openStore opens root's store, discarding and recreating it if it does
-// not exist, does not open as a valid bbolt file, or was written by a
-// different schema version (§23 C-14: never migrated, always rebuilt).
+// not exist, does not open as a valid bbolt file, was written by a
+// different schema version (§23 C-14: never migrated, always rebuilt),
+// or was left without its complete mark by a write that never finished
+// (keyComplete).
 // readOnly=true refuses to create a missing file (returns ok=false
 // instead) — used by the fast "nothing changed" path, which must never
 // be the reason a store gets created.
@@ -115,7 +129,7 @@ func openStore(root string, readOnly bool) (s *Store, ok bool, err error) {
 		if b == nil {
 			return nil
 		}
-		valid = string(b.Get(keySchemaVersion)) == schemaVersion
+		valid = string(b.Get(keySchemaVersion)) == schemaVersion && b.Get(keyComplete) != nil
 		return nil
 	})
 	if !valid {
@@ -479,7 +493,9 @@ func (s *Store) entriesByID(ids []uint64) []entry.Entry {
 
 // Callers returns every call site of name in this store, in path then
 // line order — what a result line's callers: carries (directive 050).
-// Nil when nothing calls the name. One key read, decoded on demand: the
+// Nil when nothing calls the name. One prefix scan over the name's own
+// keys (callersKey: one per file that calls it, in path order, each
+// holding that file's sites in line order), decoded on demand: the
 // list is attached to an entry only when a query reaches it
 // (query.Search, query.Browse), never on the whole-index walks All and
 // Candidates serve, so Summarize's pass over every entry pays nothing
@@ -494,10 +510,26 @@ func (s *Store) Callers(name string) []entry.Call {
 		if b == nil {
 			return nil
 		}
-		calls = decodeCalls(b.Get([]byte(name)))
+		prefix := callersPrefix(name)
+		c := b.Cursor()
+		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+			calls = append(calls, decodeCalls(v)...)
+		}
 		return nil
 	})
 	return calls
+}
+
+// callersKey is the callers bucket's key for name's sites in path: the
+// name, a NUL (which neither an identifier nor a path can hold), then
+// the path — so one name's keys are contiguous and sort by path, the
+// order Callers promises.
+func callersKey(name, path string) []byte {
+	return []byte(name + "\x00" + path)
+}
+
+func callersPrefix(name string) []byte {
+	return []byte(name + "\x00")
 }
 
 // callsOf returns the call sites recorded for path — a file's own
@@ -628,17 +660,18 @@ type fileChange struct {
 	Calls []entry.Call
 }
 
-// cacheBlobs bundles commit's two cache-blob parameters — see commit's
-// own doc comment for why they are one value, not two parameter pairs.
+// cacheBlobs bundles a batch's two cache-blob parameters — see
+// commitBatch.finish's own doc comment for why they are one value, not
+// two parameter pairs.
 type cacheBlobs struct {
 	enum      []byte
 	writeEnum bool
 	walk      []byte
 }
 
-// commitMode selects how commit fills bbolt's pages while writing —
-// see commit's own doc comment for why this is a named fork, not a
-// bool.
+// commitMode selects how a batch fills bbolt's pages while writing —
+// see commitBatch's own doc comment for why this is a named fork, not
+// a bool.
 type commitMode int
 
 const (
@@ -647,61 +680,90 @@ const (
 	// future scattered writes, not this one.
 	commitDifferential commitMode = iota
 	// commitBulk is a first build, or a full rebuild of a discarded
-	// store — every key this call writes is new and arrives in
+	// store — every key this batch writes is new and arrives in
 	// ascending order, so packing pages fuller costs nothing later.
 	commitBulk
 )
 
-// commit applies a differential set of changes in one write transaction
-// (directive 013): each change in changes replaces whatever entries its
-// path owned before with fresh ones — the old ones, and their trigram
-// postings, are removed first, so the id space never carries a stale
-// entry forward under a live id — and each path in deletes is removed
-// outright. enumBlob is written only when writeEnum says it actually
-// differs from what is stored. A path this call says nothing about is
-// never opened: the write transaction's size is the size of the diff,
-// not the corpus.
+// chunkBytes bounds how many bytes of values one of a batch's
+// transactions holds before it is committed and the next begun
+// (directive 067). bbolt keeps every page a transaction touches as a
+// Go object until that transaction commits, and re-copies all of them
+// each time the file grows under it, so one transaction the size of
+// kubernetes' index (400 MB of values) held some 750 MB of heap under
+// a 384 MiB ceiling: 3,100 collections, 72% of the build's CPU in the
+// collector, and 29 of its 32 seconds in commit. Eight mebibytes keeps
+// a transaction's own footprint a small multiple of this, well inside
+// the ceiling, at some fifty commits for kubernetes — each a page
+// write and an fsync, negligible next to what it saves.
+const chunkBytes = 8 << 20
+
+// commitBatch applies one Refresh's changes to the store, in bounded
+// transactions (directive 067, restructuring directive 013's single
+// differential transaction without changing what it writes). A caller
+// removes every deleted path (remove), adds every changed file's fresh
+// contribution in path order (add) — streaming them straight from
+// extraction on a first build, so the whole corpus is never resident
+// at once — and finishes (finish), which writes what only the whole
+// batch can know: the trigram postings, the cache blobs, the id
+// counter and the complete mark.
+//
+// What a batch writes is exactly what the one transaction wrote before
+// it: each change replaces whatever entries its path owned with fresh
+// ones — the old ones, and their trigram postings, are removed first,
+// so the id space never carries a stale entry forward under a live id
+// — and each deleted path is removed outright. A path the batch says
+// nothing about is never opened: the writes are the size of the diff,
+// not the corpus. Ids are assigned in the order add is called, so the
+// caller's path order is the store's id order — the same order the one
+// transaction assigned, sorting its changes by path first — and a
+// first build's entries, files and calls all arrive in ascending key
+// order, bbolt's own append-optimized path.
 //
 // The very first build of a store is not a separate code path: it is
-// this same function with changes covering every scanned file, deletes
-// empty, and nothing yet in the files bucket for remove to find (§23
-// C-14's discard-and-rebuild ethos — one mechanism, not two that must be
-// kept in step by hand).
+// this same batch with add called for every scanned file, nothing to
+// remove, and nothing yet in the files bucket for removeOwned to find
+// (§23 C-14's discard-and-rebuild ethos — one mechanism, not two that
+// must be kept in step by hand).
 //
 // The call-site index (directive 050 §2) follows the same rule with a
 // second dimension: a changed or deleted path's old calls record names
-// every callers list that held a site in that path, and its new calls
-// name every list that gains one. Each such name's list is read once,
-// stripped of every site in a changed or deleted path, given the new
-// sites, sorted and written back once — batched across the whole call
-// like the trigram postings below, for the same reason. A name nobody
-// in the change set called before or after is never opened; a path
-// outside the change set has its own calls record and its own
-// contribution to every callers list left exactly as they were.
+// every callers key that held a site in that path (callersKey — one per
+// name the file called), and its new calls write one key per name it
+// calls now. A name nobody in the change set called before or after is
+// never opened; a path outside the change set has its own calls record
+// and its own callers keys left exactly as they were.
+//
+// Trigram postings are batched in memory across every add and remove
+// in the batch, not read-modify-written per entry: a full build's
+// common case is a gram shared by thousands of entries, and touching
+// bbolt once per entry that happens to share it — decoding and
+// re-encoding a growing list each time — makes that gram's own cost
+// grow quadratically in how many entries share it. Collecting every
+// add and remove first, then applying each distinct gram exactly once
+// in finish, keeps the cost linear in how many (entry, gram) pairs
+// exist — and the map is ids alone, a few tens of megabytes for
+// kubernetes, not the entries.
 //
 // keysWritten counts distinct bbolt keys touched (Put or Delete) across
-// entries, files, name_trigrams, calls, callers and meta — the number directive 013's
-// own completion report is required to give for "nothing changed / 5
-// files changed / full build": a Put and a Delete on the same key
-// within one call (an entry's trigram gram losing an old id and
-// gaining a new one) count once, since that gram is the thing that
-// changed, not twice for how many operations it took.
+// entries, files, name_trigrams, calls, callers and meta — the number
+// directive 013's own completion report is required to give for
+// "nothing changed / 5 files changed / full build": a Put and a Delete
+// on the same key within one transaction (a file's callers key dropped
+// for its old sites and written for its new) count once, since that
+// key is the thing that changed, not twice for how many operations it
+// took. A key is touched in one transaction only: a path's keys are all
+// written by its own add, and a gram's posting once, in finish.
 //
-// mode (directive 020 §1) is commitBulk exactly when this transaction is
+// mode (directive 020 §1) is commitBulk exactly when the batch is
 // writing into a store with nothing in it yet — a first run, or a
-// stale/unreadable store being rebuilt from scratch (see Refresh's own
-// !roOK) — never for a differential update against a store that already
-// has content. Measured before changing anything (this directive's
-// completion report has the breakdown): on a cold kubernetes build,
-// commit was ~70% of total wall time, and within commit itself,
-// entries+files (encoding and inserting) and the bbolt transaction's
-// own internal commit (page spill, rebalance, write, fsync) were each
-// roughly a third — with 013's own trigram-posting batching (below)
-// confirmed still doing its job (applying every gram once, not
-// read-modify-written per entry that shares it). commitBulk addresses
-// the bbolt-internal third: entries, files and name_trigrams are all
-// written in ascending key order on a full build (nextID is sequential;
-// sortedChanges and sortedGrams are both sorted), which is exactly the
+// stale/unreadable store being rebuilt from scratch (see Refresh) —
+// never for a differential update against a store that already has
+// content. Measured before changing anything (directive 020's report):
+// on a cold kubernetes build the bbolt transaction's own internal
+// commit (page spill, rebalance, write, fsync) was a third of commit;
+// commitBulk addresses it: entries, files and name_trigrams are all
+// written in ascending key order on a full build, which is exactly the
 // append-only pattern bbolt's own Bucket.FillPercent doc names as worth
 // raising — and the same value its own compact tool uses for a bulk
 // copy (compact.go). Left at bbolt's 0.5 default for a differential
@@ -709,255 +771,391 @@ const (
 // not appended past its end, where packing every touched page to 100%
 // now would only move today's saving into tomorrow's extra split.
 //
-// An enumerated mode, not a second bool parameter (code-manners M5:
-// "no boolean parameter that selects behavior... one enumerated mode")
-// — bulk-vs-differential is a named behavior fork this call makes, not
-// a data flag like caches.writeEnum, which says only whether a value is
-// present to write, not how the write itself behaves.
+// An enumerated mode, not a bool (code-manners M5: "no boolean
+// parameter that selects behavior... one enumerated mode") —
+// bulk-vs-differential is a named behavior fork, not a data flag like
+// caches.writeEnum, which says only whether a value is present to
+// write, not how the write itself behaves.
+type commitBatch struct {
+	s    *Store
+	mode commitMode
+
+	tx      *bolt.Tx
+	txBytes int
+	touched map[string]struct{} // keys touched by the open transaction
+	keys    int                 // keys touched by every transaction committed so far
+	started bool                // the first transaction has begun: the complete mark is gone
+
+	nextID   uint64
+	assigned bool // nextID moved and must be persisted
+
+	addIDs    map[string][]uint64
+	removeIDs map[string][]uint64
+}
+
+// beginCommit starts a batch against s. Nothing is written until the
+// first remove or add; finish must be called to complete it — a batch
+// abandoned partway leaves the store without its complete mark, which
+// the next open treats as no store (openStore).
+func (s *Store) beginCommit(mode commitMode) *commitBatch {
+	return &commitBatch{
+		s:         s,
+		mode:      mode,
+		addIDs:    make(map[string][]uint64),
+		removeIDs: make(map[string][]uint64),
+	}
+}
+
+// begin opens the batch's next transaction if none is open. The first
+// one also takes the complete mark away (keyComplete) and reads the id
+// counter; every one sets the bulk fill factor when the mode asks.
+func (w *commitBatch) begin() error {
+	if w.tx != nil {
+		return nil
+	}
+	tx, err := w.s.db.Begin(true)
+	if err != nil {
+		return err
+	}
+	w.tx = tx
+	w.txBytes = 0
+	w.touched = make(map[string]struct{})
+	if w.mode == commitBulk {
+		for _, name := range [][]byte{bucketEntries, bucketFiles, bucketNameTrigrams, bucketCalls, bucketCallers} {
+			tx.Bucket(name).FillPercent = 1.0
+		}
+	}
+	if !w.started {
+		w.started = true
+		mb := tx.Bucket(bucketMeta)
+		w.nextID = readNextID(mb)
+		if err := mb.Delete(keyComplete); err != nil {
+			_ = tx.Rollback()
+			w.tx = nil
+			return err
+		}
+	}
+	return nil
+}
+
+// flush commits the open transaction, if any, persisting the id
+// counter with it so a later transaction — or a later batch — never
+// hands out an id this one already did.
+func (w *commitBatch) flush() error {
+	if w.tx == nil {
+		return nil
+	}
+	if w.assigned {
+		if err := writeNextID(w.tx.Bucket(bucketMeta), w.nextID); err != nil {
+			_ = w.tx.Rollback()
+			w.tx = nil
+			return err
+		}
+		w.touch('m', keyNextID)
+		w.assigned = false
+	}
+	w.keys += len(w.touched)
+	err := w.tx.Commit()
+	w.tx = nil
+	w.touched = nil
+	return err
+}
+
+// abort rolls back whatever transaction is open. The complete mark
+// stays gone: the store is rebuilt on its next open.
+func (w *commitBatch) abort() {
+	if w.tx != nil {
+		_ = w.tx.Rollback()
+		w.tx = nil
+	}
+}
+
+func (w *commitBatch) touch(bucket byte, key []byte) {
+	w.touched[string(bucket)+string(key)] = struct{}{}
+}
+
+// removeOwned takes away everything path owns in the open transaction:
+// its entries and their trigram postings (batched into removeIDs), and
+// its keys under every name its old calls record says it called. Its
+// files and calls records are the caller's to replace or delete.
+func (w *commitBatch) removeOwned(path string) error {
+	eb := w.tx.Bucket(bucketEntries)
+	fb := w.tx.Bucket(bucketFiles)
+	cb := w.tx.Bucket(bucketCalls)
+	rb := w.tx.Bucket(bucketCallers)
+	names := make(map[string]bool)
+	for _, c := range decodeCalls(cb.Get([]byte(path))) {
+		names[c.Name] = true
+	}
+	for n := range names {
+		key := callersKey(n, path)
+		if rb.Get(key) == nil {
+			continue
+		}
+		if err := rb.Delete(key); err != nil {
+			return err
+		}
+		w.touch('r', key)
+	}
+	v := fb.Get([]byte(path))
+	if v == nil {
+		return nil
+	}
+	rec, err := decodeFileRecord(v)
+	if err != nil {
+		return nil
+	}
+	for _, id := range rec.EntryIDs {
+		ev := eb.Get(idKey(id))
+		if ev == nil {
+			continue
+		}
+		if e, decErr := decodeEntry(ev); decErr == nil {
+			for _, g := range trigrams(strings.ToLower(e.Name)) {
+				w.removeIDs[g] = append(w.removeIDs[g], id)
+			}
+		}
+		if err := eb.Delete(idKey(id)); err != nil {
+			return err
+		}
+		w.touch('e', idKey(id))
+	}
+	return nil
+}
+
+// remove takes a deleted path out of the store: its entries, postings
+// and callers keys (removeOwned), then its files and calls records.
+func (w *commitBatch) remove(path string) error {
+	if err := w.begin(); err != nil {
+		return err
+	}
+	if err := w.removeOwned(path); err != nil {
+		w.abort()
+		return err
+	}
+	fb := w.tx.Bucket(bucketFiles)
+	cb := w.tx.Bucket(bucketCalls)
+	if err := fb.Delete([]byte(path)); err != nil {
+		w.abort()
+		return err
+	}
+	w.touch('f', []byte(path))
+	if cb.Get([]byte(path)) != nil {
+		if err := cb.Delete([]byte(path)); err != nil {
+			w.abort()
+			return err
+		}
+		w.touch('c', []byte(path))
+	}
+	return nil
+}
+
+// add writes one changed file's fresh contribution: whatever its path
+// owned before is removed (removeOwned), its entries get the next ids,
+// its files record, its calls record and one callers key per name it
+// calls are written, and its names' trigrams are queued for finish.
+// Once the open transaction holds chunkBytes of values it is committed
+// and the next add begins another.
+func (w *commitBatch) add(c fileChange) error {
+	if err := w.begin(); err != nil {
+		return err
+	}
+	if err := w.addIn(c); err != nil {
+		w.abort()
+		return err
+	}
+	if w.txBytes >= chunkBytes {
+		return w.flush()
+	}
+	return nil
+}
+
+func (w *commitBatch) addIn(c fileChange) error {
+	if err := w.removeOwned(c.Path); err != nil {
+		return err
+	}
+	eb := w.tx.Bucket(bucketEntries)
+	fb := w.tx.Bucket(bucketFiles)
+	cb := w.tx.Bucket(bucketCalls)
+	rb := w.tx.Bucket(bucketCallers)
+
+	ids := make([]uint64, 0, len(c.Entries))
+	for _, e := range c.Entries {
+		id := w.nextID
+		w.nextID++
+		w.assigned = true
+		v := encodeEntry(e)
+		if err := eb.Put(idKey(id), v); err != nil {
+			return err
+		}
+		w.touch('e', idKey(id))
+		w.txBytes += len(v)
+		ids = append(ids, id)
+		for _, g := range trigrams(strings.ToLower(e.Name)) {
+			w.addIDs[g] = append(w.addIDs[g], id)
+		}
+	}
+	rec := encodeFileRecord(Record{ModTime: c.ModTime, Size: c.Size, EntryIDs: ids})
+	if err := fb.Put([]byte(c.Path), rec); err != nil {
+		return err
+	}
+	w.touch('f', []byte(c.Path))
+	w.txBytes += len(rec)
+
+	n, err := putCalls(cb, c.Path, c.Calls, w.touch)
+	if err != nil {
+		return err
+	}
+	w.txBytes += n
+
+	// One callers key per name this file calls, holding the file's
+	// sites of that name in line order — Callers reads a name's keys
+	// back in path order, so the whole list comes out sorted the way
+	// sortCalls sorts, without any list ever being read to be extended.
+	byName := make(map[string][]entry.Call)
+	for _, call := range c.Calls {
+		byName[call.Name] = append(byName[call.Name], call)
+	}
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		sites := byName[name]
+		sortCalls(sites)
+		key := callersKey(name, c.Path)
+		v := encodeCalls(sites)
+		if err := rb.Put(key, v); err != nil {
+			return err
+		}
+		w.touch('r', key)
+		w.txBytes += len(v)
+	}
+	return nil
+}
+
+// finish writes what only the whole batch can know — every touched
+// gram's posting list, applied once (applyPosting); the enum cache
+// blob, when writeEnum says it actually differs from what is stored;
+// the walk cache blob; the id counter — puts the complete mark back,
+// and commits. It returns the keys the whole batch touched.
 //
 // caches bundles the enum cache blob (directive 019) and the
 // incremental walk cache blob (directive 021 item 2) — two parallel
 // (blob []byte, write bool)-shaped facts that already had to change
 // together (both come from the same enumerate call, in refresh.go) and
-// so are one value, not two more parameters on top of the four already
-// here (code-manners M2; patterns.md §9). The walk blob has no write
-// flag of its own: Walk always runs and always produces a fresh cache
-// to persist, unlike the enum blob, whose cache-hit replay path can
-// leave nothing new to write.
+// so are one value, not two more parameters (code-manners M2;
+// patterns.md §9). The walk blob has no write flag of its own: Walk
+// always runs and always produces a fresh cache to persist, unlike the
+// enum blob, whose cache-hit replay path can leave nothing new to
+// write.
+func (w *commitBatch) finish(caches cacheBlobs) (keysWritten int, err error) {
+	if err := w.begin(); err != nil {
+		return 0, err
+	}
+	if err := w.finishIn(caches); err != nil {
+		w.abort()
+		return 0, err
+	}
+	if err := w.flush(); err != nil {
+		return 0, err
+	}
+	return w.keys, nil
+}
+
+func (w *commitBatch) finishIn(caches cacheBlobs) error {
+	tx := w.tx
+	tb := tx.Bucket(bucketNameTrigrams)
+	grams := make(map[string]struct{}, len(w.addIDs)+len(w.removeIDs))
+	for g := range w.addIDs {
+		grams[g] = struct{}{}
+	}
+	for g := range w.removeIDs {
+		grams[g] = struct{}{}
+	}
+	sortedGrams := make([]string, 0, len(grams))
+	for g := range grams {
+		sortedGrams = append(sortedGrams, g)
+	}
+	sort.Strings(sortedGrams)
+	for _, g := range sortedGrams {
+		if err := applyPosting(tb, g, w.addIDs[g], w.removeIDs[g]); err != nil {
+			return err
+		}
+		w.touch('t', []byte(g))
+	}
+
+	if caches.writeEnum && caches.enum != nil {
+		eb2, err := tx.CreateBucketIfNotExists(bucketEnum)
+		if err != nil {
+			return err
+		}
+		if err := eb2.Put(keyEnumBlob, caches.enum); err != nil {
+			return err
+		}
+		w.touch('u', keyEnumBlob)
+	}
+	if caches.walk != nil {
+		wb, err := tx.CreateBucketIfNotExists(bucketEnum)
+		if err != nil {
+			return err
+		}
+		if err := wb.Put(keyWalkBlob, caches.walk); err != nil {
+			return err
+		}
+		w.touch('u', keyWalkBlob)
+	}
+	mb := tx.Bucket(bucketMeta)
+	if err := mb.Put(keyComplete, []byte("1")); err != nil {
+		return err
+	}
+	w.touch('m', keyComplete)
+	return nil
+}
+
+// commit applies a differential set of changes as one batch (directive
+// 013; commitBatch): each deleted path removed, each change added in
+// path order, then finished. The form Refresh's differential update
+// and the store's own tests use; a first build streams its changes into
+// a batch directly instead (Refresh).
 func (s *Store) commit(changes []fileChange, deletes []string, caches cacheBlobs, mode commitMode) (keysWritten int, err error) {
-	err = s.db.Update(func(tx *bolt.Tx) error {
-		eb := tx.Bucket(bucketEntries)
-		fb := tx.Bucket(bucketFiles)
-		tb := tx.Bucket(bucketNameTrigrams)
-		cb := tx.Bucket(bucketCalls)
-		rb := tx.Bucket(bucketCallers)
-		mb := tx.Bucket(bucketMeta)
-		if mode == commitBulk {
-			eb.FillPercent = 1.0
-			fb.FillPercent = 1.0
-			tb.FillPercent = 1.0
-			cb.FillPercent = 1.0
-			rb.FillPercent = 1.0
+	w := s.beginCommit(mode)
+	sortedDeletes := append([]string(nil), deletes...)
+	sort.Strings(sortedDeletes)
+	for _, path := range sortedDeletes {
+		if err := w.remove(path); err != nil {
+			return 0, err
 		}
-
-		touched := make(map[string]struct{})
-		touch := func(bucket byte, key []byte) {
-			touched[string(bucket)+string(key)] = struct{}{}
+	}
+	sortedChanges := append([]fileChange(nil), changes...)
+	sort.Slice(sortedChanges, func(i, j int) bool { return sortedChanges[i].Path < sortedChanges[j].Path })
+	for _, c := range sortedChanges {
+		if err := w.add(c); err != nil {
+			return 0, err
 		}
-
-		nextID := readNextID(mb)
-
-		// Trigram postings are batched in memory across every change and
-		// delete in this call, not read-modify-written per entry: a
-		// full build's common case is a gram shared by thousands of
-		// entries (kubernetes: 172,397 of them), and touching bbolt once
-		// per entry that happens to share it — decoding and re-encoding
-		// a growing list each time — makes that gram's own cost grow
-		// quadratically in how many entries share it. Collecting every
-		// add and remove here first, then applying each distinct gram
-		// exactly once below, keeps the cost linear in how many
-		// (entry, gram) pairs exist, the same bound the old full-rewrite
-		// build had via its own in-memory map.
-		addIDs := make(map[string][]uint64)
-		removeIDs := make(map[string][]uint64)
-
-		// The call-site index's own batch (directive 050 §2): the paths
-		// whose sites every touched callers list must drop, the sites
-		// each such list gains, and the names whose lists are touched at
-		// all — applied once per name below, after every change and
-		// delete has been seen.
-		droppedPaths := make(map[string]bool)
-		addCalls := make(map[string][]entry.Call)
-		touchedNames := make(map[string]struct{})
-
-		removeOwned := func(path string) error {
-			droppedPaths[path] = true
-			for _, c := range decodeCalls(cb.Get([]byte(path))) {
-				touchedNames[c.Name] = struct{}{}
-			}
-			v := fb.Get([]byte(path))
-			if v == nil {
-				return nil
-			}
-			rec, err := decodeFileRecord(v)
-			if err != nil {
-				return nil
-			}
-			for _, id := range rec.EntryIDs {
-				ev := eb.Get(idKey(id))
-				if ev == nil {
-					continue
-				}
-				if e, decErr := decodeEntry(ev); decErr == nil {
-					for _, g := range trigrams(strings.ToLower(e.Name)) {
-						removeIDs[g] = append(removeIDs[g], id)
-					}
-				}
-				if err := eb.Delete(idKey(id)); err != nil {
-					return err
-				}
-				touch('e', idKey(id))
-			}
-			return nil
-		}
-
-		sortedDeletes := append([]string(nil), deletes...)
-		sort.Strings(sortedDeletes)
-		for _, path := range sortedDeletes {
-			if err := removeOwned(path); err != nil {
-				return err
-			}
-			if err := fb.Delete([]byte(path)); err != nil {
-				return err
-			}
-			touch('f', []byte(path))
-			if cb.Get([]byte(path)) != nil {
-				if err := cb.Delete([]byte(path)); err != nil {
-					return err
-				}
-				touch('c', []byte(path))
-			}
-		}
-
-		sortedChanges := append([]fileChange(nil), changes...)
-		sort.Slice(sortedChanges, func(i, j int) bool { return sortedChanges[i].Path < sortedChanges[j].Path })
-		for _, c := range sortedChanges {
-			if err := removeOwned(c.Path); err != nil {
-				return err
-			}
-			ids := make([]uint64, 0, len(c.Entries))
-			for _, e := range c.Entries {
-				id := nextID
-				nextID++
-				if err := eb.Put(idKey(id), encodeEntry(e)); err != nil {
-					return err
-				}
-				touch('e', idKey(id))
-				ids = append(ids, id)
-				for _, g := range trigrams(strings.ToLower(e.Name)) {
-					addIDs[g] = append(addIDs[g], id)
-				}
-			}
-			rec := Record{ModTime: c.ModTime, Size: c.Size, EntryIDs: ids}
-			if err := fb.Put([]byte(c.Path), encodeFileRecord(rec)); err != nil {
-				return err
-			}
-			touch('f', []byte(c.Path))
-			if err := putCalls(cb, c.Path, c.Calls, touch); err != nil {
-				return err
-			}
-			for _, call := range c.Calls {
-				addCalls[call.Name] = append(addCalls[call.Name], call)
-				touchedNames[call.Name] = struct{}{}
-			}
-		}
-
-		sortedNames := make([]string, 0, len(touchedNames))
-		for n := range touchedNames {
-			sortedNames = append(sortedNames, n)
-		}
-		sort.Strings(sortedNames)
-		for _, n := range sortedNames {
-			if err := applyCallers(rb, n, droppedPaths, addCalls[n]); err != nil {
-				return err
-			}
-			touch('r', []byte(n))
-		}
-
-		grams := make(map[string]struct{}, len(addIDs)+len(removeIDs))
-		for g := range addIDs {
-			grams[g] = struct{}{}
-		}
-		for g := range removeIDs {
-			grams[g] = struct{}{}
-		}
-		sortedGrams := make([]string, 0, len(grams))
-		for g := range grams {
-			sortedGrams = append(sortedGrams, g)
-		}
-		sort.Strings(sortedGrams)
-		for _, g := range sortedGrams {
-			if err := applyPosting(tb, g, addIDs[g], removeIDs[g]); err != nil {
-				return err
-			}
-			touch('t', []byte(g))
-		}
-
-		if caches.writeEnum && caches.enum != nil {
-			eb2, err := tx.CreateBucketIfNotExists(bucketEnum)
-			if err != nil {
-				return err
-			}
-			if err := eb2.Put(keyEnumBlob, caches.enum); err != nil {
-				return err
-			}
-			touch('u', keyEnumBlob)
-		}
-		if caches.walk != nil {
-			wb, err := tx.CreateBucketIfNotExists(bucketEnum)
-			if err != nil {
-				return err
-			}
-			if err := wb.Put(keyWalkBlob, caches.walk); err != nil {
-				return err
-			}
-			touch('u', keyWalkBlob)
-		}
-
-		if len(sortedChanges) > 0 {
-			if err := writeNextID(mb, nextID); err != nil {
-				return err
-			}
-			touch('m', keyNextID)
-		}
-
-		keysWritten = len(touched)
-		return nil
-	})
-	return keysWritten, err
+	}
+	return w.finish(caches)
 }
 
 // putCalls writes path's calls record, or deletes it when the file
 // calls nothing — an absent key and an empty list are one fact, as for
 // a trigram's postings. A file whose record was absent and stays absent
-// touches no key.
-func putCalls(cb *bolt.Bucket, path string, calls []entry.Call, touch func(byte, []byte)) error {
+// touches no key. Returns the bytes written.
+func putCalls(cb *bolt.Bucket, path string, calls []entry.Call, touch func(byte, []byte)) (int, error) {
 	key := []byte(path)
 	if len(calls) == 0 {
 		if cb.Get(key) == nil {
-			return nil
+			return 0, nil
 		}
 		touch('c', key)
-		return cb.Delete(key)
+		return 0, cb.Delete(key)
 	}
 	sorted := append([]entry.Call(nil), calls...)
 	sortCalls(sorted)
 	touch('c', key)
-	return cb.Put(key, encodeCalls(sorted))
-}
-
-// applyCallers reads name's callers list once, drops every site whose
-// path is in droppedPaths (a changed or deleted file's old sites, which
-// the file's own new calls re-add if they still exist), appends add,
-// sorts, and writes the result back once — deleting the key when
-// nothing calls the name any more, as applyPosting does for a gram. The
-// caller has batched every path and site the whole transaction touches
-// under this name, so a name called from a thousand places costs one
-// read and one write here.
-func applyCallers(rb *bolt.Bucket, name string, droppedPaths map[string]bool, add []entry.Call) error {
-	calls := decodeCalls(rb.Get([]byte(name)))
-	kept := calls[:0]
-	for _, c := range calls {
-		if !droppedPaths[c.Path] {
-			kept = append(kept, c)
-		}
-	}
-	calls = append(kept, add...)
-	if len(calls) == 0 {
-		return rb.Delete([]byte(name))
-	}
-	sortCalls(calls)
-	return rb.Put([]byte(name), encodeCalls(calls))
+	v := encodeCalls(sorted)
+	return len(v), cb.Put(key, v)
 }
 
 // applyPosting reads gram's current posting list once, removes every id

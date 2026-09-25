@@ -136,6 +136,18 @@ type Config struct {
 // since giraffe has no extractor for its C/C++ content (§18) — every
 // entry is a synthesized file entry, never GC-owned cache data to begin
 // with.
+//
+// Directive 067 re-measured the cold kubernetes build after the index
+// had grown to hold test files (065 g42) and every call site (065
+// g47): 199,591 entries and 727,279 call sites. Under this ceiling the
+// one write transaction that built the store held some 750 MB of
+// bbolt nodes — 3,100 collections, 72% of the build's CPU in the
+// collector, 32 s wall, past the 30 s timeout. The build now streams
+// into bounded transactions (index.commitBatch): 3.2 s wall, a heap
+// peak near 106 MB, 1% of CPU in the collector, 250 collections. The
+// ceiling stays: the build fits under it with room, and the timeout
+// covers the build the same as a search — kubernetes' build is a
+// tenth of it.
 const defaultHeapLimit = 384 << 20 // 384 MiB
 
 // HeapLimit (GOMEMLIMIT) is chosen separately — see its own doc comment

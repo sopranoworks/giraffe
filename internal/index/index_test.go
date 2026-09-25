@@ -1,6 +1,7 @@
 package index
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -389,8 +390,9 @@ func TestStore_CallersFollowTheFileThatCalls(t *testing.T) {
 		t.Errorf("after a.go deleted, callsOf(a.go) = %+v, want none", got)
 	}
 	_ = s.db.View(func(tx *bolt.Tx) error {
-		if v := tx.Bucket(bucketCallers).Get([]byte("Snapshot")); v != nil {
-			t.Errorf("callers key for Snapshot still present after its last caller went: %q", v)
+		c := tx.Bucket(bucketCallers).Cursor()
+		if k, v := c.Seek(callersPrefix("Snapshot")); k != nil && bytes.HasPrefix(k, callersPrefix("Snapshot")) {
+			t.Errorf("callers key for Snapshot still present after its last caller went: %q=%q", k, v)
 		}
 		return nil
 	})

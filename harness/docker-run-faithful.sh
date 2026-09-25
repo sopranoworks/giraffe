@@ -20,6 +20,12 @@
 # /root/src/<name>, a path a developer's checkout could have, rather
 # than 030's /corpus.
 #
+# When giraffe is in the container (B, C), the index is built in the
+# clone before the agent starts — a bare `giraffe`, directive 067 §4 —
+# the way a person builds it before handing a repository over. Its wall
+# time is printed to stderr ("index build: exit N, M ms") and no token
+# of it is the agent's.
+#
 # The home is mounted read-only, as run-arrival's ~/.claude always was;
 # the host's .credentials.json is mounted over the empty one inside it,
 # read-only. The host's Go toolchain is mounted read-only and put on
@@ -77,4 +83,4 @@ docker run --rm \
   ${MODEL:+-e "MODEL=$MODEL"} \
   -w /harness \
   node:22-slim \
-  bash -c 'apt-get update -qq && apt-get install -y -qq git python3 jq >/dev/null && git config --global --add safe.directory "*" && node_modules/.bin/tsx src/run-faithful.ts'
+  bash -c 'apt-get update -qq && apt-get install -y -qq git python3 jq >/dev/null && git config --global --add safe.directory "*" && if [ -x /usr/local/bin/giraffe ]; then cd "$CWD" && s=$(date +%s%N); giraffe >&2; rc=$?; e=$(date +%s%N); echo "index build: exit $rc, $(( (e - s) / 1000000 )) ms" >&2; cd /harness; fi && node_modules/.bin/tsx src/run-faithful.ts'

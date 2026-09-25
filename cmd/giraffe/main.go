@@ -93,32 +93,36 @@ type rootSource struct {
 }
 
 func run(ctx context.Context, args []string) int {
+	// A bare `giraffe`, or `giraffe --prepare`, builds or refreshes the
+	// index and prints its index line (directive 067; §4's prepare): the
+	// invocation a person runs before handing a repository to an agent,
+	// so the first search pays for no build. Until 067 a bare `giraffe`
+	// printed the help on stderr, exit 2, and the build was the
+	// subcommand `prepare` — a word, now, since every bare word is a
+	// search (below): `giraffe prepare` searches for "prepare".
+	if len(args) == 0 || (len(args) == 1 && args[0] == "--prepare") {
+		return runPrepare(ctx)
+	}
 	// --help is the first thing every measured agent runs (041: every
 	// aided transcript since 030), and until directive 042 it got one
 	// usage line — nothing about what a result line carries, that
 	// members are indexed, that a place can be browsed, or what --query
-	// accepts. It answers with the help text now, on stdout, exit 0. A
-	// bare `giraffe` gets the same text on stderr, exit 2: the command
-	// was misused, but the reply is still the one that says how to use
-	// it.
-	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, helpText)
-		return 2
-	}
+	// accepts. It answers with the help text now, on stdout, exit 0.
 	if isHelp(args) {
 		fmt.Print(helpText)
 		fmt.Print(indexedAttributes(ctx))
 		return 0
 	}
-	// Anything that is not a subcommand or a flag is a search (directive
-	// 062, h1): a caller told only that giraffe "searches this codebase"
-	// runs `giraffe <what it wants>` — every such call in the measured
-	// runs that did not first read --help — and until now got the help
-	// on stderr and exit 2, and went back to grep. `giraffe find <word>`
-	// is unchanged; `giraffe prepare` still prepares, so a search for the
-	// word "prepare" or "find" is spelled `giraffe find prepare`.
+	// Anything that is not the find subcommand or a flag is a search
+	// (directive 062, h1): a caller told only that giraffe "searches
+	// this codebase" runs `giraffe <what it wants>` — every such call in
+	// the measured runs that did not first read --help — and until then
+	// got the help on stderr and exit 2, and went back to grep.
+	// `giraffe find <word>` is unchanged. Flags alone, with no word to
+	// search for, get the help on stderr, exit 2: the command was
+	// misused, but the reply is still the one that says how to use it.
 	sub, rest := args[0], args[1:]
-	if sub != "find" && sub != "prepare" {
+	if sub != "find" {
 		// A caller that reaches for giraffe the way it reaches for grep
 		// writes grep's flags in front (-i, -r, -n): case is already
 		// ignored and every file already searched, so they are dropped
@@ -145,13 +149,7 @@ func run(ctx context.Context, args []string) int {
 	if code != 0 {
 		return code
 	}
-
-	switch sub {
-	case "find":
-		return runFind(rest, st)
-	default: // "prepare", the only other value run reaches
-		return runPrepare(rest, st)
-	}
+	return runFind(rest, st)
 }
 
 // buildSearchState resolves every configured root, refreshes each one's
@@ -476,8 +474,10 @@ func (st searchState) declarationLines(e entry.Entry) ([]string, bool) {
 	return nil, false
 }
 
-// helpText is what --help, -h, help, and a bare or misused invocation
-// print (directive 042, taking 041's text and adding the range). It is
+// helpText is what --help, -h, help, and a misused invocation print
+// (directive 042, taking 041's text and adding the range; a bare
+// `giraffe` builds the index since 067 and prints its index line
+// instead). It is
 // the tool's whole self-description to a caller that has never seen it
 // — the measured agents read it once and then decided how to explore —
 // so it says what is indexed, what a result line carries and what to
@@ -499,15 +499,15 @@ func (st searchState) declarationLines(e entry.Entry) ([]string, bool) {
 const helpText = `giraffe: an index of this repository's declarations (Go: types, funcs,
 methods, struct fields, consts, vars) and files, tests included.
 
+  giraffe [--prepare]                          build or refresh the index
   giraffe [find] <word>...                     entries whose name, doc or path
                                                contains <word>, closest first;
                                                several: two or more first
   giraffe find <word> --query 'attr:value ...' the same, narrowed
-  giraffe find --query 'attr:value ...'        browse a place: everything at it,
-                                               in file order
-  giraffe find ... --page N                    the next page of the same answer
+  giraffe find --query 'attr:value ...'        browse a place, in file order
+  giraffe find ... --page N                    the next page
 
-A result's line:A-B is the declaration's whole extent: sed -n 'A,Bp' <path>
+line:A-B on a result is the declaration's whole extent: sed -n 'A,Bp' <path>
 prints it. Under each result: its source line, the doc line the words
 are on, and callers: where its name is called, likeliest first. --query
 takes the attributes result lines print; path: and callers: match a
@@ -563,19 +563,25 @@ func indexedAttributes(ctx context.Context) string {
 		strings.Join(attrs, " "), strings.Join(kinds, " "))
 }
 
-// runPrepare implements `giraffe prepare` (§4, §24 C-21). find already
-// checks freshness and rebuilds what is stale before answering, so
-// prepare has no bearing on correctness — buildSearchState already did
-// prepare's whole job by the time run dispatches here. It exists only
-// to move that cost out of the first search after a large pull, where
-// kubernetes' measured 4.56s cold build (directive 005) makes it a
-// real, if small, convenience. Reuses output.Format with no matches
+// runPrepare implements a bare `giraffe` and `giraffe --prepare` (§4,
+// §24 C-21; directive 067). find already checks freshness and rebuilds
+// what is stale before answering, so this has no bearing on
+// correctness — buildSearchState does the whole job. It exists to move
+// that cost out of the first search: on gekka a build is a fraction of
+// a second inside a search's own timeout; on kubernetes it is seconds,
+// and a person building it once, before an agent's first question,
+// is what §4 always meant. Reuses output.Format with no matches
 // (code-manners D5) rather than a second rendering path: the evidence
 // that the refresh happened is the same ## index line find prints.
-func runPrepare(args []string, st searchState) int {
-	if len(args) != 0 {
-		fmt.Fprintln(os.Stderr, "usage: giraffe prepare")
-		return 2
+func runPrepare(ctx context.Context) int {
+	st, code := buildSearchState(ctx)
+	defer func() {
+		for _, s := range st.stores {
+			_ = s.Close()
+		}
+	}()
+	if code != 0 {
+		return code
 	}
 	summary := output.Summarize(st.entries.All(), st.commitLine, st.dispatched, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
 	fmt.Print(output.Format(summary, nil))

@@ -121,7 +121,6 @@ type produceOutcome struct {
 // every caller wants the same handful together, not some now and some
 // later.
 type pipelineResult struct {
-	fileChanges  []fileChange
 	warnings     []string
 	dispatched   int
 	unchanged    int
@@ -217,23 +216,75 @@ func carryForward(fc fileContext, m scanner.FileMeta, modTime, size int64, oldRe
 	return extracted{change: fileChange{Path: m.Path, ModTime: modTime, Size: size, Entries: entries, Calls: ro.callsOf(m.Path)}}
 }
 
+// workItem is one file the pipeline will produce a fileChange for: an
+// extraction (item) or a carry-forward (carry), never both. seq is its
+// place in path order across the whole call (orderedWork), which is
+// the order its fileChange reaches the sink and so the order ids are
+// assigned — the one transaction used to sort its changes by path for
+// the same reason (§3 C5: the same tree gives the same ids).
+type workItem struct {
+	seq   int
+	path  string
+	item  *produceItem
+	carry *unchangedCandidate
+}
+
+// sequenced is one worker's result, tagged with the workItem's seq so
+// the sink can hand results on in path order whatever order the
+// workers finish in.
+type sequenced struct {
+	seq int
+	res extracted
+}
+
+// orderedWork lays out every file this call produces a fileChange for
+// in path order: every pending item, and — when enumChanged — every
+// possibly-unchanged file too, carried forward rather than
+// re-extracted (dispatchAndExtract's own comment on why). Sorted here,
+// once, rather than after the fact: with changes streamed to a store
+// as they arrive (directive 067) there is no "after" at which every
+// change is still in memory to sort.
+func orderedWork(prodOut produceOutcome, enumChanged bool) []workItem {
+	work := make([]workItem, 0, len(prodOut.pending)+len(prodOut.possiblyUnchanged))
+	for i := range prodOut.pending {
+		work = append(work, workItem{path: prodOut.pending[i].meta.Path, item: &prodOut.pending[i]})
+	}
+	if enumChanged {
+		for i := range prodOut.possiblyUnchanged {
+			work = append(work, workItem{path: prodOut.possiblyUnchanged[i].meta.Path, carry: &prodOut.possiblyUnchanged[i]})
+		}
+	}
+	sort.Slice(work, func(i, j int) bool { return work[i].path < work[j].path })
+	for i := range work {
+		work[i].seq = i
+	}
+	return work
+}
+
 // extractWorker is the pipeline's extract stage: extractWorkers
 // instances run concurrently (dispatchAndExtract starts them, once fc
 // is fully resolved — see resolvePipelineContext), each taking one
-// produceItem at a time from extractCh and running it through
-// lang.Extract. scanner.Open here is what makes a module's own
+// workItem at a time from workCh and running it through lang.Extract —
+// or, for a carry-forward item, through carryForward, a store read and
+// no file read at all. scanner.Open here is what makes a module's own
 // Content() call actually read the file (directive 017 §1) — lazily,
 // and only for whichever module needs it. Files are independent of one
 // another (no shared mutable state between them; fc is read-only for
-// the whole call), which is what makes running several at once
-// correct.
+// the whole call, and ro is only read), which is what makes running
+// several at once correct.
 //
-// Terminates when extractCh is closed and drained (language-policy
-// G10). wg.Done() on the way out is this worker's contribution to
+// Terminates when workCh is closed and drained (language-policy G10).
+// wg.Done() on the way out is this worker's contribution to
 // dispatchAndExtract's overall completion signal for resultCh.
-func extractWorker(fc fileContext, extractCh <-chan produceItem, resultCh chan<- extracted, wg *sync.WaitGroup) {
+func extractWorker(fc fileContext, ro *Store, workCh <-chan workItem, resultCh chan<- sequenced, wg *sync.WaitGroup) {
 	defer wg.Done()
-	for item := range extractCh {
+	for it := range workCh {
+		if it.carry != nil {
+			u := it.carry
+			resultCh <- sequenced{it.seq, carryForward(fc, u.meta, u.modTime, u.size, u.oldRec, ro)}
+			continue
+		}
+		item := it.item
 		f := scanner.Open(fc.root, item.meta)
 		project := scanner.ProjectFor(item.meta.Path, fc.markerDirs, fc.projectNames, fc.fallbackProject)
 		dirMarkers := fc.markersByDir[scanner.OwningDir(item.meta.Path, fc.markerDirs)]
@@ -246,7 +297,7 @@ func extractWorker(fc fileContext, extractCh <-chan produceItem, resultCh chan<-
 		if declined != nil {
 			res.warnPath, res.warnErr = item.meta.Path, declined
 		}
-		resultCh <- res
+		resultCh <- sequenced{it.seq, res}
 	}
 }
 
@@ -355,74 +406,67 @@ func resolvePipelineContext(root string, ro *Store, enumOut enumerateOutcome, as
 
 // dispatchAndExtract runs the pipeline's remaining stages — extraction
 // and carry-forward — against prodOut, once fc is fully resolved
-// (resolvePipelineContext), and returns every file's contribution plus
-// diagnostics once every stage has finished.
+// (resolvePipelineContext), handing every file's contribution to sink
+// in path order, and returns the diagnostics once every stage has
+// finished.
 //
 // Stages, their input/output, and why:
-//   - extract (extractWorkers=8 fixed goroutines, §3 C4): takes
-//     produceItem from extractCh, fc, and produces extracted values on
-//     resultCh.
-//   - a dedicated dispatch goroutine feeds extractCh from
-//     prodOut.pending and owns closing it; a dedicated carry-forward
-//     goroutine sends resultCh a value for every possiblyUnchanged file
-//     when enumChanged, so resultCh's writers are extractWorkers plus
-//     this one — no single one of them can own closing it alone (G21),
-//     so a WaitGroup-driven goroutine closes it once every writer is
-//     done, the same coordination 018 already used for two writer
-//     kinds, extended here to three (dispatch itself writes nothing to
-//     resultCh but is included in the same WaitGroup for simplicity).
+//   - a dedicated dispatch goroutine feeds workCh from orderedWork's
+//     list, in path order, and owns closing it.
+//   - extract (extractWorkers=8 fixed goroutines, §3 C4): takes a
+//     workItem from workCh, fc, and produces a sequenced result on
+//     resultCh — an extraction or a carry-forward, whichever the item
+//     is; before directive 067 carry-forward had a goroutine of its own
+//     writing to the same channel, one more writer kind for the same
+//     WaitGroup to cover.
+//   - this function is resultCh's sink: it holds whatever arrives out
+//     of order until the next file in path order is in, then hands each
+//     change to sink in that order. The dispatch order bounds how far
+//     ahead any result can be — a worker holds one item, the channels a
+//     few more — so what is held here is a handful of files, never the
+//     corpus (directive 067: a first build streams into the store
+//     through sink; the whole corpus's changes are never resident).
 //
 // Channel bounds:
-//   - extractCh (produceItem, bound 2×extractWorkers=16): a produceItem
-//     is a few strings and two ints, not file content, so this bound is
-//     about pacing, not memory — large enough that a worker finishing
-//     one item always has another ready.
-//   - resultCh (extracted, bound extractWorkers=8): one slot per
+//   - workCh (workItem, bound 2×extractWorkers=16): an item is a few
+//     strings and two ints, not file content, so this bound is about
+//     pacing, not memory — large enough that a worker finishing one
+//     item always has another ready.
+//   - resultCh (sequenced, bound extractWorkers=8): one slot per
 //     worker, so a worker handing off a finished result is never
 //     blocked on ordinary hardware, but this function's own sink
 //     cannot fall arbitrarily far behind either.
 //
 // Termination and errors (language-policy G10): the dispatch goroutine
-// owns extractCh and closes it once every pending item is sent. A
-// WaitGroup covering dispatch, every extract worker and the
-// carry-forward goroutine drives resultCh's close. This function is
-// resultCh's sink and ranges over it until it closes; that loop ending
-// is this function's own termination path. Nothing here produces a
-// hard error — a module declining a file remains a diagnostic
-// (warnErr, surfaced in ## warnings), never a reason to fail the call.
+// owns workCh and closes it once every item is sent. A WaitGroup
+// covering every extract worker drives resultCh's close. This function
+// ranges over resultCh until it closes; that loop ending is this
+// function's own termination path. A module declining a file remains a
+// diagnostic (warnErr, surfaced in ## warnings), never a reason to fail
+// the call; sink failing is — its first error is returned once every
+// worker has finished, the results after it discarded.
 //
 // §3 C5 ("the same tree produces byte-identical index output"): extract
-// workers and the carry-forward goroutine finish in whatever order the
-// scheduler picks, so warnings arrive at resultCh in a nondeterministic
-// order — sorted by path below before being returned, so C5 holds
-// regardless of scheduling. fileChanges needs no equivalent sort:
-// store.commit already sorts its own input by path before writing
-// (store.go), a pre-existing invariant this directive does not disturb.
-func dispatchAndExtract(fc fileContext, prodOut produceOutcome, enumChanged bool, ro *Store) (fileChanges []fileChange, warnings []string, dispatched int) {
-	extractCh := make(chan produceItem, 2*extractWorkers)
-	resultCh := make(chan extracted, extractWorkers)
+// workers finish in whatever order the scheduler picks, so results
+// arrive at resultCh in a nondeterministic order — reordered by seq
+// here before reaching sink, and warnings sorted by path below, so C5
+// holds regardless of scheduling.
+func dispatchAndExtract(fc fileContext, prodOut produceOutcome, enumChanged bool, ro *Store, sink func(fileChange) error) (warnings []string, dispatched int, err error) {
+	work := orderedWork(prodOut, enumChanged)
+	workCh := make(chan workItem, 2*extractWorkers)
+	resultCh := make(chan sequenced, extractWorkers)
 
+	go func() {
+		defer close(workCh)
+		for _, it := range work {
+			workCh <- it
+		}
+	}()
 	var wg sync.WaitGroup
-	wg.Add(1 + extractWorkers + 1) // dispatch, extractWorkers, carry-forward
-	go func() {
-		defer wg.Done()
-		defer close(extractCh)
-		for _, it := range prodOut.pending {
-			extractCh <- it
-		}
-	}()
+	wg.Add(extractWorkers)
 	for i := 0; i < extractWorkers; i++ {
-		go extractWorker(fc, extractCh, resultCh, &wg)
+		go extractWorker(fc, ro, workCh, resultCh, &wg)
 	}
-	go func() {
-		defer wg.Done()
-		if !enumChanged {
-			return
-		}
-		for _, u := range prodOut.possiblyUnchanged {
-			resultCh <- carryForward(fc, u.meta, u.modTime, u.size, u.oldRec, ro)
-		}
-	}()
 	go func() {
 		wg.Wait()
 		close(resultCh)
@@ -430,14 +474,30 @@ func dispatchAndExtract(fc fileContext, prodOut produceOutcome, enumChanged bool
 
 	type pathWarning struct{ path, msg string }
 	var warns []pathWarning
+	held := make(map[int]extracted)
+	next := 0
 	for r := range resultCh {
-		fileChanges = append(fileChanges, r.change)
-		if r.warnErr != nil {
-			warns = append(warns, pathWarning{path: r.warnPath, msg: r.warnErr.Error()})
+		held[r.seq] = r.res
+		for {
+			res, ok := held[next]
+			if !ok {
+				break
+			}
+			delete(held, next)
+			next++
+			if res.warnErr != nil {
+				warns = append(warns, pathWarning{path: res.warnPath, msg: res.warnErr.Error()})
+			}
+			if res.dispatched {
+				dispatched++
+			}
+			if err == nil {
+				err = sink(res.change)
+			}
 		}
-		if r.dispatched {
-			dispatched++
-		}
+	}
+	if err != nil {
+		return nil, 0, err
 	}
 
 	sort.Slice(warns, func(i, j int) bool { return warns[i].path < warns[j].path })
@@ -445,7 +505,7 @@ func dispatchAndExtract(fc fileContext, prodOut produceOutcome, enumChanged bool
 	for i, w := range warns {
 		warnings[i] = fmt.Sprintf("%s: %s", w.path, w.msg)
 	}
-	return fileChanges, warnings, dispatched
+	return warnings, dispatched, nil
 }
 
 // runPipeline runs enumerate, classify, extract and the commit-
@@ -480,7 +540,11 @@ func dispatchAndExtract(fc fileContext, prodOut produceOutcome, enumChanged bool
 // not. This is why extraction (and carryForward, which also stamps
 // Project) still wait for enumerate to finish completely, while
 // classify's own stat calls do not.
-func runPipeline(ctx context.Context, root string, scope scanner.Scope, ro *Store, assignments map[string]string, fallbackProject string) (pipelineResult, error) {
+//
+// sink receives every file's fileChange, in path order, as it is ready
+// (directive 067): Refresh's first build hands each straight to a
+// store batch, its differential update collects them.
+func runPipeline(ctx context.Context, root string, scope scanner.Scope, ro *Store, assignments map[string]string, fallbackProject string, sink func(fileChange) error) (pipelineResult, error) {
 	enumOut, prodOut, err := enumerateAndClassify(ctx, root, scope, assignments, ro)
 	if err != nil {
 		return pipelineResult{}, err
@@ -491,7 +555,10 @@ func runPipeline(ctx context.Context, root string, scope scanner.Scope, ro *Stor
 		return pipelineResult{}, err
 	}
 
-	fileChanges, warnings, dispatched := dispatchAndExtract(fc, prodOut, enumChanged, ro)
+	warnings, dispatched, err := dispatchAndExtract(fc, prodOut, enumChanged, ro, sink)
+	if err != nil {
+		return pipelineResult{}, err
+	}
 
 	// enumChanged files never reach "unchanged": they are always
 	// carried forward instead (dispatchAndExtract's own carry-forward
@@ -503,7 +570,6 @@ func runPipeline(ctx context.Context, root string, scope scanner.Scope, ro *Stor
 	}
 
 	return pipelineResult{
-		fileChanges:  fileChanges,
 		warnings:     warnings,
 		dispatched:   dispatched,
 		unchanged:    unchanged,

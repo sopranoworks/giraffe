@@ -71,10 +71,6 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 			}
 		}()
 	}
-	var roForPipeline *Store
-	if roOK {
-		roForPipeline = ro
-	}
 
 	// The pipeline (directive 018 §1, extended by directive 019 §2; see
 	// pipeline.go) is Refresh's own concurrency boundary: it enumerates,
@@ -87,7 +83,55 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	// runPipeline and everything it calls tolerate that the same way the
 	// code it replaced did.
 	fallbackProject := filepath.Base(root)
-	result, err := runPipeline(ctx, root, scope, roForPipeline, assignments, fallbackProject)
+
+	// A first run, or a stale or unreadable store being rebuilt from
+	// scratch (§23 C-14's discard-and-rebuild path): there is no prior
+	// store to read, so nothing needs the whole corpus's changes in
+	// memory at once — each file's contribution goes straight from the
+	// pipeline into a fresh store's batch, in path order, and is
+	// committed in bounded transactions (directive 067; commitBatch).
+	// The one transaction this replaced held kubernetes' whole index
+	// as bbolt nodes at once, which is what put its build past the
+	// heap ceiling and the timeout.
+	if !roOK {
+		target, err := createStore(root)
+		if err != nil {
+			return nil, Stats{}, err
+		}
+		w := target.beginCommit(commitBulk)
+		result, err := runPipeline(ctx, root, scope, nil, assignments, fallbackProject, w.add)
+		if err != nil {
+			w.abort()
+			_ = target.Close()
+			_ = os.Remove(target.path)
+			return nil, Stats{}, err
+		}
+		keysWritten, err := w.finish(cacheBlobs{enum: result.enumBlob, writeEnum: true, walk: result.walkBlob})
+		if err != nil {
+			_ = target.Close()
+			_ = os.Remove(target.path)
+			return nil, Stats{}, err
+		}
+		return target, Stats{
+			RootProject: result.rootProject,
+			Warnings:    result.warnings,
+			Dispatched:  result.dispatched,
+			Reused:      result.unchanged,
+			KeysWritten: keysWritten,
+		}, nil
+	}
+
+	// A store exists: its records decide what changed, and the pipeline
+	// reads it (classify, carryForward) for as long as it runs, so the
+	// changes are collected first and written once it is closed — the
+	// differential update (directive 013), bounded by the change, not
+	// the corpus.
+	var changes []fileChange
+	collect := func(c fileChange) error {
+		changes = append(changes, c)
+		return nil
+	}
+	result, err := runPipeline(ctx, root, scope, ro, assignments, fallbackProject, collect)
 	if err != nil {
 		return nil, Stats{}, err
 	}
@@ -102,11 +146,9 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	// see at all is gone — deleted, or newly excluded (directive 013:
 	// "entries belonging to deleted files: removed").
 	var deletes []string
-	if roOK {
-		for _, p := range ro.filePaths() {
-			if !result.currentPaths[p] {
-				deletes = append(deletes, p)
-			}
+	for _, p := range ro.filePaths() {
+		if !result.currentPaths[p] {
+			deletes = append(deletes, p)
 		}
 	}
 
@@ -115,36 +157,21 @@ func Refresh(ctx context.Context, root string, scope scanner.Scope, assignments 
 	// all"): nothing about any file, or the enumeration cache, needs to
 	// change, so the existing store is returned exactly as it was
 	// opened.
-	if roOK && len(result.fileChanges) == 0 && len(deletes) == 0 {
+	if len(changes) == 0 && len(deletes) == 0 {
 		r := ro
 		ro = nil // ownership transferred to the caller; the deferred Close above must not also close it
 		return r, stats, nil
 	}
 
-	writeEnum := !roOK || result.enumChanged
-	// commitMode is commitBulk exactly when there is no prior store to
-	// update in place — a first run, or a stale/unreadable one this call
-	// is rebuilding from scratch (§23 C-14's discard-and-rebuild path,
-	// above). Every key commit writes below is then genuinely new, not
-	// an update to a live tree — see commit's own comment on what that
-	// changes about how it fills bbolt's pages.
-	var target *Store
-	mode := commitDifferential
-	if !roOK {
-		mode = commitBulk
-	}
-	if roOK {
-		_ = ro.Close()
-		ro = nil
-		target, err = openForWrite(root)
-	} else {
-		target, err = createStore(root)
-	}
+	writeEnum := result.enumChanged
+	_ = ro.Close()
+	ro = nil
+	target, err := openForWrite(root)
 	if err != nil {
 		return nil, Stats{}, err
 	}
 	caches := cacheBlobs{enum: result.enumBlob, writeEnum: writeEnum, walk: result.walkBlob}
-	keysWritten, err := target.commit(result.fileChanges, deletes, caches, mode)
+	keysWritten, err := target.commit(changes, deletes, caches, commitDifferential)
 	if err != nil {
 		_ = target.Close()
 		return nil, Stats{}, err
