@@ -889,6 +889,30 @@ func TestFilter_MatchesCallersBySite(t *testing.T) {
 	}
 }
 
+// TestFilter_MatchesTest (directive 051 §1): test: matches either
+// value, so a caller can narrow to a test file's own declarations and
+// call sites (test:true) or exclude them (test:false) — unlike scope's
+// print-only-the-informative-case convention, both boolean values are
+// real, useful constraints here.
+func TestFilter_MatchesTest(t *testing.T) {
+	prod := entry.Entry{Name: "Snapshot", Kind: "method", Test: false}
+	test := entry.Entry{Name: "TestSnapshot", Kind: "func", Test: true}
+	for v, want := range map[string]struct{ prod, test bool }{
+		"true":  {false, true},
+		"false": {true, false},
+	} {
+		if got := (Filter{"test": {v}}).Match(prod); got != want.prod {
+			t.Errorf("test:%s matched production entry %v, want %v", v, got, want.prod)
+		}
+		if got := (Filter{"test": {v}}).Match(test); got != want.test {
+			t.Errorf("test:%s matched test entry %v, want %v", v, got, want.test)
+		}
+	}
+	if !ValidAttributes(Slice(nil))["test"] {
+		t.Error("test is a common attribute, valid in every index")
+	}
+}
+
 // TestSearch_AttachesCallersOnlyWhenTheFilterAsks (directive 050): a
 // callers: constraint is applied to the sites the source holds; without
 // one, Search returns entries as decoded and leaves the page's callers

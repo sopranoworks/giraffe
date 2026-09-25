@@ -74,7 +74,6 @@ func sourceSection(sources []Source) string {
 		fmt.Fprintf(&b, "name:%s path:%s line:%s\n", quote(e.Name), quote(e.Path), e.LineRange())
 		if c := callersLine(e.Callers); c != "" { // where the name is called is part of the answer to a name typed exactly (directive 050)
 			b.WriteString(c)
-			b.WriteByte('\n')
 		}
 		for i, l := range src.Lines {
 			if b.Len()+len(l)+1 > sourceBudget {
@@ -594,29 +593,41 @@ func resultLine(e entry.Entry, words []string, showProject, showLang bool, extVa
 	// what it is for: the sites the caller would otherwise grep for —
 	// 049 counted that grep in 81 of 119 runs — as places to open,
 	// bounded, the rest a count. The label is the attribute --query
-	// takes (callers:), and each site is the value it matches.
+	// takes (callers:), and each site is the value it matches. Directive
+	// 051 §1 added each site's own line (Text) and, since test files are
+	// indexed too, the sites this now lists include the tests: what the
+	// grep in 14 of round 9's 20 runs went to get.
 	if c := callersLine(e.Callers); c != "" {
-		fmt.Fprintf(&line, "  %s\n", c)
+		line.WriteString(c)
 	}
 	return line.String()
 }
 
-// callersLine renders callers: with at most maxCallers sites, path:line
-// each, and "+N more" for the rest; "" when there are none, so the line
-// is omitted like any other absent attribute.
+// callersLine renders callers: as a small block, one site a line —
+// path:line: the call's own text, at most maxCallers of them, likeliest
+// first (query.orderCallers), then a count of the rest; "" when there
+// are none, so the section is omitted like any other absent attribute.
+// One site a line, not one line of path:line pairs (050's original
+// shape), because directive 051 §1 added what 050 did not: the call's
+// own text, the same fact a grep of the name returns and a bare site
+// does not — a line long enough to hold that for five sites is not one
+// line any reader would rather have compressed.
 func callersLine(calls []entry.Call) string {
 	if len(calls) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("callers:")
+	b.WriteString("  callers:\n")
 	for i, c := range calls {
 		if i == maxCallers {
-			fmt.Fprintf(&b, " +%d more", len(calls)-i)
-			break
+			fmt.Fprintf(&b, "    +%d more\n", len(calls)-i)
+			return b.String()
 		}
-		b.WriteByte(' ')
-		b.WriteString(quote(c.Place()))
+		if c.In != "" {
+			fmt.Fprintf(&b, "    %s in %s: %s\n", c.Place(), c.In, c.Text)
+			continue
+		}
+		fmt.Fprintf(&b, "    %s: %s\n", c.Place(), c.Text)
 	}
 	return b.String()
 }

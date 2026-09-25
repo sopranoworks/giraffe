@@ -144,7 +144,10 @@ type Entry struct {
 // bounded list gets the sites that name the declaration's own type
 // first (query.orderCallers). A language module produces these
 // alongside its entries, one per (Name, Line) in a file; the index
-// holds them under the name.
+// holds them under the name. Whether the call is itself in a test file
+// is not a fact of Call: Path already carries it (Go's own "_test.go"
+// convention, visible on the printed site the same way it is on any
+// other path), so no second field would say anything Path does not.
 type Call struct {
 	Path string
 	Name string
@@ -155,6 +158,16 @@ type Call struct {
 	// tests are indexed too (g42), and a call from one is listed
 	// after every call from the code.
 	Test bool
+	// Text is the call's own line, trimmed of surrounding whitespace
+	// (directive 051 §1, ported in 065 g48): what a caller grepped for
+	// before this existed, printed instead of re-derived. The line the
+	// call's parenthesis is on, not the whole call expression.
+	Text string
+	// In names the declaration the call is inside - a method as
+	// Type.Name, a function as Name, "" at package level (directive
+	// 065, g48): who calls, which is the question a call site answers
+	// and a reader otherwise opens the file to learn.
+	In string
 }
 
 // Place is the site as a result line prints it and --query callers:

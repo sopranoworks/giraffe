@@ -160,10 +160,10 @@ type Filter map[string][]string
 // attribute names is derived from index contents, not maintained
 // separately" (§18). scope joined the common set in §21 C-6; lang in
 // §24 C-20; ext in §25 C-24; size, declarations and line in directive
-// 017 §4; callers in directive 050 — every one of them a common Entry
-// field, present (if often zero) on every entry, the same standing
-// path/name/kind/project already have, not something derived per
-// repository like a language position.
+// 017 §4; callers in directive 050; test in directive 051 §1 — every
+// one of them a common Entry field, present (if often zero) on every
+// entry, the same standing path/name/kind/project already have, not
+// something derived per repository like a language position.
 func ValidAttributes(src Entries) map[string]bool {
 	valid := map[string]bool{
 		"path": true, "name": true, "kind": true, "project": true,

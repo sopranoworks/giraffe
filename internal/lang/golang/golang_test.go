@@ -337,14 +337,14 @@ func Gen[T any](v T) T { return v }
 		t.Fatalf("Extract: handled=%v err=%v", handled, err)
 	}
 	want := []entry.Call{
-		{Path: "internal/retry/calls.go", Name: "helper", Line: 11},
-		{Path: "internal/retry/calls.go", Name: "Metrics", Line: 15, Via: "m"}, // line, then name: Metrics before Snapshot
-		{Path: "internal/retry/calls.go", Name: "Snapshot", Line: 15, Via: "metrics"},
-		{Path: "internal/retry/calls.go", Name: "Metrics", Line: 16, Via: "m"},
-		{Path: "internal/retry/calls.go", Name: "Snapshot", Line: 16, Via: "Metrics"},
-		{Path: "internal/retry/calls.go", Name: "Gen", Line: 17},
-		{Path: "internal/retry/calls.go", Name: "Other", Line: 18, Via: "pkg"},
-		{Path: "internal/retry/calls.go", Name: "helper", Line: 18},
+		{Path: "internal/retry/calls.go", Name: "helper", Line: 11, Text: "helper()"},
+		{Path: "internal/retry/calls.go", Name: "Metrics", Line: 15, Via: "m", Text: "_ = m.metrics.Snapshot(1) + m.Metrics().Snapshot(2)"}, // line, then name: Metrics before Snapshot
+		{Path: "internal/retry/calls.go", Name: "Snapshot", Line: 15, Via: "metrics", Text: "_ = m.metrics.Snapshot(1) + m.Metrics().Snapshot(2)"},
+		{Path: "internal/retry/calls.go", Name: "Metrics", Line: 16, Via: "m", Text: "_ = (m.Metrics()).Snapshot(3)"},
+		{Path: "internal/retry/calls.go", Name: "Snapshot", Line: 16, Via: "Metrics", Text: "_ = (m.Metrics()).Snapshot(3)"},
+		{Path: "internal/retry/calls.go", Name: "Gen", Line: 17, Text: "_ = Gen[int](4)"},
+		{Path: "internal/retry/calls.go", Name: "Other", Line: 18, Via: "pkg", Text: "_ = pkg.Other(5); helper()"},
+		{Path: "internal/retry/calls.go", Name: "helper", Line: 18, Text: "_ = pkg.Other(5); helper()"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("callSites = %+v\nwant %+v", got, want)
@@ -360,5 +360,45 @@ func Gen[T any](v T) T { return v }
 	_, none, handled, err := Extract(scanner.WithContent("README.md", []byte("# x")), "giraffe", nil)
 	if handled || err != nil || none != nil {
 		t.Errorf("a file this module declines yields no calls: %v %v %v", none, handled, err)
+	}
+}
+
+// TestExtract_TestFileMarksEveryEntryAndCallSite (directive 051 §1): a
+// "_test.go" file is handled exactly like any other Go file — its own
+// entry, its declarations and its call sites all extracted — with
+// Test true on every one of them; a non-test file's entries carry
+// Test false. This is what lets a caller tell a test's declarations
+// and call sites apart from production code's, now that the scanner no
+// longer excludes "_test.go" by name.
+func TestExtract_TestFileMarksEveryEntryAndCallSite(t *testing.T) {
+	const testSrc = `package sample
+
+func helper() {}
+
+func TestHelper(t *T) {
+	helper()
+}
+`
+	entries, calls, handled, err := Extract(scanner.WithContent("pkg/thing_test.go", []byte(testSrc)), "giraffe", nil)
+	if err != nil || !handled {
+		t.Fatalf("Extract: handled=%v err=%v", handled, err)
+	}
+	if len(entries) == 0 || len(calls) == 0 {
+		t.Fatalf("expected declarations and call sites, got %d entries and %d calls", len(entries), len(calls))
+	}
+	for _, e := range entries {
+		if !e.Test {
+			t.Errorf("entry %s (%s): Test = false, want true", e.Name, e.Kind)
+		}
+	}
+
+	prodEntries, _, handled, err := Extract(scanner.WithContent("pkg/thing.go", []byte("package sample\n\nfunc helper() {}\n")), "giraffe", nil)
+	if err != nil || !handled {
+		t.Fatalf("Extract: handled=%v err=%v", handled, err)
+	}
+	for _, e := range prodEntries {
+		if e.Test {
+			t.Errorf("entry %s (%s): Test = true, want false", e.Name, e.Kind)
+		}
 	}
 }

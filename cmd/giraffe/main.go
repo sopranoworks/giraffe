@@ -492,9 +492,12 @@ func (st searchState) declarationLines(e entry.Entry) ([]string, bool) {
 // always, plus the language-specific attributes actually present"),
 // see indexedAttributes. Directive 050 withdrew its last line, "Not
 // indexed: call sites - grep for those": they are, and callers: says
-// where.
+// where. Directive 051 §1: test files are indexed too, and a callers:
+// site now carries its own line, not just its place — round 9 (050's
+// report) found the place alone still sent every agent to grep the
+// name for exactly this text, so this says it is already there.
 const helpText = `giraffe: an index of this repository's declarations (Go: types, funcs,
-methods, struct fields, consts, vars) and files, one entry each.
+methods, struct fields, consts, vars) and files, tests included.
 
   giraffe [find] <word>...                     entries whose name, doc or path
                                                contains <word>, closest first;

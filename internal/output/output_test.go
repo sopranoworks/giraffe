@@ -169,6 +169,24 @@ func TestFormat_ScopePackageIsLabelled_ExportedIsImplicit(t *testing.T) {
 	}
 }
 
+// TestFormat_TestIsLabelled_ProductionIsImplicit (directive 051 §1):
+// the same "only the informative case costs a line" rule as scope
+// above — test:true prints, test:false never does.
+func TestFormat_TestIsLabelled_ProductionIsImplicit(t *testing.T) {
+	entries := []entry.Entry{
+		{Path: "a.go", Name: "Prod", Kind: "func", Exported: true},
+		{Path: "a_test.go", Name: "TestProd", Kind: "func", Exported: true, Test: true},
+	}
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
+	out := Format(s, entries)
+	if !strings.Contains(out, "name:TestProd kind:func path:a_test.go test:true") {
+		t.Fatalf("expected test:true on the test entry's line:\n%s", out)
+	}
+	if strings.Contains(out, "name:Prod kind:func path:a.go test:") {
+		t.Fatalf("expected no test: attribute on the production entry's line:\n%s", out)
+	}
+}
+
 func TestFormat_UndocumentedReportedByScope(t *testing.T) {
 	entries := []entry.Entry{
 		{Path: "a.go", Name: "A", Kind: "func", Exported: true, Doc: "documented"},
@@ -616,19 +634,21 @@ func TestResultLine_TestOnlyWhenTrue(t *testing.T) {
 	}
 }
 
-// TestFormat_CallersLine (directive 050): a result with callers prints
-// them under its doc line, path:line each, at most maxCallers with the
-// rest counted; a result with none prints no such line; ## source
-// carries the same line under its header.
+// TestFormat_CallersLine (directive 050, extended by 051 §1 for each
+// site's own text): a result with callers prints them under its doc
+// line, one site a line as path:line: text, at most maxCallers with
+// the rest counted; a result with none prints no such block; ## source
+// carries the same block under its header.
 func TestFormat_CallersLine(t *testing.T) {
 	var sites []entry.Call
 	for i := 1; i <= maxCallers+2; i++ {
-		sites = append(sites, entry.Call{Path: "cluster.go", Name: "Snapshot", Line: i})
+		sites = append(sites, entry.Call{Path: "cluster.go", Name: "Snapshot", Line: i, Text: fmt.Sprintf("c.Snapshot(%d)", i)})
 	}
 	called := entry.Entry{Path: "m.go", Name: "Snapshot", Kind: "method", Exported: true, Doc: "Snapshot copies.", Callers: sites}
 	quiet := entry.Entry{Path: "m.go", Name: "Quiet", Kind: "func", Exported: true}
 	out := Format(Summary{Commit: "abc"}, []entry.Entry{called, quiet})
-	want := "  Snapshot copies.\n  callers: cluster.go:1 cluster.go:2 cluster.go:3 cluster.go:4 cluster.go:5 +2 more\n"
+	want := "  Snapshot copies.\n  callers:\n    cluster.go:1: c.Snapshot(1)\n    cluster.go:2: c.Snapshot(2)\n" +
+		"    cluster.go:3: c.Snapshot(3)\n    cluster.go:4: c.Snapshot(4)\n    cluster.go:5: c.Snapshot(5)\n    +2 more\n"
 	if !strings.Contains(out, want) {
 		t.Errorf("output lacks %q:\n%s", want, out)
 	}
@@ -637,8 +657,8 @@ func TestFormat_CallersLine(t *testing.T) {
 	}
 	s := Summary{Commit: "abc", Sources: []Source{{Entry: called, Lines: []string{"func (m *M) Snapshot() {}"}}}}
 	out = Format(s, []entry.Entry{called})
-	if !strings.Contains(out, "## source\nname:Snapshot path:m.go line:\ncallers: cluster.go:1") {
-		t.Errorf("## source lacks the callers line under its header:\n%s", out)
+	if !strings.Contains(out, "## source\nname:Snapshot path:m.go line:\n  callers:\n    cluster.go:1: c.Snapshot(1)") {
+		t.Errorf("## source lacks the callers block under its header:\n%s", out)
 	}
 	if callersLine(nil) != "" {
 		t.Error("no callers, no line")

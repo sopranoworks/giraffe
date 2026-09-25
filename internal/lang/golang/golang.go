@@ -84,6 +84,11 @@ const (
 // called, so a method and a function of one name are one name here,
 // which is the cost §28 C-39's reference search was always going to
 // pay without go/types, and the reason a Call carries Via.
+//
+// A "_test.go" file is handled exactly like any other Go file (directive
+// 051 §1 — the scanner no longer excludes it, §28 C-39's gap): its
+// declarations and call sites are extracted the same way, each entry
+// carrying Test true (isTestFile).
 func Extract(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, calls []entry.Call, handled bool, err error) {
 	if !handles(f.Path) {
 		return nil, nil, false, nil
@@ -176,24 +181,54 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 		decls[i].Lang = langName
 		decls[i].Test = test
 	}
-	return decls, callSites(f.Path, file, fset, test), true, nil
+	return decls, callSites(f.Path, file, fset, test, lines), true, nil
 }
 
 // callSites is every call expression in file, one Call per distinct
 // (name, line) (directive 050): the name called — an identifier, or
 // the selected name of a selector, through parentheses, a generic
 // instantiation's brackets and a call's own result — and, for a
-// selector, the qualifier it hangs off (calledName). A call of a
+// selector, the qualifier it hangs off (calledName), plus the line's
+// own text (directive 051 §1 — Text — the same fact lineRange already
+// takes from a declaration's own first line). A call of a
 // predeclared identifier (len, append, string(x), panic) is not a call
 // site of anything the index holds and is not recorded; a call of a
 // literal or an anonymous func has no name to record. Sorted by line
 // then name, so the same file always yields the same list (§3 C5).
-func callSites(filePath string, file *ast.File, fset *token.FileSet, test bool) []entry.Call {
+func callSites(filePath string, file *ast.File, fset *token.FileSet, test bool, lines []string) []entry.Call {
 	type site struct {
 		name string
 		line int
 	}
 	seen := make(map[site]bool)
+	// The declaration each call is inside (Call.In): every FuncDecl's
+	// range and its name, a method as Type.Name (directive 065, g48).
+	type span struct {
+		name       string
+		from, upto int
+	}
+	var spans []span
+	for _, d := range file.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Body == nil {
+			continue
+		}
+		name := fd.Name.Name
+		if fd.Recv != nil && len(fd.Recv.List) > 0 {
+			if r := receiverName(fd.Recv.List[0].Type); r != "" {
+				name = r + "." + name
+			}
+		}
+		spans = append(spans, span{name, fset.Position(fd.Pos()).Line, fset.Position(fd.End()).Line})
+	}
+	enclosing := func(line int) string {
+		for _, s := range spans {
+			if line >= s.from && line <= s.upto {
+				return s.name
+			}
+		}
+		return ""
+	}
 	var calls []entry.Call
 	ast.Inspect(file, func(n ast.Node) bool {
 		ce, ok := n.(*ast.CallExpr)
@@ -209,7 +244,7 @@ func callSites(filePath string, file *ast.File, fset *token.FileSet, test bool) 
 			return true // the line is the place; a second call of the name on it adds nothing
 		}
 		seen[at] = true
-		calls = append(calls, entry.Call{Path: filePath, Name: name, Line: at.line, Via: via, Test: test})
+		calls = append(calls, entry.Call{Path: filePath, Name: name, Line: at.line, Via: via, Test: test, Text: lineText(lines, at.line), In: enclosing(at.line)})
 		return true
 	})
 	sort.Slice(calls, func(i, j int) bool {
@@ -219,6 +254,18 @@ func callSites(filePath string, file *ast.File, fset *token.FileSet, test bool) 
 		return calls[i].Name < calls[j].Name
 	})
 	return calls
+}
+
+// lineText returns line's own text (1-based), trimmed of surrounding
+// whitespace, or "" when line falls outside lines — defensive only, the
+// same guard lineRange applies to a declaration's own line: fset always
+// resolves a parsed file's own node within lines split from that same
+// content.
+func lineText(lines []string, line int) string {
+	if line < 1 || line > len(lines) {
+		return ""
+	}
+	return strings.TrimSpace(lines[line-1])
 }
 
 // calledName resolves what a call expression's Fun names: the
@@ -536,4 +583,20 @@ func firstLine(doc *ast.CommentGroup) string {
 		text = text[:i]
 	}
 	return strings.TrimSpace(text)
+}
+
+// receiverName is the type name a method's receiver names, through a
+// pointer and a generic instantiation: *Cluster -> Cluster, Box[T] -> Box.
+func receiverName(t ast.Expr) string {
+	switch x := t.(type) {
+	case *ast.StarExpr:
+		return receiverName(x.X)
+	case *ast.Ident:
+		return x.Name
+	case *ast.IndexExpr:
+		return receiverName(x.X)
+	case *ast.IndexListExpr:
+		return receiverName(x.X)
+	}
+	return ""
 }

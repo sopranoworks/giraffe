@@ -45,7 +45,7 @@ const storeFilename = "store.bolt"
 // A change in what an encoded field means is a change of shape too: an
 // index that decoded fine but held ranges computed the old way would
 // keep them for every file that has not changed since.
-const schemaVersion = "7" // 3: EndLine joined the entry encoding (directive 042); 4: Line starts at the doc comment (043); 5: DocText joined it (065); 6: Test joined it (065, g42); 7: the calls and callers buckets (050, ported in 065 g47)
+const schemaVersion = "8" // 3: EndLine joined the entry encoding (directive 042); 4: Line starts at the doc comment (043); 5: DocText joined it (065); 6: Test joined it (065, g42); 7: the calls and callers buckets (050, ported in 065 g47); 8: Call.Text and Call.In (065, g48)
 
 var (
 	bucketMeta         = []byte("meta")
@@ -521,14 +521,16 @@ func (s *Store) callsOf(path string) []entry.Call {
 }
 
 // encodeCalls and decodeCalls render a list of call sites one per
-// line, tab-separated path, name, line and via — the same one-fact-
-// one-line, tab-between-fields shape encodeEntry uses, so a path or
-// name is sanitized the same way (sanitize) and nothing in a field can
-// split it. Both buckets hold the same shape: a file's calls carry
-// their own path on every line (redundant there, one encoding), a
-// name's callers carry the name on every line likewise. Empty in,
-// nil out; a malformed line is skipped, since this file's own pair
-// wrote it.
+// line, tab-separated path, name, line, via and text — the same one-
+// fact-one-line, tab-between-fields shape encodeEntry uses, so a field
+// is sanitized the same way (sanitize) and nothing in it can split the
+// line — text included: a call's own source line can itself hold a
+// literal tab (Go source commonly does), which sanitize folds to a
+// space the same as it would in Doc or LineText. Both buckets hold the
+// same shape: a file's calls carry their own path on every line
+// (redundant there, one encoding), a name's callers carry the name on
+// every line likewise. Empty in, nil out; a malformed line is skipped,
+// since this file's own pair wrote it.
 func encodeCalls(calls []entry.Call) []byte {
 	var b strings.Builder
 	for i, c := range calls {
@@ -544,6 +546,10 @@ func encodeCalls(calls []entry.Call) []byte {
 		b.WriteString(sanitize(c.Via))
 		b.WriteByte('\t')
 		b.WriteString(encodeBool(c.Test))
+		b.WriteByte('\t')
+		b.WriteString(sanitize(c.Text))
+		b.WriteByte('\t')
+		b.WriteString(sanitize(c.In))
 	}
 	return []byte(b.String())
 }
@@ -556,14 +562,14 @@ func decodeCalls(v []byte) []entry.Call {
 	calls := make([]entry.Call, 0, len(lines))
 	for _, l := range lines {
 		f := strings.Split(l, "\t")
-		if len(f) != 5 {
+		if len(f) != 7 {
 			continue
 		}
 		line, err := strconv.Atoi(f[2])
 		if err != nil {
 			continue
 		}
-		calls = append(calls, entry.Call{Path: f[0], Name: f[1], Line: line, Via: f[3], Test: f[4] == "1"})
+		calls = append(calls, entry.Call{Path: f[0], Name: f[1], Line: line, Via: f[3], Test: f[4] == "1", Text: f[5], In: f[6]})
 	}
 	return calls
 }
