@@ -1247,7 +1247,7 @@ func TestRefresh_CallSitesAreIndexedAndCarriedForward(t *testing.T) {
 	writeFile(t, root, "a.go", "package p\n\ntype M struct{ metrics *N }\n\nfunc Run(m *M) { m.metrics.Snapshot() }\n")
 	gitCommit(t, root, "go.mod", "a.go", "b.go")
 	s := mustRefresh(t, root)
-	want := []entry.Call{{Path: "a.go", Name: "Snapshot", Line: 5, Via: "metrics", Text: "func Run(m *M) { m.metrics.Snapshot() }"}}
+	want := []entry.Call{{Path: "a.go", Name: "Snapshot", Line: 5, Via: "metrics", Text: "func Run(m *M) { m.metrics.Snapshot() }", In: "Run"}}
 	if got := s.Callers("Snapshot"); len(got) != 1 || got[0] != want[0] {
 		t.Fatalf("Callers(Snapshot) = %+v, want %+v", got, want)
 	}

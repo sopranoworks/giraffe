@@ -337,14 +337,14 @@ func Gen[T any](v T) T { return v }
 		t.Fatalf("Extract: handled=%v err=%v", handled, err)
 	}
 	want := []entry.Call{
-		{Path: "internal/retry/calls.go", Name: "helper", Line: 11, Text: "helper()"},
-		{Path: "internal/retry/calls.go", Name: "Metrics", Line: 15, Via: "m", Text: "_ = m.metrics.Snapshot(1) + m.Metrics().Snapshot(2)"}, // line, then name: Metrics before Snapshot
-		{Path: "internal/retry/calls.go", Name: "Snapshot", Line: 15, Via: "metrics", Text: "_ = m.metrics.Snapshot(1) + m.Metrics().Snapshot(2)"},
-		{Path: "internal/retry/calls.go", Name: "Metrics", Line: 16, Via: "m", Text: "_ = (m.Metrics()).Snapshot(3)"},
-		{Path: "internal/retry/calls.go", Name: "Snapshot", Line: 16, Via: "Metrics", Text: "_ = (m.Metrics()).Snapshot(3)"},
-		{Path: "internal/retry/calls.go", Name: "Gen", Line: 17, Text: "_ = Gen[int](4)"},
-		{Path: "internal/retry/calls.go", Name: "Other", Line: 18, Via: "pkg", Text: "_ = pkg.Other(5); helper()"},
-		{Path: "internal/retry/calls.go", Name: "helper", Line: 18, Text: "_ = pkg.Other(5); helper()"},
+		{Path: "internal/retry/calls.go", Name: "helper", Line: 11, Text: "helper()", In: "Run"},
+		{Path: "internal/retry/calls.go", Name: "Metrics", Line: 15, Via: "m", Text: "_ = m.metrics.Snapshot(1) + m.Metrics().Snapshot(2)", In: "Run"}, // line, then name: Metrics before Snapshot
+		{Path: "internal/retry/calls.go", Name: "Snapshot", Line: 15, Via: "metrics", Text: "_ = m.metrics.Snapshot(1) + m.Metrics().Snapshot(2)", In: "Run"},
+		{Path: "internal/retry/calls.go", Name: "Metrics", Line: 16, Via: "m", Text: "_ = (m.Metrics()).Snapshot(3)", In: "Run"},
+		{Path: "internal/retry/calls.go", Name: "Snapshot", Line: 16, Via: "Metrics", Text: "_ = (m.Metrics()).Snapshot(3)", In: "Run"},
+		{Path: "internal/retry/calls.go", Name: "Gen", Line: 17, Text: "_ = Gen[int](4)", In: "Run"},
+		{Path: "internal/retry/calls.go", Name: "Other", Line: 18, Via: "pkg", Text: "_ = pkg.Other(5); helper()", In: "Run"},
+		{Path: "internal/retry/calls.go", Name: "helper", Line: 18, Text: "_ = pkg.Other(5); helper()", In: "Run"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("callSites = %+v\nwant %+v", got, want)

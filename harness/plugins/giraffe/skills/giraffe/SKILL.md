@@ -24,10 +24,11 @@ Each result is one line:
 opening the whole file. Under each result: its source line and the line
 of its doc comment the words are on (else its first), usually enough to
 judge it without opening it. A function or method also carries
-`callers:` — where its name is called, as `file:line`, the sites
-likeliest to be this declaration's first, up to five and a count of the
-rest; a call from a test file comes after the code's. A result named
-exactly one of the words also prints its text, under ## source.
+`callers:` — where its name is called, one site a line as
+`file:line in Declaration: the call's own line`, the sites likeliest to
+be this declaration's first, up to five and a count of the rest; a call
+from a test file comes after the code's. A result named exactly one of
+the words also prints its text, under ## source.
 
 An answer with no results says `none:` — no name, doc comment or path in
 the index contains the word. Bodies are not indexed: grep only for text
