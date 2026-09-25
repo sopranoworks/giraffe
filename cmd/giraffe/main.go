@@ -1,7 +1,6 @@
 // Command giraffe is a search command, kept in the repository it indexes,
 // that answers "does something like this already exist?" before new code
-// is written (specifications/giraffe.md §1). This version implements only
-// `giraffe find`.
+// is written (specifications/giraffe.md §1). Its grammar is run's.
 package main
 
 import (
@@ -11,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -92,64 +90,129 @@ type rootSource struct {
 	src query.Entries
 }
 
-func run(ctx context.Context, args []string) int {
-	// A bare `giraffe`, or `giraffe --prepare`, builds or refreshes the
-	// index and prints its index line (directive 067; §4's prepare): the
-	// invocation a person runs before handing a repository to an agent,
-	// so the first search pays for no build. Until 067 a bare `giraffe`
-	// printed the help on stderr, exit 2, and the build was the
-	// subcommand `prepare` — a word, now, since every bare word is a
-	// search (below): `giraffe prepare` searches for "prepare".
-	if len(args) == 0 || (len(args) == 1 && args[0] == "--prepare") {
-		return runPrepare(ctx)
+// options are what giraffe itself is given, before the subcommand
+// (directive 071): --query's value, --page's number, --help. One rule
+// decides every argument: what comes before the subcommand is
+// giraffe's; everything after find is the search.
+type options struct {
+	query    string
+	hasQuery bool
+	page     int
+	help     bool
+}
+
+// parseOptions reads giraffe's own options off the front of args and
+// returns the rest, whose first element is where the subcommand
+// belongs. An option that takes a value takes the next argument
+// verbatim, whatever it starts with: nothing inside a value is
+// interpreted. Anything that is not one of the listed options ends the
+// options — it is the subcommand, or a mistake run reports.
+func parseOptions(args []string) (options, []string, error) {
+	o := options{page: 1}
+	i := 0
+	for ; i < len(args); i++ {
+		switch args[i] {
+		case "--query":
+			if i+1 >= len(args) {
+				return o, nil, fmt.Errorf("--query takes a value: giraffe --query 'attr:value ...' find <word>...")
+			}
+			if o.hasQuery {
+				return o, nil, fmt.Errorf("--query given twice; one value carries every attribute: giraffe --query 'attr:value attr:value' find <word>...")
+			}
+			o.query, o.hasQuery = args[i+1], true
+			i++
+		case "--page":
+			if i+1 >= len(args) {
+				return o, nil, fmt.Errorf("--page takes a number: giraffe --page N find <word>...")
+			}
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil || n < 1 {
+				return o, nil, fmt.Errorf("--page must be a positive integer, got %q", args[i+1])
+			}
+			o.page = n
+			i++
+		case "--help":
+			o.help = true
+		default:
+			return o, args[i:], nil
+		}
 	}
-	// --help is the first thing every measured agent runs (041: every
-	// aided transcript since 030), and until directive 042 it got one
-	// usage line — nothing about what a result line carries, that
-	// members are indexed, that a place can be browsed, or what --query
-	// accepts. It answers with the help text now, on stdout, exit 0.
-	if isHelp(args) {
+	return o, nil, nil
+}
+
+// run is the grammar (directive 071), whole:
+//
+//	giraffe [options] find <word>...
+//	giraffe prepare
+//	giraffe --help
+//	giraffe
+//
+// Every argument after find is a search word exactly as given — find,
+// prepare, --help, --query, --show-kind, -rn: nothing after find is an
+// option, dropped or interpreted. prepare builds or refreshes the
+// index. --help and no arguments print the usage, exit 0, and touch no
+// index. Anything else where the subcommand belongs gets one line
+// naming the exact command to run instead, exit 2, and nothing is
+// searched or guessed — 062's bare search, its silent dropping of
+// -prefixed arguments (h3) and its path operands are gone with it.
+func run(ctx context.Context, args []string) int {
+	opts, rest, err := parseOptions(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "giraffe:", err)
+		return 2
+	}
+	if opts.help || len(args) == 0 {
 		fmt.Print(helpText)
-		fmt.Print(indexedAttributes(ctx))
 		return 0
 	}
-	// Anything that is not the find subcommand or a flag is a search
-	// (directive 062, h1): a caller told only that giraffe "searches
-	// this codebase" runs `giraffe <what it wants>` — every such call in
-	// the measured runs that did not first read --help — and until then
-	// got the help on stderr and exit 2, and went back to grep.
-	// `giraffe find <word>` is unchanged. Flags alone, with no word to
-	// search for, get the help on stderr, exit 2: the command was
-	// misused, but the reply is still the one that says how to use it.
-	sub, rest := args[0], args[1:]
-	if sub != "find" {
-		// A caller that reaches for giraffe the way it reaches for grep
-		// writes grep's flags in front (-i, -r, -n): case is already
-		// ignored and every file already searched, so they are dropped
-		// rather than refused.
-		anyWord := false
-		for _, a := range args {
-			if !strings.HasPrefix(a, "-") && len(wordsOf(a)) > 0 {
-				anyWord = true
-			}
-		}
-		if !anyWord {
-			fmt.Fprint(os.Stderr, helpText)
+	if len(rest) == 0 {
+		fmt.Fprintln(os.Stderr, "giraffe: nothing after the options; run: "+commandLine(opts, "find", []string{"<word>..."}))
+		return 2
+	}
+	switch rest[0] {
+	case "find":
+		words := rest[1:]
+		if len(words) == 0 && !opts.hasQuery {
+			fmt.Fprintln(os.Stderr, "usage: giraffe [--query 'attr:value ...'] [--page N] find <word>... | giraffe --query 'attr:value ...' [--page N] find; giraffe --help explains")
 			return 2
 		}
-		sub, rest = "find", args
-	}
-
-	st, code := buildSearchState(ctx)
-	defer func() {
-		for _, s := range st.stores {
-			_ = s.Close()
+		st, code := buildSearchState(ctx)
+		defer func() {
+			for _, s := range st.stores {
+				_ = s.Close()
+			}
+		}()
+		if code != 0 {
+			return code
 		}
-	}()
-	if code != 0 {
-		return code
+		return runFind(words, opts, st)
+	case "prepare":
+		if len(rest) > 1 || opts.hasQuery || opts.page != 1 {
+			fmt.Fprintln(os.Stderr, "giraffe: prepare takes no options and no arguments; run: giraffe prepare")
+			return 2
+		}
+		return runPrepare(ctx)
 	}
-	return runFind(rest, st)
+	fmt.Fprintln(os.Stderr, "giraffe: no bare search; run: "+commandLine(opts, "find", rest))
+	return 2
+}
+
+// commandLine renders a command in the grammar from the options as
+// given, a subcommand, and the arguments after it — what the redirect
+// line names, so it can be pasted as it stands.
+func commandLine(o options, sub string, rest []string) string {
+	parts := []string{"giraffe"}
+	if o.hasQuery {
+		parts = append(parts, "--query", output.ShellWord(o.query))
+	}
+	if o.page != 1 {
+		parts = append(parts, "--page", strconv.Itoa(o.page))
+	}
+	parts = append(parts, sub)
+	for _, a := range rest {
+		parts = append(parts, output.ShellWord(a))
+	}
+	return strings.Join(parts, " ")
 }
 
 // buildSearchState resolves every configured root, refreshes each one's
@@ -307,7 +370,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 	}, 0
 }
 
-// runFind implements `giraffe find [<word>] [--query ...] [--page N]`.
+// runFind implements `giraffe [--query ...] [--page N] find [<word>...]`.
 // Two modes, both in the specification (§31.3): a word searches and ranks
 // by relevance (query.Search); no word — only --query — browses a place,
 // everything at it in path/name order (query.Browse). At least one of
@@ -326,18 +389,9 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 // always carries a filter (the caller below rejects word=="" with an
 // empty filter too), so it now gets direction on a miss the same as a
 // search does — before this directive it got none at all.
-func runFind(args []string, st searchState) int {
-	args, paths := pathArgs(args, st.roots)
-	words, queryRaw, page, err := parseArgs(args)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "giraffe:", err)
-		return 2
-	}
-	if len(words) == 0 && queryRaw == "" {
-		fmt.Fprintln(os.Stderr, "usage: giraffe find <word>... [--query '<attr>:<value> ...'] [--page N] | giraffe find --query '<attr>:<value> ...' [--page N]; giraffe --help explains")
-		return 2
-	}
-
+func runFind(words []string, opts options, st searchState) int {
+	queryRaw, page := opts.query, opts.page
+	var err error
 	var filter query.Filter
 	if queryRaw != "" {
 		filter, err = query.Parse(queryRaw, query.ValidAttributes(st.entries))
@@ -346,14 +400,11 @@ func runFind(args []string, st searchState) int {
 			return 2
 		}
 	}
-	if len(paths) > 0 {
-		if filter == nil {
-			filter = make(query.Filter)
-		}
-		filter["path"] = append(filter["path"], paths...)
-	}
 
 	summary := output.Summarize(st.entries.All(), st.commitLine, st.dispatched, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
+	// Every command the answer prints to be typed back — the next page,
+	// a narrowing — is this call in the grammar (directive 071).
+	summary.Call = output.Call{Query: queryRaw, Words: words}
 
 	if len(words) == 0 {
 		// Browsing a place (§31.3): no search word to rank against.
@@ -474,10 +525,8 @@ func (st searchState) declarationLines(e entry.Entry) ([]string, bool) {
 	return nil, false
 }
 
-// helpText is what --help, -h, help, and a misused invocation print
-// (directive 042, taking 041's text and adding the range; a bare
-// `giraffe` builds the index since 067 and prints its index line
-// instead). It is
+// helpText is what --help and a bare giraffe print (directive 042,
+// taking 041's text and adding the range; directive 071's grammar). It is
 // the tool's whole self-description to a caller that has never seen it
 // — the measured agents read it once and then decided how to explore —
 // so it says what is indexed, what a result line carries and what to
@@ -486,85 +535,36 @@ func (st searchState) declarationLines(e entry.Entry) ([]string, bool) {
 // re-read on every later turn of that caller's, so it is bounded like a
 // result page: 041's first version was 1,975 bytes and cost a 25-turn
 // run some 20k tokens of re-reading; this one says the same in under
-// 1,000 (TestHelpText_StaysSmall). It is static: the attributes and
-// kinds actually present in this repository's index follow it, from
-// the index itself (§6: "--help lists the four common attributes
-// always, plus the language-specific attributes actually present"),
-// see indexedAttributes. Directive 050 withdrew its last line, "Not
+// 1,000 (TestHelpText_StaysSmall). It is static and does no index work
+// (directive 071): what --query accepts here is what result lines
+// print. Directive 050 withdrew its last line, "Not
 // indexed: call sites - grep for those": they are, and callers: says
 // where. Directive 051 §1: test files are indexed too, and a callers:
 // site now carries its own line, not just its place — round 9 (050's
 // report) found the place alone still sent every agent to grep the
 // name for exactly this text, so this says it is already there.
 const helpText = `giraffe: an index of this repository's declarations (Go: types, funcs,
-methods, struct fields, consts, vars) and files, tests included.
+methods, fields, consts, vars) and files, tests included.
 
-  giraffe [--prepare]                          build or refresh the index
-  giraffe [find] <word>...                     entries whose name, doc or path
-                                               contains <word>, closest first;
-                                               several: two or more first
-  giraffe find <word> --query 'attr:value ...' the same, narrowed
-  giraffe find --query 'attr:value ...'        browse a place, in file order
-  giraffe find ... --page N                    the next page
+  giraffe find <word>...           entries whose name, doc or path
+                                   contains <word>, closest first;
+                                   several: two or more first
+  giraffe --query 'attr:value ...' find <word>...  the same, narrowed
+  giraffe --query 'attr:value ...' find  browse a place, in file order
+  giraffe --page N find <word>...  the next page
+  giraffe prepare  build or refresh the index
+  giraffe --help  this text
 
-line:A-B on a result is the declaration's whole extent: sed -n 'A,Bp' <path>
-prints it. Under each result: its source line, the doc line the words
-are on, and callers: where its name is called, likeliest first. --query
-takes the attributes result lines print; path: and callers: match a
+Options go before find; every argument after find is a word, as typed.
+line:A-B on a result is the declaration's extent: sed -n 'A,Bp' <path>
+prints it. Under each: its source line, the doc line the words are on,
+and callers: where its name is called, likeliest first. --query takes
+the attributes result lines print; path: and callers: match a
 substring, the rest exactly. Bodies are not indexed.
 `
 
-// isHelp reports whether args asks for help: --help, -h or help as the
-// first argument, or --help anywhere after a subcommand (find --help).
-func isHelp(args []string) bool {
-	switch args[0] {
-	case "--help", "-h", "help":
-		return true
-	}
-	for _, a := range args[1:] {
-		if a == "--help" || a == "-h" {
-			return true
-		}
-	}
-	return false
-}
-
-// indexedAttributes renders the part of --help that comes from this
-// repository's own index (§6): the attribute names --query accepts
-// here, and the kind values present. Outside a repository, or when the
-// index cannot be built, it renders nothing — the static help already
-// printed is still correct, and the failure is find's to report when a
-// search is actually attempted, not help's.
-func indexedAttributes(ctx context.Context) string {
-	st, code := buildSearchState(ctx)
-	if code != 0 {
-		return ""
-	}
-	defer func() {
-		for _, s := range st.stores {
-			_ = s.Close()
-		}
-	}()
-	attrs := make([]string, 0)
-	for a := range query.ValidAttributes(st.entries) {
-		attrs = append(attrs, a)
-	}
-	sort.Strings(attrs)
-	kindSet := make(map[string]bool)
-	for e := range st.entries.All() {
-		kindSet[e.Kind] = true
-	}
-	kinds := make([]string, 0, len(kindSet))
-	for k := range kindSet {
-		kinds = append(kinds, k)
-	}
-	sort.Strings(kinds)
-	return fmt.Sprintf("\nattributes in this index: %s\nkind values in this index: %s\n",
-		strings.Join(attrs, " "), strings.Join(kinds, " "))
-}
-
-// runPrepare implements a bare `giraffe` and `giraffe --prepare` (§4,
-// §24 C-21; directive 067). find already checks freshness and rebuilds
+// runPrepare implements `giraffe prepare` (§4, §24 C-21; directives
+// 067, 071). find already checks freshness and rebuilds
 // what is stale before answering, so this has no bearing on
 // correctness — buildSearchState does the whole job. It exists to move
 // that cost out of the first search: on gekka a build is a fraction of
@@ -660,106 +660,6 @@ func notIgnored(ctx context.Context, root, relPath string) bool {
 		return true // explicitly not ignored
 	}
 	return false // some other failure (e.g. git itself errored); do not report a false positive
-}
-
-// parseArgs parses find's arguments: an optional positional word, an
-// optional --query value, and an optional --page (directive 033,
-// replacing 032's --offset: a count of entries to skip, a unit nothing
-// giraffe displays, so a caller shown "353 more" had to invent the
-// arithmetic to turn that into a number to type). --page N selects a
-// page directly, 1-indexed — page defaults to 1, the top of the ranking,
-// unchanged from before either flag existed, and matches the unit
-// ## truncated's "page X of Y" now shows (output.FormatFrom).
-func parseArgs(args []string) (words []string, queryRaw string, page int, err error) {
-	page = 1
-	for i := 0; i < len(args); i++ {
-		switch {
-		case args[i] == "--query":
-			if i+1 >= len(args) {
-				return nil, "", 0, fmt.Errorf("--query requires a value")
-			}
-			queryRaw = args[i+1]
-			i++
-		case args[i] == "--page":
-			if i+1 >= len(args) {
-				return nil, "", 0, fmt.Errorf("--page requires a value")
-			}
-			n, convErr := strconv.Atoi(args[i+1])
-			if convErr != nil || n < 1 {
-				return nil, "", 0, fmt.Errorf("--page must be a positive integer, got %q", args[i+1])
-			}
-			page = n
-			i++
-		case strings.HasPrefix(args[i], "-"):
-			// A flag giraffe does not have — grep's -i, -r, -n, rg's
-			// --type — is written by a caller who reached for giraffe the
-			// way it reaches for grep (directive 062, h3). Case is already
-			// ignored and every indexed file already searched, so it is
-			// dropped rather than refused.
-		default:
-			words = append(words, wordsOf(args[i])...)
-		}
-	}
-	return words, queryRaw, page, nil
-}
-
-// pathArgs takes out of args every positional argument that names a
-// file or directory under a root, the way grep's operands do (directive
-// 062, h3): `giraffe Send actor/mailbox.go` searches for Send in that
-// file. They come back as repo-relative paths, for --query path:.
-func pathArgs(args []string, roots []rootSource) (rest, paths []string) {
-	cwd, _ := os.Getwd()
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--query" || a == "--page" {
-			rest = append(rest, a)
-			if i+1 < len(args) {
-				rest = append(rest, args[i+1])
-				i++
-			}
-			continue
-		}
-		if strings.HasPrefix(a, "-") || !strings.ContainsAny(a, "/.") {
-			rest = append(rest, a)
-			continue
-		}
-		found := false
-		for _, r := range roots {
-			abs := a
-			if !filepath.IsAbs(abs) {
-				abs = filepath.Join(cwd, a)
-			}
-			rel, err := filepath.Rel(r.dir, abs)
-			if err != nil || strings.HasPrefix(rel, "..") {
-				continue
-			}
-			if _, err := os.Stat(abs); err == nil {
-				paths = append(paths, filepath.ToSlash(strings.TrimSuffix(rel, "/")))
-				found = true
-				break
-			}
-		}
-		if !found {
-			rest = append(rest, a)
-		}
-	}
-	return rest, paths
-}
-
-// searchWord is what a search word is made of; anything else in an
-// argument separates words.
-var searchWord = regexp.MustCompile(`[\pL\pN_][\pL\pN_-]*`)
-
-// wordsOf splits one argument into search words (directive 062, h3):
-// "cluster metrics" quoted as one argument is two words, and so are
-// grep's alternation "email\|mail" and a pattern "mail.*send" — a
-// search for words, not a regular expression engine.
-func wordsOf(arg string) []string {
-	var out []string
-	for _, w := range searchWord.FindAllString(arg, -1) {
-		out = append(out, strings.TrimRight(w, "-"))
-	}
-	return out
 }
 
 func commitHash(ctx context.Context, root string) (string, error) {

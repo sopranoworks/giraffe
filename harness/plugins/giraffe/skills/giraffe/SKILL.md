@@ -1,18 +1,19 @@
 ---
 name: giraffe
-description: The first step for any question about where something is in this repository or whether it exists — which file handles X, where Y is defined, is there a Z feature. Just run `giraffe <words>` in Bash (no need to load this skill first), with every word you would try in the one call — `giraffe cache store registry`: it returns the matching declarations and files with exact line ranges. Use it before find, ls, grep or starting an Explore agent, and in any subagent exploring the code.
+description: The first step for any question about where something is in this repository or whether it exists — which file handles X, where Y is defined, is there a Z feature. Just run `giraffe find <words>` in Bash (no need to load this skill first), with every word you would try in the one call — `giraffe find cache store registry`: it returns the matching declarations and files with exact line ranges. Use it before find, ls, grep or starting an Explore agent, and in any subagent exploring the code.
 ---
 
 # giraffe
 
 `giraffe` is an index of this repository. Run it through Bash:
 
-    giraffe <words>          e.g.  giraffe metrics      giraffe "mailbox overflow"
-    giraffe                  builds or refreshes the index (also --prepare); a search does it itself when needed
+    giraffe find <words>     e.g.  giraffe find metrics      giraffe find mailbox overflow
+    giraffe prepare          builds or refreshes the index; a search does it itself when needed
 
-Several words, or a quoted phrase, first list the entries that carry two
-or more of them (more, and rarer, words first; with how many entries each
-word matches), then answer each word.
+Options go before `find` (`giraffe --page 2 find metrics`); every
+argument after `find` is a word, as typed. Several words first list the
+entries that carry two or more of them (more, and rarer, words first;
+with how many entries each word matches), then answer each word.
 
 Test files are indexed too; a result from one carries `test:true`.
 
@@ -35,4 +36,4 @@ An answer with no results says `none:` — no name, doc comment or path in
 the index contains the word. Bodies are not indexed: grep only for text
 inside functions (string literals, a local variable).
 
-Ask for the next page of the same answer with `--page 2`.
+Ask for the next page of the same answer with `giraffe --page 2 find <the same words>`.

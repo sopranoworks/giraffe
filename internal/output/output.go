@@ -130,6 +130,10 @@ type Summary struct {
 	// still benefits from ext distinguishing .h from .cpp even though
 	// lang itself never needs printing.
 	ExtVaries map[string]bool
+	// Call is the find call this answer is for, as typed (directive
+	// 071): every command the answer prints to be typed back is
+	// composed from it, in the one grammar.
+	Call Call
 	// Sources are the declarations whose name is exactly one of the
 	// search words, with their text (directive 065, g23; 044's ##
 	// source): printed under ## source after the answers, within
@@ -450,8 +454,7 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 
 		if len(remainder) > 0 {
 			b.WriteString(header("truncated"))
-			b.WriteString(truncatedLine(remainder, page, pageCount(len(fresh))))
-			b.WriteByte('\n')
+			b.WriteString(truncatedLines(remainder, page, pageCount(len(fresh)), s.Call))
 		}
 
 		// §22: `## truncated` already tells a caller how to narrow the
@@ -733,19 +736,103 @@ func fitShare(matches []entry.Entry, words []string, showProject, showLang bool,
 	return matches, nil
 }
 
-// truncatedLine reports the current page's position, the remaining
-// count, and a distribution to narrow by (§7: "a bare count does not
-// tell the caller what to do next"; directive 033: the count alone also
-// never said *where* the shown page sits, or that the remainder has an
-// order that can be walked — "page X of Y" is that, in the same unit
-// --page takes). Narrows by path directory rather than language
-// position, since --query only supports filtering by path and project —
-// unchanged from before this directive (033's own constraint: the
-// distribution axis is not what this measures).
-func truncatedLine(remainder []entry.Entry, page, totalPages int) string {
+// Call is the find call an answer is for, as typed (directive 071):
+// --query's value, and the words after find. Every command an answer
+// prints for the caller to type back — the next page, a narrowing — is
+// composed from it in the one grammar, options before find and the
+// words after, so it can be pasted as it stands.
+type Call struct {
+	Query string
+	Words []string
+}
+
+// Command renders this call with query in place of its own --query and
+// page in place of its own --page.
+func (c Call) Command(query string, page int) string {
+	parts := []string{"giraffe"}
+	if query != "" {
+		parts = append(parts, "--query", ShellWord(query))
+	}
+	if page > 1 {
+		parts = append(parts, "--page", strconv.Itoa(page))
+	}
+	parts = append(parts, "find")
+	for _, w := range c.Words {
+		parts = append(parts, ShellWord(w))
+	}
+	return strings.Join(parts, " ")
+}
+
+// narrowed is this call's --query with its path: values replaced by
+// dir — a directory every remaining result already lies in, so the
+// narrowed query holds what the wider one held there and nothing more.
+func (c Call) narrowed(dir string) string {
+	var kept []string
+	for _, tok := range queryTokens(c.Query) {
+		if !strings.HasPrefix(tok, "path:") {
+			kept = append(kept, tok)
+		}
+	}
+	kept = append(kept, "path:"+dir)
+	return strings.Join(kept, " ")
+}
+
+// queryTokens splits a --query value the way query.Parse does: on
+// spaces, a value in single quotes kept whole.
+func queryTokens(s string) []string {
+	var out []string
+	var cur strings.Builder
+	inQuote := false
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '\'':
+			inQuote = !inQuote
+			cur.WriteByte(c)
+		case c == ' ' && !inQuote:
+			if cur.Len() > 0 {
+				out = append(out, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	if cur.Len() > 0 {
+		out = append(out, cur.String())
+	}
+	return out
+}
+
+// ShellWord quotes s for a POSIX shell when it needs it, so a printed
+// command pastes as it stands.
+func ShellWord(s string) string {
+	if s == "" {
+		return "''"
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("_-./:=+@%,", r)) {
+			return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+		}
+	}
+	return s
+}
+
+// truncatedLines reports the current page's position and the remaining
+// count, then the commands to type next, each pasteable as it stands
+// (§7: "a bare count does not tell the caller what to do next";
+// directive 033: "page X of Y" in the unit --page takes; directive 071:
+// every command giraffe prints is in its grammar): the next page, and
+// the same call narrowed to each of the directories holding most of
+// the remainder — path: is what --query narrows by (033's own
+// constraint: the distribution axis is not what this measures).
+// Files at the root have no directory to narrow to, so "." is not
+// offered.
+func truncatedLines(remainder []entry.Entry, page, totalPages int, call Call) string {
 	counts := make(map[string]int)
 	for _, e := range remainder {
-		counts[path.Dir(e.Path)]++
+		if d := path.Dir(e.Path); d != "." {
+			counts[d]++
+		}
 	}
 	dirs := make([]string, 0, len(counts))
 	for d := range counts {
@@ -762,9 +849,9 @@ func truncatedLine(remainder []entry.Entry, page, totalPages int) string {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "page %d of %d, %d more. narrow by path:", page, totalPages, len(remainder))
+	fmt.Fprintf(&b, "page %d of %d, %d more: %s\n", page, totalPages, len(remainder), call.Command(call.Query, page+1))
 	for _, d := range dirs {
-		fmt.Fprintf(&b, " %s (%d)", d, counts[d])
+		fmt.Fprintf(&b, "%d in %s: %s\n", counts[d], d, call.Command(call.narrowed(d), 1))
 	}
 	return b.String()
 }

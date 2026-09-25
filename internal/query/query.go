@@ -1127,10 +1127,10 @@ func Suggest(src Entries, word, invocationProject string) []string {
 		}
 	}
 	if len(nearPrefix) > 0 {
-		out = append(out, "names in the index starting the same way: "+joinCapped(nearPrefix, 5))
+		out = append(out, "names in the index starting the same way: giraffe find "+joinCapped(nearPrefix, 5))
 	}
 	if len(nearToken) > 0 {
-		out = append(out, "names in the index sharing part of the word: "+joinCapped(nearToken, 5))
+		out = append(out, "names in the index sharing part of the word: giraffe find "+joinCapped(nearToken, 5))
 	}
 	return out
 }
@@ -1147,5 +1147,5 @@ func joinCapped(names map[string]bool, max int) string {
 	if len(list) > max {
 		list = list[:max]
 	}
-	return strings.Join(list, ", ")
+	return strings.Join(list, " ")
 }

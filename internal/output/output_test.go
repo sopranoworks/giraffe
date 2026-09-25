@@ -140,7 +140,7 @@ func TestFormat_TruncatesAtEightResults(t *testing.T) {
 	if !strings.Contains(out, "## truncated") {
 		t.Fatalf("expected ## truncated for 12 matches:\n%s", out)
 	}
-	if !strings.Contains(out, "4 more.") {
+	if !strings.Contains(out, "4 more: giraffe --page 2 find") {
 		t.Fatalf("expected 4 more (12-8) in truncated section:\n%s", out)
 	}
 }
@@ -404,7 +404,7 @@ func TestFormatFrom_Page(t *testing.T) {
 	if !strings.Contains(page1, "name:Sym0") || strings.Contains(page1, "name:Sym8") {
 		t.Fatalf("expected page 1 (Format's default) to hold the first 8 results only:\n%s", page1)
 	}
-	if !strings.Contains(page1, "page 1 of 2, 2 more.") {
+	if !strings.Contains(page1, "page 1 of 2, 2 more: giraffe --page 2 find") {
 		t.Fatalf("expected ## truncated to state page 1 of 2:\n%s", page1)
 	}
 
@@ -662,5 +662,38 @@ func TestFormat_CallersLine(t *testing.T) {
 	}
 	if callersLine(nil) != "" {
 		t.Error("no callers, no line")
+	}
+}
+
+// TestTruncated_PrintsPasteableCommands (directive 071): every command
+// ## truncated prints is the call as typed in the one grammar — options
+// before find, the words after, quoted where a shell needs it: the next
+// page keeps the --query, a narrowing replaces its path: value and
+// keeps the rest, and files at the root offer no narrowing.
+func TestTruncated_PrintsPasteableCommands(t *testing.T) {
+	var entries []entry.Entry
+	for i := 0; i < 12; i++ {
+		p := "internal/core/x.go"
+		if i%3 == 0 {
+			p = "root.go"
+		}
+		entries = append(entries, entry.Entry{Path: p, Name: fmt.Sprintf("Sym%d", i), Kind: "func", Exported: true})
+	}
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
+	s.Call = Call{Query: "kind:func path:core", Words: []string{"usages", "mailbox overflow"}}
+	out := Format(s, entries)
+	for _, want := range []string{
+		"\n## truncated\npage 1 of 2, 4 more: giraffe --query 'kind:func path:core' --page 2 find usages 'mailbox overflow'\n",
+		" in internal/core: giraffe --query 'kind:func path:internal/core' find usages 'mailbox overflow'\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "path:.") {
+		t.Errorf("root files offered as a narrowing:\n%s", out)
+	}
+	if got := (Call{}).Command("", 1); got != "giraffe find" {
+		t.Errorf("browse with no query: %q", got)
 	}
 }
