@@ -378,7 +378,8 @@ func tier(e entry.Entry, lowerWord string) int {
 const noMatch = 6
 
 // nameTier is tier's name-based half (tiers 0-3): an exact or substring
-// match on Name, split by member-vs-top-level (§29 C-42). Factored out
+// match on Name, split by member-vs-top-level (§29 C-42), with a
+// member's exact match before a top-level substring (directive 065, g33). Factored out
 // from tier so Search can run it only against the candidate set a
 // posting list narrows to (§30 C-47), rather than every entry — the
 // check itself is unchanged, only when it runs.
@@ -387,9 +388,13 @@ func nameTier(e entry.Entry, lowerWord string) (int, bool) {
 	switch {
 	case strings.EqualFold(e.Name, lowerWord) && !member:
 		return 0, true
-	case strings.Contains(strings.ToLower(e.Name), lowerWord) && !member:
-		return 1, true
 	case strings.EqualFold(e.Name, lowerWord) && member:
+		// A member named exactly the word before any name that merely
+		// contains it (directive 065, g33): "actors" asked, the field
+		// named actors says more than ActorSystem, which contains it only
+		// by running two word parts together.
+		return 1, true
+	case strings.Contains(strings.ToLower(e.Name), lowerWord) && !member:
 		return 2, true
 	case strings.Contains(strings.ToLower(e.Name), lowerWord) && member:
 		return 3, true
@@ -568,6 +573,13 @@ func Search(src Entries, word string, filter Filter, invocationProject string) [
 		ri, rj := ranked[i], ranked[j]
 		if ri.tier != rj.tier {
 			return ri.tier < rj.tier
+		}
+		// Within a tier, a declaration from the code before one from a
+		// test file (directive 065, g49): tests are indexed since g42,
+		// and a fake's method named exactly the word is a lesser answer
+		// than the code's field named so.
+		if ri.e.Test != rj.e.Test {
+			return !ri.e.Test
 		}
 		if ri.declFile != rj.declFile {
 			return ri.declFile < rj.declFile

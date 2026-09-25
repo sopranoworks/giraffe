@@ -665,15 +665,13 @@ func TestSearch_TopLevelRanksAboveMemberInSameTier(t *testing.T) {
 	}
 }
 
-// TestSearch_TopLevelSubstringOutranksMemberExactMatch (§29 C-42): this
-// is the case memberRank could not fix. Many unrelated types' fields
-// are all named exactly "cluster" (tier: member exact match); a
-// different top-level type merely contains "cluster" as a substring of
-// its own name (tier: top-level substring match). The top-level
-// substring match must still outrank the member exact matches, because
-// it is a real declaration answering the same search, not a tie-break
-// among entries already sharing a tier.
-func TestSearch_TopLevelSubstringOutranksMemberExactMatch(t *testing.T) {
+// TestSearch_MemberExactMatchOutranksTopLevelSubstring (directive 065,
+// g33, reversing §29 C-42's order for this pair): a field named exactly
+// the word says more than a type whose name merely contains it -
+// "actors" asked, the field actors, not ActorSystem, which contains it
+// only by running Actor and System together. A top-level exact match
+// still comes first (TestSearch_TopLevelRanksAboveMemberInSameTier).
+func TestSearch_MemberExactMatchOutranksTopLevelSubstring(t *testing.T) {
 	entries := []entry.Entry{
 		{Name: "cluster", Kind: "field", Path: "deployment_config.go", Exported: true},
 		{Name: "cluster", Kind: "field", Path: "watcher_actor.go", Exported: true},
@@ -683,8 +681,8 @@ func TestSearch_TopLevelSubstringOutranksMemberExactMatch(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("expected all three to match, got %d: %v", len(got), got)
 	}
-	if got[0].Name != "ClusterBootstrap" {
-		t.Errorf("expected ClusterBootstrap (top-level substring match) ranked first, got %s (%s) first", got[0].Name, got[0].Kind)
+	if got[0].Kind != "field" || got[2].Name != "ClusterBootstrap" {
+		t.Errorf("expected the exact-named fields before ClusterBootstrap, got %v", got)
 	}
 }
 
@@ -979,5 +977,20 @@ func TestOrderCallers_QualifierNamingThePositionComesFirst(t *testing.T) {
 		if got := namesValue(c.via, c.value); got != c.want {
 			t.Errorf("namesValue(%q, %q) = %v, want %v", c.via, c.value, got, c.want)
 		}
+	}
+}
+
+// TestSearch_CodeBeforeTestsWithinATier (directive 065, g49): at the
+// same tier, an entry from a test file ranks after every entry from
+// the code, whatever their file or scope ranks would say.
+func TestSearch_CodeBeforeTestsWithinATier(t *testing.T) {
+	entries := []entry.Entry{
+		{Name: "Actors", Kind: "method", Path: "internal/management/debug_test.go", Exported: true, Test: true},
+		{Name: "actors", Kind: "field", Path: "cluster.go", Exported: false},
+		{Name: "Actors", Kind: "method", Path: "cluster.go", Exported: true},
+	}
+	got := Search(Slice(entries), "actors", nil, "")
+	if len(got) != 3 || got[2].Path != "internal/management/debug_test.go" {
+		t.Fatalf("expected the test file's Actors last, got %v", got)
 	}
 }
