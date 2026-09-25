@@ -3,16 +3,19 @@
 // §10). It reads only what a file's syntax gives it — top-level
 // declarations (exported and unexported), their methods and struct
 // fields, each one's kind, and the first line of its preceding doc
-// comment — and never touches the filesystem itself (§18); its input is a
-// scanner.File it is handed.
+// comment — plus, since directive 050, every call expression's called
+// name and line (see callSites) — and never touches the filesystem
+// itself (§18); its input is a scanner.File it is handed.
 package golang
 
 import (
 	"fmt"
 	"go/ast"
+	"go/doc"
 	"go/parser"
 	"go/token"
 	"path"
+	"sort"
 	"strings"
 
 	"giraffe/internal/entry"
@@ -75,20 +78,26 @@ const (
 // burying the type declaration itself under its own members. A plain
 // method or field name only collides with a search word the way any
 // other declaration's name already can.
-func Extract(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, handled bool, err error) {
+//
+// calls is every call site in the file (directive 050; callSites): the
+// same syntax walk, with no type checking — the name is the identifier
+// called, so a method and a function of one name are one name here,
+// which is the cost §28 C-39's reference search was always going to
+// pay without go/types, and the reason a Call carries Via.
+func Extract(f scanner.File, project string, assignments map[string]string) (entries []entry.Entry, calls []entry.Call, handled bool, err error) {
 	if !handles(f.Path) {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 
 	content, err := f.Content()
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
 
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, f.Path, content, parser.ParseComments|parser.SkipObjectResolution)
 	if err != nil {
-		return nil, false, fmt.Errorf("parse %s: %w", f.Path, err)
+		return nil, nil, false, fmt.Errorf("parse %s: %w", f.Path, err)
 	}
 	lines := strings.Split(string(content), "\n")
 	test := isTestFile(f.Path)
@@ -167,7 +176,110 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 		decls[i].Lang = langName
 		decls[i].Test = test
 	}
-	return decls, true, nil
+	return decls, callSites(f.Path, file, fset, test), true, nil
+}
+
+// callSites is every call expression in file, one Call per distinct
+// (name, line) (directive 050): the name called — an identifier, or
+// the selected name of a selector, through parentheses, a generic
+// instantiation's brackets and a call's own result — and, for a
+// selector, the qualifier it hangs off (calledName). A call of a
+// predeclared identifier (len, append, string(x), panic) is not a call
+// site of anything the index holds and is not recorded; a call of a
+// literal or an anonymous func has no name to record. Sorted by line
+// then name, so the same file always yields the same list (§3 C5).
+func callSites(filePath string, file *ast.File, fset *token.FileSet, test bool) []entry.Call {
+	type site struct {
+		name string
+		line int
+	}
+	seen := make(map[site]bool)
+	var calls []entry.Call
+	ast.Inspect(file, func(n ast.Node) bool {
+		ce, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		name, via := calledName(ce.Fun)
+		if name == "" || doc.IsPredeclared(name) {
+			return true
+		}
+		at := site{name, fset.Position(ce.Lparen).Line}
+		if seen[at] {
+			return true // the line is the place; a second call of the name on it adds nothing
+		}
+		seen[at] = true
+		calls = append(calls, entry.Call{Path: filePath, Name: name, Line: at.line, Via: via, Test: test})
+		return true
+	})
+	sort.Slice(calls, func(i, j int) bool {
+		if calls[i].Line != calls[j].Line {
+			return calls[i].Line < calls[j].Line
+		}
+		return calls[i].Name < calls[j].Name
+	})
+	return calls
+}
+
+// calledName resolves what a call expression's Fun names: the
+// identifier itself for a bare call, the selected name for x.Name(...)
+// — with via the last identifier of x (an identifier's own name, a
+// selector's selected name, a call's own called name), or "" when x
+// has none — and "" for anything without a name to call (a func
+// literal, an indexed element). Parentheses, generic instantiation
+// (F[int](x), Name[T]) and a pointer star are looked through, the way
+// bareTypeName looks through them for a type.
+func calledName(fun ast.Expr) (name, via string) {
+	for {
+		switch f := fun.(type) {
+		case *ast.Ident:
+			return f.Name, ""
+		case *ast.SelectorExpr:
+			return f.Sel.Name, lastIdent(f.X)
+		case *ast.ParenExpr:
+			fun = f.X
+		case *ast.IndexExpr:
+			fun = f.X
+		case *ast.IndexListExpr:
+			fun = f.X
+		case *ast.StarExpr:
+			fun = f.X
+		default:
+			return "", ""
+		}
+	}
+}
+
+// lastIdent is the rightmost identifier of a qualifier expression —
+// "metrics" for c.metrics, "Metrics" for ms.provider.Metrics(), "m"
+// for m — or "" when the expression ends in something that is not a
+// name (a literal, an index, a func literal). The same descent as
+// calledName, since a call's result is qualified by what was called.
+func lastIdent(x ast.Expr) string {
+	for {
+		switch e := x.(type) {
+		case *ast.Ident:
+			return e.Name
+		case *ast.SelectorExpr:
+			return e.Sel.Name
+		case *ast.CallExpr:
+			x = e.Fun
+		case *ast.ParenExpr:
+			x = e.X
+		case *ast.IndexExpr:
+			x = e.X
+		case *ast.IndexListExpr:
+			x = e.X
+		case *ast.StarExpr:
+			x = e.X
+		case *ast.TypeAssertExpr:
+			x = e.X
+		case *ast.UnaryExpr:
+			x = e.X
+		default:
+			return ""
+		}
+	}
 }
 
 // isTestFile reports whether p is a Go test file by its own name — the

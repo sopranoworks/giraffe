@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"giraffe/internal/entry"
 )
@@ -26,9 +27,19 @@ import (
 // narrowing structure at all can simply have Candidates return All,
 // unfiltered — Search's own exact tier check is unaffected either way,
 // only how much work it does to reach it.
+//
+// Callers is the call-site index's read side (directive 050): every
+// call of name the source holds, in path then line order. Nothing
+// here attaches it to every entry it visits — a list is one store read
+// and a decode per entry, spent on thousands of entries a broad word
+// matches and eight are printed — so it is attached where it is
+// looked at (WithCallers): by Search and Browse before the filter,
+// when the filter has a callers: constraint, and by the caller for
+// the results it prints.
 type Entries interface {
 	All() iter.Seq[entry.Entry]
 	Candidates(word string) iter.Seq[entry.Entry]
+	Callers(name string) []entry.Call
 }
 
 // Slice wraps a plain []entry.Entry as an Entries source with no
@@ -55,6 +66,18 @@ func (s sliceEntries) Candidates(word string) iter.Seq[entry.Entry] {
 	return s.All()
 }
 
+// Callers of a literal entry set are whatever its entries were built
+// carrying: a test that wants a name called constructs the entry with
+// its Callers set, and this hands them back the way a store would.
+func (s sliceEntries) Callers(name string) []entry.Call {
+	for _, e := range s {
+		if e.Name == name && len(e.Callers) > 0 {
+			return e.Callers
+		}
+	}
+	return nil
+}
+
 // Concat presents several Entries sources as one — the shape a multi-
 // root search needs (specifications/giraffe.md §20 §2: one store per
 // root, merged only after each is independently refreshed).
@@ -74,6 +97,22 @@ func (c concatEntries) All() iter.Seq[entry.Entry] {
 			}
 		}
 	}
+}
+
+// Callers merges every source's list, in path then line order across
+// sources — a name is one name across roots, matched by name alone.
+func (c concatEntries) Callers(name string) []entry.Call {
+	var out []entry.Call
+	for _, src := range c {
+		out = append(out, src.Callers(name)...)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Path != out[j].Path {
+			return out[i].Path < out[j].Path
+		}
+		return out[i].Line < out[j].Line
+	})
+	return out
 }
 
 func (c concatEntries) Candidates(word string) iter.Seq[entry.Entry] {
@@ -121,16 +160,17 @@ type Filter map[string][]string
 // attribute names is derived from index contents, not maintained
 // separately" (§18). scope joined the common set in §21 C-6; lang in
 // §24 C-20; ext in §25 C-24; size, declarations and line in directive
-// 017 §4 — every one of them a common Entry field, present (if often
-// zero) on every entry, the same standing path/name/kind/project
-// already have, not something derived per repository like a language
-// position.
+// 017 §4; callers in directive 050 — every one of them a common Entry
+// field, present (if often zero) on every entry, the same standing
+// path/name/kind/project already have, not something derived per
+// repository like a language position.
 func ValidAttributes(src Entries) map[string]bool {
 	valid := map[string]bool{
 		"path": true, "name": true, "kind": true, "project": true,
 		"scope": true, "lang": true, "ext": true,
 		"size": true, "declarations": true, "line": true,
-		"test": true,
+		"test":    true,
+		"callers": true,
 	}
 	for e := range src.All() {
 		for _, p := range e.Position {
@@ -275,6 +315,18 @@ func matchesAny(name string, e entry.Entry, values []string) bool {
 			// is not there. A file entry has no line and matches neither.
 			if e.Line > 0 && (e.LineRange() == v || strconv.Itoa(e.Line) == v) {
 				return true
+			}
+		case "callers":
+			// A site as the callers: line prints it (entry.Call.Place,
+			// path:line), matched by substring the way path: is: the
+			// whole site as pasted, or a file — callers:monitoring.go
+			// keeps every declaration that file calls, which is the
+			// call-site index's other direction (directive 050 §2)
+			// asked from the query side.
+			for _, c := range e.Callers {
+				if strings.Contains(c.Place(), v) {
+					return true
+				}
 			}
 		default:
 			// A language position (module, receiver, type, or a future
@@ -472,6 +524,9 @@ func Search(src Entries, word string, filter Filter, invocationProject string) [
 			continue
 		}
 		nameMatched[dedupKey(e)] = true
+		if filter.constrainsCallers() {
+			e = WithCallers(e, src)
+		}
 		if !filter.Match(e) {
 			continue
 		}
@@ -487,6 +542,9 @@ func Search(src Entries, word string, filter Filter, invocationProject string) [
 		t, ok := docPathTier(e, lw)
 		if !ok {
 			continue
+		}
+		if filter.constrainsCallers() {
+			e = WithCallers(e, src)
 		}
 		if !filter.Match(e) {
 			continue
@@ -663,6 +721,9 @@ func Browse(src Entries, filter Filter, invocationProject string) []entry.Entry 
 		if !visible(e, invocationProject) {
 			continue
 		}
+		if filter.constrainsCallers() {
+			e = WithCallers(e, src)
+		}
 		if !filter.Match(e) {
 			continue
 		}
@@ -678,6 +739,89 @@ func Browse(src Entries, filter Filter, invocationProject string) []entry.Entry 
 		return out[i].Name < out[j].Name
 	})
 	return out
+}
+
+// constrainsCallers reports whether f has a callers: constraint — the
+// one attribute whose value is not on an entry as the store decodes it
+// (see Entries.Callers), so Search and Browse attach it before matching
+// only when the filter will look at it.
+func (f Filter) constrainsCallers() bool {
+	_, ok := f["callers"]
+	return ok
+}
+
+// WithCallers returns e carrying where its name is called (directive
+// 050), ordered for a reader who will see a bounded prefix of the list
+// (orderCallers). One key read; the caller decides which entries are
+// worth it — a filter with a callers: constraint (Search, Browse), or
+// the page and ## source entries about to be printed (main). A file
+// entry is not called and carries none.
+func WithCallers(e entry.Entry, src Entries) entry.Entry {
+	if e.Kind == entry.KindFile {
+		return e
+	}
+	e.Callers = orderCallers(e, src.Callers(e.Name))
+	return e
+}
+
+// orderCallers ranks a name's call sites for the entry they are shown
+// under: a site whose qualifier names one of the entry's own position
+// values — c.metrics.Snapshot(...) and ms.provider.Metrics().Snapshot(
+// ...) under the Snapshot method whose receiver is NodeMetrics — comes
+// before one whose qualifier does not (rb.Snapshot() under the same
+// entry), and within each group the stored path-then-line order
+// stands. "Names" is: the value equals the qualifier or ends with it,
+// case-insensitively (namesValue) — a field or accessor is named for
+// its type, in whole or by the type name's last word, and a one-letter
+// receiver (g, rb) names nothing. Matching is by name, so the list
+// holds every Snapshot in the corpus; the qualifier is the one fact a
+// call site carries about which one it means, and it puts the sites
+// most likely to be this declaration's within the bounded prefix a
+// result line prints, without resolving a type. Sites that match are
+// no more certain than the rest — a place to open, as ## source is.
+func orderCallers(e entry.Entry, calls []entry.Call) []entry.Call {
+	if len(calls) == 0 {
+		return nil
+	}
+	named := func(c entry.Call) bool {
+		for _, p := range e.Position {
+			if namesValue(c.Via, p.Value) {
+				return true
+			}
+		}
+		return false
+	}
+	out := make([]entry.Call, len(calls))
+	copy(out, calls)
+	// Named first; within each group a call from the code before one
+	// from a test file (directive 065, g47: tests are indexed since
+	// g42, and their calls would otherwise fill the bounded prefix by
+	// path order alone).
+	sort.SliceStable(out, func(i, j int) bool {
+		if ni, nj := named(out[i]), named(out[j]); ni != nj {
+			return ni
+		}
+		return !out[i].Test && out[j].Test
+	})
+	return out
+}
+
+// namesValue reports whether a call's qualifier via names value: the
+// whole of it, or its last word — a tail that starts at a capital,
+// "metrics" in NodeMetrics, "provider" in ClusterProvider — compared
+// case-insensitively. A tail that starts mid-word ("s" in NodeMetrics,
+// "trics") is not a name for it, and an empty via (a bare call) names
+// nothing.
+func namesValue(via, value string) bool {
+	if via == "" || len(via) > len(value) {
+		return false
+	}
+	at := len(value) - len(via)
+	if !strings.EqualFold(value[at:], via) {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(value[at:])
+	return at == 0 || unicode.IsUpper(r)
 }
 
 // DiagnoseFilter explains a zero-result answer that carried a non-empty

@@ -314,3 +314,106 @@ func TestEncodeEntry_TestRoundTrips(t *testing.T) {
 		}
 	}
 }
+
+// TestStore_CallersFollowTheFileThatCalls (directive 050 §2): a call in
+// file A is a fact about a name declared in B, held under the name.
+// Changing A rewrites A's calls record and the callers lists of the
+// names A called before and calls now — and nothing of B's: B's entries
+// and B's own calls record are not among the keys touched. Deleting A
+// removes its sites; a name nobody calls any more loses its key.
+func TestStore_CallersFollowTheFileThatCalls(t *testing.T) {
+	root := t.TempDir()
+	s, err := createStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(t, s)
+
+	b := fileChange{Path: "b.go", ModTime: 1, Size: 1,
+		Entries: []entry.Entry{{Path: "b.go", Name: "Snapshot", Kind: "func", Project: "p"}},
+		Calls:   []entry.Call{{Path: "b.go", Name: "helper", Line: 9}}}
+	a := fileChange{Path: "a.go", ModTime: 1, Size: 1,
+		Entries: []entry.Entry{{Path: "a.go", Name: "Run", Kind: "func", Project: "p"}},
+		Calls: []entry.Call{
+			{Path: "a.go", Name: "Snapshot", Line: 12, Via: "metrics"},
+			{Path: "a.go", Name: "Snapshot", Line: 30, Via: "rb"},
+			{Path: "a.go", Name: "helper", Line: 13},
+		}}
+	if _, err := s.commit([]fileChange{a, b}, nil, cacheBlobs{}, commitBulk); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Callers("Snapshot"); len(got) != 2 || got[0].Line != 12 || got[0].Via != "metrics" || got[1].Line != 30 {
+		t.Fatalf("Callers(Snapshot) = %+v, want a.go:12 via metrics then a.go:30", got)
+	}
+	if got := s.Callers("helper"); len(got) != 2 || got[0].Path != "a.go" || got[1].Path != "b.go" {
+		t.Fatalf("Callers(helper) = %+v, want a.go:13 then b.go:9 (path order)", got)
+	}
+	if got := s.callsOf("a.go"); len(got) != 3 {
+		t.Fatalf("callsOf(a.go) = %+v, want a's three calls", got)
+	}
+
+	// a.go changes: it no longer calls helper, and calls Snapshot from
+	// one new place.
+	a2 := fileChange{Path: "a.go", ModTime: 2, Size: 2,
+		Entries: a.Entries,
+		Calls:   []entry.Call{{Path: "a.go", Name: "Snapshot", Line: 40, Via: "metrics"}}}
+	keys, err := s.commit([]fileChange{a2}, nil, cacheBlobs{}, commitDifferential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Callers("Snapshot"); len(got) != 1 || got[0].Line != 40 {
+		t.Errorf("after a.go changed, Callers(Snapshot) = %+v, want only a.go:40", got)
+	}
+	if got := s.Callers("helper"); len(got) != 1 || got[0].Path != "b.go" {
+		t.Errorf("after a.go changed, Callers(helper) = %+v, want only b.go:9 — b's site untouched", got)
+	}
+	// a's entry (1), a's file record, a's calls record, the two callers
+	// lists a touched (Snapshot, helper), a's name trigrams and next_id:
+	// on the order of ten, never b's.
+	if keys == 0 || keys > 12 {
+		t.Errorf("KeysWritten = %d, want a's own keys only", keys)
+	}
+	if got := s.callsOf("b.go"); len(got) != 1 {
+		t.Errorf("b's calls record changed with a: %+v", got)
+	}
+
+	// a.go deleted: nothing calls Snapshot any more, and its key is gone
+	// (absent and empty are one fact).
+	if _, err := s.commit(nil, []string{"a.go"}, cacheBlobs{}, commitDifferential); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Callers("Snapshot"); got != nil {
+		t.Errorf("after a.go deleted, Callers(Snapshot) = %+v, want none", got)
+	}
+	if got := s.callsOf("a.go"); got != nil {
+		t.Errorf("after a.go deleted, callsOf(a.go) = %+v, want none", got)
+	}
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		if v := tx.Bucket(bucketCallers).Get([]byte("Snapshot")); v != nil {
+			t.Errorf("callers key for Snapshot still present after its last caller went: %q", v)
+		}
+		return nil
+	})
+}
+
+// TestEncodeCalls_RoundTrip: the one-fact-one-line encoding both
+// buckets share survives a round trip, in the stored order.
+func TestEncodeCalls_RoundTrip(t *testing.T) {
+	in := []entry.Call{
+		{Path: "cluster.go", Name: "Snapshot", Line: 4245, Via: "metrics"},
+		{Path: "internal/core/monitoring.go", Name: "Snapshot", Line: 106, Via: "Metrics"},
+		{Path: "x.go", Name: "Snapshot", Line: 1},
+	}
+	out := decodeCalls(encodeCalls(in))
+	if len(out) != len(in) {
+		t.Fatalf("round trip: %+v", out)
+	}
+	for i := range in {
+		if out[i] != in[i] {
+			t.Errorf("call %d = %+v, want %+v", i, out[i], in[i])
+		}
+	}
+	if decodeCalls(nil) != nil || len(encodeCalls(nil)) != 0 {
+		t.Error("empty in, nil out, both ways")
+	}
+}

@@ -60,7 +60,7 @@ var (
 
 func TestExtract(t *testing.T) {
 	f := scanner.WithContent("internal/retry/retry.go", []byte(src))
-	entries, handled, err := Extract(f, "giraffe", nil)
+	entries, _, handled, err := Extract(f, "giraffe", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestExtract(t *testing.T) {
 // comment), not this file's.
 func TestExtract_RangeIsTheDeclarationsOwnExtent(t *testing.T) {
 	f := scanner.WithContent("internal/retry/retry.go", []byte(src))
-	entries, _, err := Extract(f, "giraffe", nil)
+	entries, _, _, err := Extract(f, "giraffe", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestExtract_RangeIsTheDeclarationsOwnExtent(t *testing.T) {
 // checks its own extension, and no other file reaches it.
 func TestExtract_DeclinesAWrongExtension(t *testing.T) {
 	f := scanner.WithContent("README.md", []byte("# hello\n"))
-	entries, handled, err := Extract(f, "giraffe", nil)
+	entries, _, handled, err := Extract(f, "giraffe", nil)
 	if handled || entries != nil || err != nil {
 		t.Errorf("Extract(.md) = %v, %v, %v, want nil, false, nil", entries, handled, err)
 	}
@@ -246,7 +246,7 @@ func TestExtract_DeclinesAWrongExtension(t *testing.T) {
 // diagnostic rather than silently dropped.
 func TestExtract_DeclinesUnparseableContent(t *testing.T) {
 	f := scanner.WithContent("broken.go", []byte("not valid go {{{"))
-	entries, handled, err := Extract(f, "giraffe", nil)
+	entries, _, handled, err := Extract(f, "giraffe", nil)
 	if handled || entries != nil {
 		t.Errorf("Extract(unparseable .go) = %v, %v, want nil, false", entries, handled)
 	}
@@ -262,7 +262,7 @@ func TestExtract_DeclinesUnparseableContent(t *testing.T) {
 // read failure attached as a diagnostic.
 func TestExtract_DeclinesUnreadableContent(t *testing.T) {
 	f := scanner.Open(t.TempDir(), scanner.FileMeta{Path: "does-not-exist.go"})
-	entries, handled, err := Extract(f, "giraffe", nil)
+	entries, _, handled, err := Extract(f, "giraffe", nil)
 	if handled || entries != nil {
 		t.Errorf("Extract(unreadable .go) = %v, %v, want nil, false", entries, handled)
 	}
@@ -289,7 +289,7 @@ func TestExtract_TestFileMarksEveryEntry(t *testing.T) {
 		path string
 		want bool
 	}{{"pkg/thing_test.go", true}, {"pkg/thing.go", false}} {
-		entries, handled, err := Extract(scanner.WithContent(c.path, []byte(src)), "giraffe", nil)
+		entries, _, handled, err := Extract(scanner.WithContent(c.path, []byte(src)), "giraffe", nil)
 		if err != nil || !handled || len(entries) < 3 {
 			t.Fatalf("%s: handled=%v err=%v entries=%d", c.path, handled, err, len(entries))
 		}
@@ -298,5 +298,67 @@ func TestExtract_TestFileMarksEveryEntry(t *testing.T) {
 				t.Errorf("%s: entry %s (%s): Test = %v, want %v", c.path, e.Name, e.Kind, e.Test, c.want)
 			}
 		}
+	}
+}
+
+// TestCallSites (directive 050): every call expression yields one Call
+// per distinct (name, line) — a bare call, a selector's selected name
+// with the qualifier it hangs off, a chain's last name, a call's own
+// result as qualifier, a generic instantiation looked through — and a
+// predeclared identifier (make, len, string(x)) is not a call site of
+// anything the index holds.
+func TestCallSites(t *testing.T) {
+	const calls = `package sample
+
+type M struct{ metrics *N }
+type N struct{}
+
+func (n *N) Snapshot(a int) int { return a }
+func (m *M) Metrics() *N        { return m.metrics }
+func helper() {}
+
+func Run(m *M, xs []int) int {
+	helper()
+	n := len(xs)
+	s := make([]int, 0, n)
+	_ = string(rune(n))
+	_ = m.metrics.Snapshot(1) + m.Metrics().Snapshot(2)
+	_ = (m.Metrics()).Snapshot(3)
+	_ = Gen[int](4)
+	_ = pkg.Other(5); helper()
+	return len(s)
+}
+
+func Gen[T any](v T) T { return v }
+`
+	f := scanner.WithContent("internal/retry/calls.go", []byte(calls))
+	_, got, handled, err := Extract(f, "giraffe", nil)
+	if err != nil || !handled {
+		t.Fatalf("Extract: handled=%v err=%v", handled, err)
+	}
+	want := []entry.Call{
+		{Path: "internal/retry/calls.go", Name: "helper", Line: 11},
+		{Path: "internal/retry/calls.go", Name: "Metrics", Line: 15, Via: "m"}, // line, then name: Metrics before Snapshot
+		{Path: "internal/retry/calls.go", Name: "Snapshot", Line: 15, Via: "metrics"},
+		{Path: "internal/retry/calls.go", Name: "Metrics", Line: 16, Via: "m"},
+		{Path: "internal/retry/calls.go", Name: "Snapshot", Line: 16, Via: "Metrics"},
+		{Path: "internal/retry/calls.go", Name: "Gen", Line: 17},
+		{Path: "internal/retry/calls.go", Name: "Other", Line: 18, Via: "pkg"},
+		{Path: "internal/retry/calls.go", Name: "helper", Line: 18},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("callSites = %+v\nwant %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("call %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	// Line 15's two Snapshot calls, via metrics and via Metrics(), are
+	// one site: the line is the place, and the first qualifier seen
+	// stands (see callSites).
+	_, none, handled, err := Extract(scanner.WithContent("README.md", []byte("# x")), "giraffe", nil)
+	if handled || err != nil || none != nil {
+		t.Errorf("a file this module declines yields no calls: %v %v %v", none, handled, err)
 	}
 }

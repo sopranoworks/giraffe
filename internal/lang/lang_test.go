@@ -13,7 +13,7 @@ import (
 // declarations.
 func TestExtract_DispatchesGoToTheGoModule(t *testing.T) {
 	f := scanner.WithContent("retry.go", []byte("package p\n\nfunc Retry() {}\n"))
-	entries, declined := Extract(f, "giraffe", nil, nil)
+	entries, _, declined := Extract(f, "giraffe", nil, nil)
 	if declined != nil {
 		t.Fatalf("unexpected declined error: %v", declined)
 	}
@@ -43,7 +43,7 @@ func TestExtract_DispatchesGoToTheGoModule(t *testing.T) {
 // order — nothing reaches the end of the chain unhandled.
 func TestExtract_FallsThroughToTheGenericModule(t *testing.T) {
 	f := scanner.WithContent("README.md", []byte("# hello\n"))
-	entries, declined := Extract(f, "giraffe", nil, nil)
+	entries, _, declined := Extract(f, "giraffe", nil, nil)
 	if declined != nil {
 		t.Fatalf("unexpected declined error: %v", declined)
 	}
@@ -60,7 +60,7 @@ func TestExtract_FallsThroughToTheGenericModule(t *testing.T) {
 // operator assigned one in .giraffe/exclude.
 func TestExtract_GenericModuleUsesOperatorAssignment(t *testing.T) {
 	f := scanner.WithContent("x.inc", []byte("int x;\n"))
-	entries, declined := Extract(f, "giraffe", map[string]string{".inc": "c"}, nil)
+	entries, _, declined := Extract(f, "giraffe", map[string]string{".inc": "c"}, nil)
 	if declined != nil {
 		t.Fatalf("unexpected declined error: %v", declined)
 	}
@@ -76,7 +76,7 @@ func TestExtract_GenericModuleUsesOperatorAssignment(t *testing.T) {
 // surfaced as declined rather than dropped.
 func TestExtract_SameExtensionDifferentLanguageFallsThrough(t *testing.T) {
 	f := scanner.WithContent("not-really-go.go", []byte("this is not go source {{{"))
-	entries, declined := Extract(f, "giraffe", nil, nil)
+	entries, _, declined := Extract(f, "giraffe", nil, nil)
 	if declined == nil {
 		t.Fatal("expected a declined diagnostic from the go module's failed parse")
 	}
@@ -99,7 +99,7 @@ func TestExtract_SameExtensionDifferentLanguageFallsThrough(t *testing.T) {
 // asked for.
 func TestExtract_ExcludedExtensionProducesNoEntryAndIsNeverRead(t *testing.T) {
 	f := scanner.Open(t.TempDir(), scanner.FileMeta{Path: "does-not-exist-anywhere.png"})
-	entries, declined := Extract(f, "giraffe", nil, nil)
+	entries, _, declined := Extract(f, "giraffe", nil, nil)
 	if declined != nil {
 		t.Fatalf("unexpected declined error (content should never have been read): %v", declined)
 	}
@@ -118,7 +118,7 @@ func TestExtract_ExcludedExtensionProducesNoEntryAndIsNeverRead(t *testing.T) {
 // registered today.
 func TestExtract_GoModuleDirectoryClaimMovesItFirst(t *testing.T) {
 	f := scanner.WithContent("retry.go", []byte("package p\n\nfunc Retry() {}\n"))
-	entries, declined := Extract(f, "giraffe", nil, map[string]bool{"go.mod": true})
+	entries, _, declined := Extract(f, "giraffe", nil, map[string]bool{"go.mod": true})
 	if declined != nil {
 		t.Fatalf("unexpected declined error: %v", declined)
 	}

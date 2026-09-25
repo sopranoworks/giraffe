@@ -13,7 +13,7 @@ import (
 // still succeeds without error, proving no read was attempted.
 func TestExtract_AlwaysHandlesAndNeverReadsContent(t *testing.T) {
 	f := scanner.Open(t.TempDir(), scanner.FileMeta{Path: "does-not-exist.xyz"})
-	entries, handled, err := Extract(f, "giraffe", nil)
+	entries, _, handled, err := Extract(f, "giraffe", nil)
 	if !handled || err != nil {
 		t.Fatalf("Extract = %v, %v, %v, want handled=true, err=nil", entries, handled, err)
 	}

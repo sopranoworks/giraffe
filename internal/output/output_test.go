@@ -134,8 +134,8 @@ func TestFormat_TruncatesAtEightResults(t *testing.T) {
 	}
 	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
 	out := Format(s, entries)
-	if got := strings.Count(out, "name:X"); got != maxResults {
-		t.Fatalf("expected exactly %d result lines, got %d:\n%s", maxResults, got, out)
+	if got := strings.Count(out, "name:X"); got != PageSize {
+		t.Fatalf("expected exactly %d result lines, got %d:\n%s", PageSize, got, out)
 	}
 	if !strings.Contains(out, "## truncated") {
 		t.Fatalf("expected ## truncated for 12 matches:\n%s", out)
@@ -353,7 +353,7 @@ func TestFit_OffsetPastEnd(t *testing.T) {
 	}
 }
 
-// TestPageCount (directive 033): pages are sized by maxResults (8),
+// TestPageCount (directive 033): pages are sized by PageSize (8),
 // rounded up, zero total giving zero pages rather than a stray "page 1
 // of 0".
 func TestPageCount(t *testing.T) {
@@ -368,7 +368,7 @@ func TestPageCount(t *testing.T) {
 }
 
 // TestFormatFrom_Page (directive 033, replacing 032's --offset): page 1
-// (Format's default) shows the first maxResults results and reports its
+// (Format's default) shows the first PageSize results and reports its
 // own position in ## truncated; page 2 picks up exactly where page 1's
 // budget stopped, in the same unit.
 func TestFormatFrom_Page(t *testing.T) {
@@ -613,5 +613,34 @@ func TestResultLine_TestOnlyWhenTrue(t *testing.T) {
 	e.Test = false
 	if got := resultLine(e, nil, false, false, nil); strings.Contains(got, "test:") {
 		t.Errorf("a production result line names test: %q", got)
+	}
+}
+
+// TestFormat_CallersLine (directive 050): a result with callers prints
+// them under its doc line, path:line each, at most maxCallers with the
+// rest counted; a result with none prints no such line; ## source
+// carries the same line under its header.
+func TestFormat_CallersLine(t *testing.T) {
+	var sites []entry.Call
+	for i := 1; i <= maxCallers+2; i++ {
+		sites = append(sites, entry.Call{Path: "cluster.go", Name: "Snapshot", Line: i})
+	}
+	called := entry.Entry{Path: "m.go", Name: "Snapshot", Kind: "method", Exported: true, Doc: "Snapshot copies.", Callers: sites}
+	quiet := entry.Entry{Path: "m.go", Name: "Quiet", Kind: "func", Exported: true}
+	out := Format(Summary{Commit: "abc"}, []entry.Entry{called, quiet})
+	want := "  Snapshot copies.\n  callers: cluster.go:1 cluster.go:2 cluster.go:3 cluster.go:4 cluster.go:5 +2 more\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("output lacks %q:\n%s", want, out)
+	}
+	if strings.Count(out, "callers:") != 1 {
+		t.Errorf("a result with no callers printed a callers line:\n%s", out)
+	}
+	s := Summary{Commit: "abc", Sources: []Source{{Entry: called, Lines: []string{"func (m *M) Snapshot() {}"}}}}
+	out = Format(s, []entry.Entry{called})
+	if !strings.Contains(out, "## source\nname:Snapshot path:m.go line:\ncallers: cluster.go:1") {
+		t.Errorf("## source lacks the callers line under its header:\n%s", out)
+	}
+	if callersLine(nil) != "" {
+		t.Error("no callers, no line")
 	}
 }

@@ -114,13 +114,15 @@ func TestIsHelp(t *testing.T) {
 // once by every caller and then re-read on every later turn of theirs;
 // it is bounded the way a result page is, so that explaining the tool
 // never costs more than one answer from it. And it says what the range
-// on a result line is for.
+// on a result line is for, and that callers: is where a name is called
+// (directive 050 — the line that said call sites were not indexed is
+// gone with the gap).
 func TestHelpText_StaysSmall(t *testing.T) {
 	const limit = 1000
 	if len(helpText) > limit {
 		t.Fatalf("helpText is %d bytes, over the %d-byte limit", len(helpText), limit)
 	}
-	for _, must := range []string{"find <word>", "--query", "--page", "browse a place", "line:A-B", "sed -n 'A,Bp'", "Not indexed: call sites"} {
+	for _, must := range []string{"find <word>", "--query", "--page", "browse a place", "line:A-B", "sed -n 'A,Bp'", "callers:"} {
 		if !strings.Contains(helpText, must) {
 			t.Errorf("helpText does not mention %q", must)
 		}

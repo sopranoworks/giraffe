@@ -388,9 +388,29 @@ func runFind(args []string, st searchState) int {
 		}
 		answers = append(answers, a)
 	}
+	// Where each result's name is called (directive 050, ported in
+	// 065 g47) is attached to the entries a page will print, and no
+	// other: a broad word ranks thousands, the page shows eight, and a
+	// callers list is a store read each.
+	for _, a := range answers {
+		withCallers(a.Matches, page, st.entries)
+	}
 	summary.Sources = st.exactSources(words, answers)
 	fmt.Print(output.FormatWords(summary, answers, page))
 	return 0
+}
+
+// withCallers attaches where each result's name is called (directive
+// 050) to the entries page will print — output.PageSize of them from
+// the page's offset — and no other: a broad word ranks thousands, the
+// page shows eight, and a callers list is a store read each (see
+// query.Entries.Callers). The same enrichment-for-display exactSources
+// does with a declaration's text, one step earlier.
+func withCallers(matches []entry.Entry, page int, src query.Entries) {
+	first := (page - 1) * output.PageSize
+	for i := first; i < len(matches) && i < first+output.PageSize; i++ {
+		matches[i] = query.WithCallers(matches[i], src)
+	}
 }
 
 // maxSources caps how many exact matches ## source reads from disk: the
@@ -432,7 +452,7 @@ func (st searchState) exactSources(words []string, answers []output.WordAnswer) 
 			}
 			seen[k] = true
 			if lines, ok := st.declarationLines(e); ok {
-				out = append(out, output.Source{Entry: e, Lines: lines})
+				out = append(out, output.Source{Entry: query.WithCallers(e, st.entries), Lines: lines})
 			}
 		}
 	}
@@ -470,7 +490,9 @@ func (st searchState) declarationLines(e entry.Entry) ([]string, bool) {
 // kinds actually present in this repository's index follow it, from
 // the index itself (§6: "--help lists the four common attributes
 // always, plus the language-specific attributes actually present"),
-// see indexedAttributes.
+// see indexedAttributes. Directive 050 withdrew its last line, "Not
+// indexed: call sites - grep for those": they are, and callers: says
+// where.
 const helpText = `giraffe: an index of this repository's declarations (Go: types, funcs,
 methods, struct fields, consts, vars) and files, one entry each.
 
@@ -483,10 +505,10 @@ methods, struct fields, consts, vars) and files, one entry each.
   giraffe find ... --page N                    the next page of the same answer
 
 A result's line:A-B is the declaration's whole extent: sed -n 'A,Bp' <path>
-prints it. Under each result: its source line, then the doc line
-the words are on. --query takes the attribute names result lines print;
-path: matches a substring, every other attribute exactly.
-Not indexed: call sites and bodies - grep for those.
+prints it. Under each result: its source line, the doc line the words
+are on, and callers: where its name is called, likeliest first. --query
+takes the attributes result lines print; path: and callers: match a
+substring, the rest exactly. Bodies are not indexed.
 `
 
 // isHelp reports whether args asks for help: --help, -h or help as the
