@@ -64,10 +64,18 @@ const sourceBudget = 2000
 
 // sourceSection renders ## source: each source's name, path and range,
 // paste-ready like a result line, then its lines verbatim, until
-// sourceBudget is spent. The source that runs out of room ends with the
-// count of lines left and the sed that prints them from where it
-// stopped; nothing after it prints.
-func sourceSection(sources []Source) string {
+// sourceBudget is spent. A source longer than the room left prints its
+// first lines into half of that room, then the lines of the rest that
+// carry the other search words — the most words first, each with its
+// line number the way grep -n prints one — into the other half, and
+// ends with the count of lines left and the sed that prints them from
+// where the head stopped; nothing after it prints. Directive 072: a
+// declaration of two hundred lines asked for by name showed its first
+// forty, and the line the caller was after — the one that carried the
+// other words of the call — was past them, so the run opened the file
+// for it. The words are the call's own, matched as text, the way
+// everything else on the page is.
+func sourceSection(sources []Source, words []string) string {
 	var b strings.Builder
 	for _, src := range sources {
 		e := src.Entry
@@ -75,16 +83,88 @@ func sourceSection(sources []Source) string {
 		if c := callersLine(e.Callers); c != "" { // where the name is called is part of the answer to a name typed exactly (directive 050)
 			b.WriteString(c)
 		}
-		for i, l := range src.Lines {
-			if b.Len()+len(l)+1 > sourceBudget {
-				fmt.Fprintf(&b, "... %d more lines: sed -n '%d,%dp' %s\n", len(src.Lines)-i, e.Line+i, e.EndLine, quote(e.Path))
-				return b.String()
+		room := sourceBudget - b.Len()
+		if textLen(src.Lines) <= room {
+			for _, l := range src.Lines {
+				b.WriteString(l)
+				b.WriteByte('\n')
 			}
-			b.WriteString(l)
+			continue
+		}
+		headEnd := b.Len() + room/2
+		i := 0
+		for ; i < len(src.Lines) && b.Len()+len(src.Lines[i])+1 <= headEnd; i++ {
+			b.WriteString(src.Lines[i])
 			b.WriteByte('\n')
 		}
+		for _, wl := range wordLines(src.Lines[i:], e.Line+i, otherWords(words, e.Name)) {
+			line := fmt.Sprintf("%d: %s\n", wl.number, wl.text)
+			if b.Len()+len(line) > sourceBudget {
+				break
+			}
+			b.WriteString(line)
+		}
+		fmt.Fprintf(&b, "... %d more lines: sed -n '%d,%dp' %s\n", len(src.Lines)-i, e.Line+i, e.EndLine, quote(e.Path))
+		return b.String()
 	}
 	return b.String()
+}
+
+// textLen is the bytes lines take printed one a line.
+func textLen(lines []string) int {
+	n := 0
+	for _, l := range lines {
+		n += len(l) + 1
+	}
+	return n
+}
+
+// otherWords is words without the one that is name itself, lowered:
+// the name is on every source's header already, and a recursive call
+// aside is on no line of its body.
+func otherWords(words []string, name string) []string {
+	var out []string
+	for _, w := range words {
+		if !strings.EqualFold(w, name) {
+			out = append(out, strings.ToLower(w))
+		}
+	}
+	return out
+}
+
+// wordLine is one line of a source's remainder that carries at least
+// one of the search words, numbered as in the file.
+type wordLine struct {
+	number int
+	text   string
+	words  int // how many distinct words it carries
+}
+
+// wordLines picks, from lines (the first of them numbered first), every
+// line carrying one of lowerWords, the ones carrying the most distinct
+// words first and, among equals, in file order. Whitespace around a
+// line is trimmed: it is shown out of its indentation anyway.
+func wordLines(lines []string, first int, lowerWords []string) []wordLine {
+	var out []wordLine
+	for i, l := range lines {
+		ll := strings.ToLower(l)
+		n := 0
+		for _, w := range lowerWords {
+			if strings.Contains(ll, w) {
+				n++
+			}
+		}
+		if n > 0 {
+			out = append(out, wordLine{number: first + i, text: strings.TrimSpace(l), words: n})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].words != out[j].words {
+			return out[i].words > out[j].words
+		}
+		return out[i].number < out[j].number
+	})
+	return out
 }
 
 // Summary is the evidence carried on the always-present ## index line: it
@@ -473,7 +553,7 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 
 	if len(s.Sources) > 0 && page == 1 {
 		b.WriteString("\n## source\n")
-		b.WriteString(sourceSection(s.Sources))
+		b.WriteString(sourceSection(s.Sources, s.Call.Words))
 	}
 
 	if len(s.Warnings) > 0 || len(s.Notices) > 0 || len(s.Exclusions) > 0 {

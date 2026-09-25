@@ -697,3 +697,41 @@ func TestTruncated_PrintsPasteableCommands(t *testing.T) {
 		t.Errorf("browse with no query: %q", got)
 	}
 }
+
+// TestFormat_SourceLongerThanItsRoomShowsTheLinesCarryingTheWords
+// (directive 072): a declaration longer than ## source's room prints
+// its head, then the numbered lines of the rest that carry the other
+// words of the call, most words first, then the sed for the rest.
+func TestFormat_SourceLongerThanItsRoomShowsTheLinesCarryingTheWords(t *testing.T) {
+	lines := make([]string, 200)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("\tstatement%03d := compute(%d)", i, i)
+	}
+	lines[0] = "func printPod(pod *Pod) {"
+	lines[150] = "\trow.Cells = append(row.Cells, pod.Name, reason)"
+	lines[120] = "\tlast := pod.Status.Reason"
+	lines[180] = "\tcolumn := name(pod)"
+	e := entry.Entry{Name: "printPod", Path: "p.go", Kind: "func", Line: 967, EndLine: 1166}
+	s := Summary{Commit: "abc", Call: Call{Words: []string{"printPod", "column", "name"}}, Sources: []Source{{Entry: e, Lines: lines}}}
+	got := FormatWords(s, []WordAnswer{{Word: "printPod", Words: []string{"printPod"}, Matches: []entry.Entry{e}}}, 1)
+	src := got[strings.Index(got, "## source"):]
+	if !strings.Contains(src, "func printPod(pod *Pod) {\n") {
+		t.Errorf("the head is missing:\n%s", src)
+	}
+	i1147, i1117 := strings.Index(src, "1147: column := name(pod)"), strings.Index(src, "1117: row.Cells = append(row.Cells, pod.Name, reason)")
+	if i1147 < 0 || i1117 < 0 || i1147 > i1117 {
+		t.Errorf("want the line carrying two words (1147) before the one carrying one (1117):\n%s", src)
+	}
+	if strings.Contains(src, "1087:") {
+		t.Errorf("a line carrying none of the words was shown:\n%s", src)
+	}
+	if !strings.Contains(src, "more lines: sed -n '") || len(src) > sourceBudget+200 {
+		t.Errorf("want the sed for the rest within the budget (got %d bytes):\n%s", len(src), src)
+	}
+	// Short enough to fit: verbatim, unnumbered, as before.
+	short := Summary{Commit: "abc", Call: Call{Words: []string{"x", "y"}}, Sources: []Source{{Entry: e, Lines: lines[:3]}}}
+	got = FormatWords(short, nil, 1)
+	if strings.Contains(got, "968:") || !strings.Contains(got, "\tstatement001 := compute(1)\n") {
+		t.Errorf("a source that fits should print verbatim:\n%s", got)
+	}
+}
