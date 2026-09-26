@@ -683,6 +683,25 @@ func TestFormat_CallersLine(t *testing.T) {
 	}
 }
 
+// TestFormat_UsesLine (directive 072): a field's sites are uses, printed
+// under uses: after any callers:, capped on their own.
+func TestFormat_UsesLine(t *testing.T) {
+	var sites []entry.Call
+	for i := 1; i <= maxCallers+1; i++ {
+		sites = append(sites, entry.Call{Path: "logs.go", Name: "Prefix", Line: 200 + i, Text: fmt.Sprintf("o.Prefix = %d", i), In: "AddFlags", Use: true})
+	}
+	sites = append(sites, entry.Call{Path: "logs.go", Name: "Prefix", Line: 300, Text: "c.Prefix(x)", In: "Do"})
+	got := callersLine(sites, 0)
+	want := "  callers:\n    logs.go:300 in Do: c.Prefix(x)\n  uses:\n    logs.go:201 in AddFlags: o.Prefix = 1\n    logs.go:202 in AddFlags: o.Prefix = 2\n" +
+		"    logs.go:203 in AddFlags: o.Prefix = 3\n    logs.go:204 in AddFlags: o.Prefix = 4\n    logs.go:205 in AddFlags: o.Prefix = 5\n    +1 more\n"
+	if got != want {
+		t.Errorf("callersLine = %q\nwant %q", got, want)
+	}
+	if only := callersLine(sites[:1], 0); only != "  uses:\n    logs.go:201 in AddFlags: o.Prefix = 1\n" {
+		t.Errorf("uses alone: %q", only)
+	}
+}
+
 // TestTruncated_PrintsPasteableCommands (directive 071): every command
 // ## truncated prints is the call as typed in the one grammar — options
 // before find, the words after, quoted where a shell needs it: the next

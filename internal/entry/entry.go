@@ -192,6 +192,12 @@ type Call struct {
 	// 065, g48): who calls, which is the question a call site answers
 	// and a reader otherwise opens the file to learn.
 	In string
+	// Use is a site where the name is selected but not called
+	// (directive 072): a field read or set, its address taken, a
+	// package's name referred to. A function's sites are its calls; a
+	// field's are its uses, and where a name is both, a page lists
+	// calls under callers: and uses under uses:.
+	Use bool
 }
 
 // Place is the site as a result line prints it and --query callers:

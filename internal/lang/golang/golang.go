@@ -233,21 +233,43 @@ func callSites(filePath string, file *ast.File, fset *token.FileSet, test bool, 
 		return ""
 	}
 	var calls []entry.Call
+	// A selector that is what a call calls is the call's site, not a
+	// use of its own (directive 072): Inspect reaches the call before
+	// its Fun, so the selector is known as called by the time it is
+	// visited.
+	called := make(map[*ast.SelectorExpr]bool)
 	ast.Inspect(file, func(n ast.Node) bool {
-		ce, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+		switch x := n.(type) {
+		case *ast.CallExpr:
+			if sel := calledSelector(x.Fun); sel != nil {
+				called[sel] = true
+			}
+			name, via := calledName(x.Fun)
+			if name == "" || doc.IsPredeclared(name) {
+				return true
+			}
+			at := site{name, fset.Position(x.Lparen).Line}
+			if seen[at] {
+				return true // the line is the place; a second call of the name on it adds nothing
+			}
+			seen[at] = true
+			calls = append(calls, entry.Call{Path: filePath, Name: name, Line: at.line, Via: via, Test: test, Text: lineText(lines, at.line), In: enclosing(at.line)})
+		case *ast.SelectorExpr:
+			// A selected name that is not called — o.Prefix read, set
+			// or its address taken, a package's exported name referred
+			// to — is a use of that name (directive 072): what a caller
+			// grepped a file for after a page had shown it the field.
+			if called[x] {
+				return true
+			}
+			name := x.Sel.Name
+			at := site{name, fset.Position(x.Sel.Pos()).Line}
+			if seen[at] {
+				return true
+			}
+			seen[at] = true
+			calls = append(calls, entry.Call{Path: filePath, Name: name, Line: at.line, Via: lastIdent(x.X), Test: test, Text: lineText(lines, at.line), In: enclosing(at.line), Use: true})
 		}
-		name, via := calledName(ce.Fun)
-		if name == "" || doc.IsPredeclared(name) {
-			return true
-		}
-		at := site{name, fset.Position(ce.Lparen).Line}
-		if seen[at] {
-			return true // the line is the place; a second call of the name on it adds nothing
-		}
-		seen[at] = true
-		calls = append(calls, entry.Call{Path: filePath, Name: name, Line: at.line, Via: via, Test: test, Text: lineText(lines, at.line), In: enclosing(at.line)})
 		return true
 	})
 	sort.Slice(calls, func(i, j int) bool {
@@ -269,6 +291,29 @@ func lineText(lines []string, line int) string {
 		return ""
 	}
 	return strings.TrimSpace(lines[line-1])
+}
+
+// calledSelector is the selector a call's Fun comes down to through
+// parentheses, instantiation brackets and a pointer star — the same
+// descent as calledName — or nil when the call is not of a selected
+// name.
+func calledSelector(fun ast.Expr) *ast.SelectorExpr {
+	for {
+		switch f := fun.(type) {
+		case *ast.SelectorExpr:
+			return f
+		case *ast.ParenExpr:
+			fun = f.X
+		case *ast.IndexExpr:
+			fun = f.X
+		case *ast.IndexListExpr:
+			fun = f.X
+		case *ast.StarExpr:
+			fun = f.X
+		default:
+			return nil
+		}
+	}
 }
 
 // calledName resolves what a call expression's Fun names: the

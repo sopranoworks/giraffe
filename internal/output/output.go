@@ -876,36 +876,57 @@ func membersLine(members []entry.Entry, file bool) string {
 // not, printed as one count — under the list, or alone when no site is
 // this declaration's own — so a name declared in many places says how
 // many sites it has without spending five lines on other declarations'.
+//
+// Directive 072 (change G), 073: a site where the name is selected but
+// not called — a field read or set, its address taken, a constant or
+// variable referred to — is a use, and prints under uses: the same way,
+// after the calls; a field or constant has only uses, a function only
+// calls, and each block is capped on its own.
 func callersLine(calls []entry.Call, elsewhere int) string {
 	if len(calls) == 0 && elsewhere == 0 {
 		return ""
 	}
-	var b strings.Builder
 	if len(calls) == 0 {
-		fmt.Fprintf(&b, "  callers: none of its own; %d of the name elsewhere\n", elsewhere)
-		return b.String()
+		return fmt.Sprintf("  callers: none of its own; %d of the name elsewhere\n", elsewhere)
 	}
-	// A call from a test file is counted, not listed, when the code
-	// calls the declaration too (directive 073): the code's sites are
-	// where it is used, and a test's line repeats one of them.
-	var code []entry.Call
-	tests := 0
+	var b strings.Builder
+	b.WriteString(sitesBlock("callers", calls, false))
+	b.WriteString(sitesBlock("uses", calls, true))
+	if elsewhere > 0 {
+		fmt.Fprintf(&b, "    +%d of the name elsewhere\n", elsewhere)
+	}
+	return b.String()
+}
+
+// sitesBlock renders the sites of calls whose Use is use under header,
+// one a line, at most maxCallers of them then a count of the rest; ""
+// when there are none. A site in a test file is counted, not listed,
+// when the code has sites too (directive 073): the code's sites are
+// where the name is used, and a test's line repeats one of them.
+func sitesBlock(header string, calls []entry.Call, use bool) string {
+	var code, tests []entry.Call
 	for _, c := range calls {
-		if c.Test {
-			tests++
+		if c.Use != use {
 			continue
 		}
-		code = append(code, c)
+		if c.Test {
+			tests = append(tests, c)
+		} else {
+			code = append(code, c)
+		}
 	}
-	if len(code) > 0 {
-		calls = code
-	} else {
-		tests = 0
+	shown, counted := code, len(tests)
+	if len(code) == 0 {
+		shown, counted = tests, 0
 	}
-	b.WriteString("  callers:\n")
-	for i, c := range calls {
+	if len(shown) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "  %s:\n", header)
+	for i, c := range shown {
 		if i == maxCallers {
-			fmt.Fprintf(&b, "    +%d more\n", len(calls)-i)
+			fmt.Fprintf(&b, "    +%d more\n", len(shown)-i)
 			break
 		}
 		if c.In != "" {
@@ -914,11 +935,8 @@ func callersLine(calls []entry.Call, elsewhere int) string {
 		}
 		fmt.Fprintf(&b, "    %s: %s\n", c.Place(), c.Text)
 	}
-	if tests > 0 {
-		fmt.Fprintf(&b, "    +%d in tests\n", tests)
-	}
-	if elsewhere > 0 {
-		fmt.Fprintf(&b, "    +%d of the name elsewhere\n", elsewhere)
+	if counted > 0 {
+		fmt.Fprintf(&b, "    +%d in tests\n", counted)
 	}
 	return b.String()
 }

@@ -46,7 +46,7 @@ const storeFilename = "store.bolt"
 // A change in what an encoded field means is a change of shape too: an
 // index that decoded fine but held ranges computed the old way would
 // keep them for every file that has not changed since.
-const schemaVersion = "9" // 3: EndLine joined the entry encoding (directive 042); 4: Line starts at the doc comment (043); 5: DocText joined it (065); 6: Test joined it (065, g42); 7: the calls and callers buckets (050, ported in 065 g47); 8: Call.Text and Call.In (065, g48); 9: callers keyed by name and path (067)
+const schemaVersion = "10" // 3: EndLine joined the entry encoding (directive 042); 4: Line starts at the doc comment (043); 5: DocText joined it (065); 6: Test joined it (065, g42); 7: the calls and callers buckets (050, ported in 065 g47); 8: Call.Text and Call.In (065, g48); 9: callers keyed by name and path (067); 10: Call.Use (072)
 
 var (
 	bucketMeta         = []byte("meta")
@@ -582,6 +582,8 @@ func encodeCalls(calls []entry.Call) []byte {
 		b.WriteString(sanitize(c.Text))
 		b.WriteByte('\t')
 		b.WriteString(sanitize(c.In))
+		b.WriteByte('\t')
+		b.WriteString(encodeBool(c.Use))
 	}
 	return []byte(b.String())
 }
@@ -594,14 +596,14 @@ func decodeCalls(v []byte) []entry.Call {
 	calls := make([]entry.Call, 0, len(lines))
 	for _, l := range lines {
 		f := strings.Split(l, "\t")
-		if len(f) != 7 {
+		if len(f) != 8 {
 			continue
 		}
 		line, err := strconv.Atoi(f[2])
 		if err != nil {
 			continue
 		}
-		calls = append(calls, entry.Call{Path: f[0], Name: f[1], Line: line, Via: f[3], Test: f[4] == "1", Text: f[5], In: f[6]})
+		calls = append(calls, entry.Call{Path: f[0], Name: f[1], Line: line, Via: f[3], Test: f[4] == "1", Text: f[5], In: f[6], Use: f[7] == "1"})
 	}
 	return calls
 }

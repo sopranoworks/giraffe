@@ -1,6 +1,8 @@
 package golang
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"giraffe/internal/entry"
@@ -337,9 +339,11 @@ func Gen[T any](v T) T { return v }
 		t.Fatalf("Extract: handled=%v err=%v", handled, err)
 	}
 	want := []entry.Call{
+		{Path: "internal/retry/calls.go", Name: "metrics", Line: 7, Via: "m", Text: "func (m *M) Metrics() *N        { return m.metrics }", In: "M.Metrics", Use: true}, // a field read is a use (directive 072)
 		{Path: "internal/retry/calls.go", Name: "helper", Line: 11, Text: "helper()", In: "Run"},
 		{Path: "internal/retry/calls.go", Name: "Metrics", Line: 15, Via: "m", Text: "_ = m.metrics.Snapshot(1) + m.Metrics().Snapshot(2)", In: "Run"}, // line, then name: Metrics before Snapshot
 		{Path: "internal/retry/calls.go", Name: "Snapshot", Line: 15, Via: "metrics", Text: "_ = m.metrics.Snapshot(1) + m.Metrics().Snapshot(2)", In: "Run"},
+		{Path: "internal/retry/calls.go", Name: "metrics", Line: 15, Via: "m", Text: "_ = m.metrics.Snapshot(1) + m.Metrics().Snapshot(2)", In: "Run", Use: true}, // m.metrics is selected, not called
 		{Path: "internal/retry/calls.go", Name: "Metrics", Line: 16, Via: "m", Text: "_ = (m.Metrics()).Snapshot(3)", In: "Run"},
 		{Path: "internal/retry/calls.go", Name: "Snapshot", Line: 16, Via: "Metrics", Text: "_ = (m.Metrics()).Snapshot(3)", In: "Run"},
 		{Path: "internal/retry/calls.go", Name: "Gen", Line: 17, Text: "_ = Gen[int](4)", In: "Run"},
@@ -360,6 +364,47 @@ func Gen[T any](v T) T { return v }
 	_, none, handled, err := Extract(scanner.WithContent("README.md", []byte("# x")), "giraffe", nil)
 	if handled || err != nil || none != nil {
 		t.Errorf("a file this module declines yields no calls: %v %v %v", none, handled, err)
+	}
+}
+
+// TestCallSites_UsesOfAField (directive 072): a selected name that is
+// not called — a field set, its address taken, read through a call's
+// result — is a use, Use true, with the same line, qualifier and
+// enclosing declaration a call carries; the selector a call calls is
+// the call's site and not a use of its own; a package-qualified name
+// referred to without a call is a use too.
+func TestCallSites_UsesOfAField(t *testing.T) {
+	const src = `package logs
+
+type LogsOptions struct{ Prefix bool }
+
+func (o *LogsOptions) AddFlags(cmd *Cmd) {
+	cmd.Flags().BoolVar(&o.Prefix, "prefix", o.Prefix, "prefix each line")
+	o.Prefix = true
+	_ = pkg.Name
+	o.write()
+}
+`
+	f := scanner.WithContent("cmd/logs/logs.go", []byte(src))
+	_, got, _, err := Extract(f, "kubectl", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var uses, calls []string
+	for _, c := range got {
+		if c.Use {
+			uses = append(uses, fmt.Sprintf("%s:%d via %s in %s", c.Name, c.Line, c.Via, c.In))
+		} else {
+			calls = append(calls, fmt.Sprintf("%s:%d", c.Name, c.Line))
+		}
+	}
+	wantUses := []string{"Prefix:6 via o in LogsOptions.AddFlags", "Prefix:7 via o in LogsOptions.AddFlags", "Name:8 via pkg in LogsOptions.AddFlags"}
+	wantCalls := []string{"BoolVar:6", "Flags:6", "write:9"}
+	if strings.Join(uses, "|") != strings.Join(wantUses, "|") {
+		t.Errorf("uses = %q, want %q", uses, wantUses)
+	}
+	if strings.Join(calls, "|") != strings.Join(wantCalls, "|") {
+		t.Errorf("calls = %q, want %q", calls, wantCalls)
 	}
 }
 

@@ -668,12 +668,12 @@ methods, fields, consts, vars) and files, tests included.
   giraffe prepare  build or refresh the index
   giraffe --help  this text
 
-Options go before find; every argument after find is a word, as typed.
+Options go before find; every argument after find is a word.
 line:A-B on a result is the declaration's extent: sed -n 'A,Bp' <path>
-prints it. Under each: its source line, the doc line the words are on,
-and callers: the sites that are its own, the rest a count. --query takes
-the attributes result lines print; path: and callers: match a
-substring, the rest exactly. Bodies are not indexed.
+prints it. Under each: its source line, the doc line with the words,
+callers: its own sites, rest a count; uses: where it is read or
+set. --query takes the attributes result lines print: path: and
+callers: match a substring, the rest exactly. Bodies are not indexed.
 `
 
 // runPrepare implements `giraffe prepare` (§4, §24 C-21; directives
