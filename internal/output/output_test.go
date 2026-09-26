@@ -678,7 +678,7 @@ func TestFormat_CallersLine(t *testing.T) {
 	if !strings.Contains(out, "## source\nname:Snapshot path:m.go line:\n  callers:\n    cluster.go:1: c.Snapshot(1)") {
 		t.Errorf("## source lacks the callers block under its header:\n%s", out)
 	}
-	if callersLine(nil) != "" {
+	if callersLine(nil, 0) != "" {
 		t.Error("no callers, no line")
 	}
 }
@@ -751,5 +751,25 @@ func TestFormat_SourceLongerThanItsRoomShowsTheLinesCarryingTheWords(t *testing.
 	got = FormatWords(short, nil, 1)
 	if strings.Contains(got, "968:") || !strings.Contains(got, "\tstatement001 := compute(1)\n") {
 		t.Errorf("a source that fits should print verbatim:\n%s", got)
+	}
+}
+
+// TestFormat_CallersElsewhere (directive 072): sites of the name that
+// are not this declaration's own print as one count, under the own
+// sites or alone.
+func TestFormat_CallersElsewhere(t *testing.T) {
+	own := []entry.Call{{Path: "cmd/logs/logs.go", Line: 210, Text: "o.Prefix", In: "LogsOptions.AddFlags"}}
+	got := callersLine(own, 45)
+	want := "  callers:\n    cmd/logs/logs.go:210 in LogsOptions.AddFlags: o.Prefix\n    +45 of the name elsewhere\n"
+	if got != want {
+		t.Errorf("callersLine = %q, want %q", got, want)
+	}
+	if got := callersLine(nil, 8418); got != "  callers: none of its own; 8418 of the name elsewhere\n" {
+		t.Errorf("no own sites: %q", got)
+	}
+	e := entry.Entry{Path: "cmd/logs/logs.go", Name: "Prefix", Kind: "field", Exported: true, CallersElsewhere: 50}
+	out := FormatWords(Summary{}, []WordAnswer{{Word: "prefix", Words: []string{"prefix"}, Matches: []entry.Entry{e}}}, 1)
+	if !strings.Contains(out, "  callers: none of its own; 50 of the name elsewhere\n") {
+		t.Errorf("a result with only unattributed sites lacks the count line:\n%s", out)
 	}
 }

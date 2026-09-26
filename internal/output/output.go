@@ -80,7 +80,7 @@ func sourceSection(sources []Source, words []string) string {
 	for _, src := range sources {
 		e := src.Entry
 		fmt.Fprintf(&b, "name:%s path:%s line:%s\n", quote(e.Name), quote(e.Path), e.LineRange())
-		if c := callersLine(e.Callers); c != "" { // where the name is called is part of the answer to a name typed exactly (directive 050)
+		if c := callersLine(e.Callers, e.CallersElsewhere); c != "" { // where the name is called is part of the answer to a name typed exactly (directive 050)
 			b.WriteString(c)
 		}
 		room := sourceBudget - b.Len()
@@ -679,7 +679,7 @@ func resultLine(e entry.Entry, words []string, showProject, showLang bool, extVa
 	// 051 §1 added each site's own line (Text) and, since test files are
 	// indexed too, the sites this now lists include the tests: what the
 	// grep in 14 of round 9's 20 runs went to get.
-	if c := callersLine(e.Callers); c != "" {
+	if c := callersLine(e.Callers, e.CallersElsewhere); c != "" {
 		line.WriteString(c)
 	}
 	return line.String()
@@ -694,22 +694,35 @@ func resultLine(e entry.Entry, words []string, showProject, showLang bool, extVa
 // own text, the same fact a grep of the name returns and a bare site
 // does not — a line long enough to hold that for five sites is not one
 // line any reader would rather have compressed.
-func callersLine(calls []entry.Call) string {
-	if len(calls) == 0 {
+//
+// Directive 072: calls are the sites attributed to the declaration
+// (query.attributeCallers); elsewhere is how many sites of the name were
+// not, printed as one count — under the list, or alone when no site is
+// this declaration's own — so a name declared in many places says how
+// many sites it has without spending five lines on other declarations'.
+func callersLine(calls []entry.Call, elsewhere int) string {
+	if len(calls) == 0 && elsewhere == 0 {
 		return ""
 	}
 	var b strings.Builder
+	if len(calls) == 0 {
+		fmt.Fprintf(&b, "  callers: none of its own; %d of the name elsewhere\n", elsewhere)
+		return b.String()
+	}
 	b.WriteString("  callers:\n")
 	for i, c := range calls {
 		if i == maxCallers {
 			fmt.Fprintf(&b, "    +%d more\n", len(calls)-i)
-			return b.String()
+			break
 		}
 		if c.In != "" {
 			fmt.Fprintf(&b, "    %s in %s: %s\n", c.Place(), c.In, c.Text)
 			continue
 		}
 		fmt.Fprintf(&b, "    %s: %s\n", c.Place(), c.Text)
+	}
+	if elsewhere > 0 {
+		fmt.Fprintf(&b, "    +%d of the name elsewhere\n", elsewhere)
 	}
 	return b.String()
 }

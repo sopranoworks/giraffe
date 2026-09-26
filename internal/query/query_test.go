@@ -999,3 +999,77 @@ func TestSearch_CodeBeforeTestsWithinATier(t *testing.T) {
 		t.Fatalf("expected the test file's Actors last, got %v", got)
 	}
 }
+
+// TestAttributeCallers (directive 072): when the index declares a name
+// more than once, a result shows only the sites that are its own — a
+// qualifier naming one of its position values, a qualifier equal to
+// its directory's last element, or a site in its own directory — and
+// counts the rest; when the name is declared once, every site is its.
+func TestAttributeCallers(t *testing.T) {
+	e := entry.Entry{Name: "Prefix", Kind: "field", Path: "cmd/logs/logs.go", Position: []entry.Position{
+		{Name: "module", Value: "cmd/logs"}, {Name: "type", Value: "LogsOptions"},
+	}}
+	stored := []entry.Call{
+		{Path: "client/rest/client_test.go", Line: 84, Via: "Get", Test: true},
+		{Path: "client/rest/client_test.go", Line: 90, Via: "Get", Test: true},
+		{Path: "cmd/logs/logs.go", Line: 210, Via: "o"},
+		{Path: "cmd/run/run.go", Line: 12, Via: "logs"},
+		{Path: "other/x.go", Line: 5, Via: "client"},
+		{Path: "other/y.go", Line: 7, Via: "LogsOptions"},
+	}
+	own, elsewhere := attributeCallers(e, stored, 3)
+	if elsewhere != 3 {
+		t.Errorf("elsewhere = %d, want 3 (the two REST sites and client.Prefix)", elsewhere)
+	}
+	if len(own) != 3 || own[0].Line != 7 || own[1].Line != 210 || own[2].Line != 12 {
+		t.Errorf("own = %+v, want y.go:7 (names the type) then logs.go:210 (own directory) then run.go:12 (package qualifier)", own)
+	}
+	own, elsewhere = attributeCallers(e, stored, 1)
+	if len(own) != 6 || elsewhere != 0 {
+		t.Errorf("declared once: own = %d elsewhere = %d, want every site and 0", len(own), elsewhere)
+	}
+	if own, elsewhere := attributeCallers(e, nil, 1); own != nil || elsewhere != 0 {
+		t.Error("no sites, nothing")
+	}
+	// A root file's directory is ".", which no qualifier names.
+	root := entry.Entry{Name: "Run", Kind: "func", Path: "main.go"}
+	own, elsewhere = attributeCallers(root, []entry.Call{{Path: "pkg/a.go", Line: 1, Via: "."}, {Path: "b.go", Line: 2}}, 2)
+	if len(own) != 1 || own[0].Line != 2 || elsewhere != 1 {
+		t.Errorf("root: own = %+v elsewhere = %d, want only the root-directory site", own, elsewhere)
+	}
+}
+
+// TestDeclarationsNamed counts the declarations sharing a name, files
+// excluded, and takes a name too short for a trigram as shared.
+func TestDeclarationsNamed(t *testing.T) {
+	src := Slice([]entry.Entry{
+		{Name: "Snapshot", Kind: "method", Path: "a.go"},
+		{Name: "snapshot", Kind: "func", Path: "b.go"},
+		{Name: "Snapshot", Kind: "method", Path: "a.go"}, // the same declaration seen twice
+		{Name: "Snapshot", Kind: entry.KindFile, Path: "Snapshot"},
+		{Name: "SnapshotAll", Kind: "func", Path: "c.go"},
+	})
+	if got := declarationsNamed(src, "Snapshot"); got != 2 {
+		t.Errorf("declarationsNamed = %d, want 2", got)
+	}
+	if got := declarationsNamed(src, "Go"); got != 2 {
+		t.Errorf("a two-letter name is taken as shared, got %d", got)
+	}
+	if got := declarationsNamed(src, "Nothing"); got != 0 {
+		t.Errorf("unknown name = %d, want 0", got)
+	}
+}
+
+// TestWithCallers_AttributesAmongSeveralDeclarations: through
+// WithCallers, a name declared twice keeps only its own sites.
+func TestWithCallers_AttributesAmongSeveralDeclarations(t *testing.T) {
+	sites := []entry.Call{{Path: "pkg/a/a.go", Line: 1, Via: "x"}, {Path: "pkg/b/b.go", Line: 2, Via: "y"}}
+	src := Slice([]entry.Entry{
+		{Name: "Do", Kind: "func", Path: "pkg/a/a.go", Callers: sites},
+		{Name: "Do", Kind: "func", Path: "pkg/b/b.go"},
+	})
+	got := WithCallers(entry.Entry{Name: "Do", Kind: "func", Path: "pkg/a/a.go"}, src)
+	if len(got.Callers) != 1 || got.Callers[0].Line != 1 || got.CallersElsewhere != 1 {
+		t.Errorf("got callers %+v elsewhere %d, want a.go:1 and 1 elsewhere", got.Callers, got.CallersElsewhere)
+	}
+}

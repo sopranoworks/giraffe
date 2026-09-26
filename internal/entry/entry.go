@@ -132,7 +132,18 @@ type Entry struct {
 	// by the index under the name and attached at query time, so a
 	// change to A never rewrites B's entries (§31.2). Nil when nothing
 	// calls the name, or for a file entry — absence, as everywhere here.
+	// Since directive 072 it holds only the sites attributed to this
+	// declaration (query.attributeCallers); CallersElsewhere counts the
+	// name's other sites, which are not this declaration's to show.
 	Callers []Call
+	// CallersElsewhere is how many of the name's call sites were not
+	// attributed to this declaration (directive 072): a site qualified
+	// by something else, in another directory, when the index declares
+	// the name more than once. On a corpus the size of kubernetes a
+	// name like Name has thousands, and printing five of them said
+	// nothing about the declaration under them. Display only, like
+	// Callers; 0 when every site is this declaration's own.
+	CallersElsewhere int
 	// Foreign marks an entry from a root other than the invocation's own
 	// (directive 072; query.Foreign stamps it): the one place §21 C-6's
 	// hiding of unexported declarations still applies. Within the home

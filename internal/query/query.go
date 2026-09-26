@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"iter"
 	"math"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -807,8 +808,77 @@ func WithCallers(e entry.Entry, src Entries) entry.Entry {
 	if e.Kind == entry.KindFile {
 		return e
 	}
-	e.Callers = orderCallers(e, src.Callers(e.Name))
+	e.Callers, e.CallersElsewhere = attributeCallers(e, src.Callers(e.Name), declarationsNamed(src, e.Name))
 	return e
+}
+
+// attributeCallers picks, from every site of the name, the ones that are
+// this declaration's own (directive 072), ordered by orderCallers, and
+// counts the rest. When the index declares the name once, every site is
+// its own — there is nothing else the name could mean. When it declares
+// the name more than once, a site is this declaration's when its
+// qualifier names one of the declaration's position values
+// (orderCallers' "named": c.metrics.Snapshot under NodeMetrics), when
+// its qualifier is the last element of the declaration's own directory
+// (a package or module qualifier: printers.GenerateOptions under
+// pkg/printers), or when it lies in that directory (an unqualified call
+// reaches what is declared beside it). Every other site is a site of
+// the name under some other declaration, and printing five of them —
+// c.Get().Prefix("test") from a REST client under a bool field named
+// Prefix — said nothing about this one while filling the page's byte
+// budget (directive 072: on kubernetes such a block hid the one other
+// result of a narrowed page). Matching is still by name and text, not
+// by resolved type: an own site is a place to open, not a claim.
+func attributeCallers(e entry.Entry, calls []entry.Call, declarations int) (own []entry.Call, elsewhere int) {
+	if len(calls) == 0 {
+		return nil, 0
+	}
+	if declarations <= 1 {
+		return orderCallers(e, calls), 0
+	}
+	dir := path.Dir(e.Path)
+	pkg := path.Base(dir)
+	for _, c := range calls {
+		switch {
+		case namesPosition(e, c.Via), c.Via != "" && strings.EqualFold(c.Via, pkg) && dir != ".", path.Dir(c.Path) == dir:
+			own = append(own, c)
+		default:
+			elsewhere++
+		}
+	}
+	return orderCallers(e, own), elsewhere
+}
+
+// namesPosition reports whether via names one of e's position values
+// (namesValue), the test orderCallers ranks by.
+func namesPosition(e entry.Entry, via string) bool {
+	for _, p := range e.Position {
+		if namesValue(via, p.Value) {
+			return true
+		}
+	}
+	return false
+}
+
+// declarationsNamed counts the declarations in src named exactly name
+// (case-insensitively, any kind but a file): one, and the name's call
+// sites can only be its; more, and a site of the name is ambiguous
+// among them (attributeCallers). Found through Candidates, the posting
+// lists a name's trigrams narrow to; a name too short for a trigram
+// would mean a walk of the whole index for each result on a page, so
+// it is taken as shared rather than counted.
+func declarationsNamed(src Entries, name string) int {
+	if len(name) < 3 {
+		return 2
+	}
+	seen := make(map[string]bool)
+	for e := range src.Candidates(name) {
+		if e.Kind == entry.KindFile || !strings.EqualFold(e.Name, name) {
+			continue
+		}
+		seen[dedupKey(e)] = true
+	}
+	return len(seen)
 }
 
 // orderCallers ranks a name's call sites for the entry they are shown
@@ -830,14 +900,7 @@ func orderCallers(e entry.Entry, calls []entry.Call) []entry.Call {
 	if len(calls) == 0 {
 		return nil
 	}
-	named := func(c entry.Call) bool {
-		for _, p := range e.Position {
-			if namesValue(c.Via, p.Value) {
-				return true
-			}
-		}
-		return false
-	}
+	named := func(c entry.Call) bool { return namesPosition(e, c.Via) }
 	out := make([]entry.Call, len(calls))
 	copy(out, calls)
 	// Named first; within each group a call from the code before one

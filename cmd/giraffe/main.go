@@ -561,7 +561,7 @@ methods, fields, consts, vars) and files, tests included.
 Options go before find; every argument after find is a word, as typed.
 line:A-B on a result is the declaration's extent: sed -n 'A,Bp' <path>
 prints it. Under each: its source line, the doc line the words are on,
-and callers: where its name is called, likeliest first. --query takes
+and callers: the sites that are its own, the rest a count. --query takes
 the attributes result lines print; path: and callers: match a
 substring, the rest exactly. Bodies are not indexed.
 `
