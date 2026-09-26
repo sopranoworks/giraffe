@@ -456,7 +456,6 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 	if page < 1 {
 		page = 1
 	}
-	offset := (page - 1) * PageSize
 
 	var b strings.Builder
 
@@ -508,7 +507,7 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 		} else if len(answers) > 1 && len(answers[0].Counts) > 0 {
 			share = len(answers) - 1
 		}
-		shown, remainder := fitShare(fresh, a.Words, s.ShowProject, s.ShowLang, s.ExtVaries, preambleLen, offset, share)
+		shown, remainder := fitShare(fresh, a.Words, s.ShowProject, s.ShowLang, s.ExtVaries, preambleLen, page, share)
 
 		switch {
 		case len(shown) > 0:
@@ -534,7 +533,7 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 
 		if len(remainder) > 0 {
 			b.WriteString(header("truncated"))
-			b.WriteString(truncatedLines(remainder, page, pageCount(len(fresh)), s.Call))
+			b.WriteString(truncatedLines(remainder, page, s.Call))
 		}
 
 		// §22: `## truncated` already tells a caller how to narrow the
@@ -759,61 +758,66 @@ func quote(s string) string {
 	return s
 }
 
-// pageCount reports how many --page-sized pages total matches spans, the
-// nominal count FormatFrom shows in ## truncated's "page X of Y" (§7,
-// directive 033): pages are sized by PageSize, the stable unit a page
-// number converts to and from, even though fit's own byteBudget can
-// occasionally show fewer than PageSize on one particular page — the
-// caller's next --page N is still N, not something recomputed from how
-// many bytes an earlier page happened to fit.
-func pageCount(total int) int {
-	if total == 0 {
-		return 0
-	}
-	return (total + PageSize - 1) / PageSize
-}
-
-// fit selects a prefix of matches that stays within PageSize and, once
-// at least one result is shown, within byteBudget total for the answer.
-// preambleLen is every byte the caller has already printed or is about
-// to print ahead of the first result line — §7's ## index line, the
-// optional languages: and by ext: lines, and the ## results header
-// itself — not indexLine's length alone (§26 C-30: "everything printed
-// counts").
+// fit selects the entries of page: a prefix of what the pages before
+// it left, within PageSize and, once at least one result is shown,
+// within byteBudget total for the answer. preambleLen is every byte the
+// caller has already printed or is about to print ahead of the first
+// result line — §7's ## index line, the optional languages: and by ext:
+// lines, and the ## results header itself — not indexLine's length
+// alone (§26 C-30: "everything printed counts").
 //
-// offset skips the first offset entries of matches before the budget is
-// applied — FormatFrom's page-to-offset conversion (directive 033;
-// offset was directive 032's own public unit, --page is now the only
-// public one). matches already carries the full ranking, so paging is a
-// plain slice, not a second search. offset past the end of matches
-// yields no results and no remainder, not an error — the caller asked to
-// see further than there is anything to see.
-func fit(matches []entry.Entry, showProject, showLang bool, extVaries map[string]bool, preambleLen, offset int) (shown, remainder []entry.Entry) {
-	return fitShare(matches, nil, showProject, showLang, extVaries, preambleLen, offset, 1)
+// A page beyond the last yields no results and no remainder, not an
+// error — the caller asked to see further than there is anything to
+// see.
+func fit(matches []entry.Entry, showProject, showLang bool, extVaries map[string]bool, preambleLen, page int) (shown, remainder []entry.Entry) {
+	return fitShare(matches, nil, showProject, showLang, extVaries, preambleLen, page, 1)
 }
 
 // fitShare is fit for one of share words sharing one page (directive
 // 062, h3): each gets its share of the results and of the byte budget,
 // never fewer than minShareResults results or minShareBudget bytes, so a
 // six-word call costs about what a one-word call does.
-func fitShare(matches []entry.Entry, words []string, showProject, showLang bool, extVaries map[string]bool, preambleLen, offset, share int) (shown, remainder []entry.Entry) {
-	if offset >= len(matches) {
-		return nil, nil
-	}
+//
+// Page N holds what comes after page N-1's last result (directive 072).
+// Until now page N began at entry (N-1)*PageSize whatever the pages
+// before it had fitted, and the byte budget fits fewer than PageSize
+// results whenever their lines are long: on kubernetes `giraffe find
+// prefix` showed two results on page 1, one on page 2, and the five
+// entries between them — a kubectl field named Prefix among them — on
+// no page at all. Every result is now on exactly one page; the page a
+// result is on is found by fitting the pages before it, the same
+// fitting that printed them.
+func fitShare(matches []entry.Entry, words []string, showProject, showLang bool, extVaries map[string]bool, preambleLen, page, share int) (shown, remainder []entry.Entry) {
 	limit, budget := max(PageSize/share, minShareResults), max(byteBudget/share, minShareBudget)
-	matches = matches[offset:]
+	start := 0
+	for p := 1; ; p++ {
+		if start >= len(matches) {
+			return nil, nil
+		}
+		n := fitCount(matches[start:], words, showProject, showLang, extVaries, preambleLen, limit, budget)
+		if p == page {
+			return matches[start : start+n], matches[start+n:]
+		}
+		start += n
+	}
+}
+
+// fitCount is how many of matches, from the first, one page holds: at
+// most limit, and within budget once one is shown — so at least one
+// while there is one, and a walk over pages always moves.
+func fitCount(matches []entry.Entry, words []string, showProject, showLang bool, extVaries map[string]bool, preambleLen, limit, budget int) int {
 	total := preambleLen
 	for i, e := range matches {
 		if i >= limit {
-			return matches[:i], matches[i:]
+			return i
 		}
 		line := resultLine(e, words, showProject, showLang, extVaries)
 		if i > 0 && total+len(line) > budget {
-			return matches[:i], matches[i:]
+			return i
 		}
 		total += len(line)
 	}
-	return matches, nil
+	return len(matches)
 }
 
 // Call is the find call an answer is for, as typed (directive 071):
@@ -900,14 +904,16 @@ func ShellWord(s string) string {
 // truncatedLines reports the current page's position and the remaining
 // count, then the commands to type next, each pasteable as it stands
 // (§7: "a bare count does not tell the caller what to do next";
-// directive 033: "page X of Y" in the unit --page takes; directive 071:
+// directive 033: "page X" in the unit --page takes, and the count left,
+// exact — the pages left are not, since a page holds what its budget
+// fits (directive 072, fitShare); directive 071:
 // every command giraffe prints is in its grammar): the next page, and
 // the same call narrowed to each of the directories holding most of
 // the remainder — path: is what --query narrows by (033's own
 // constraint: the distribution axis is not what this measures).
 // Files at the root have no directory to narrow to, so "." is not
 // offered.
-func truncatedLines(remainder []entry.Entry, page, totalPages int, call Call) string {
+func truncatedLines(remainder []entry.Entry, page int, call Call) string {
 	counts := make(map[string]int)
 	for _, e := range remainder {
 		if d := path.Dir(e.Path); d != "." {
@@ -929,7 +935,7 @@ func truncatedLines(remainder []entry.Entry, page, totalPages int, call Call) st
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "page %d of %d, %d more: %s\n", page, totalPages, len(remainder), call.Command(call.Query, page+1))
+	fmt.Fprintf(&b, "page %d, %d more: %s\n", page, len(remainder), call.Command(call.Query, page+1))
 	for _, d := range dirs {
 		fmt.Fprintf(&b, "%d in %s: %s\n", counts[d], d, call.Command(call.narrowed(d), 1))
 	}

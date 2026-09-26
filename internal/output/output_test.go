@@ -329,41 +329,39 @@ func TestFit_PreambleLenCountsTowardBudget(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		matches = append(matches, entry.Entry{Path: strings.Repeat("a", 200), Name: "X", Kind: "func", Exported: true})
 	}
-	shownSmallPreamble, _ := fit(matches, false, false, nil, 10, 0)
-	shownBigPreamble, _ := fit(matches, false, false, nil, 1200, 0)
+	shownSmallPreamble, _ := fit(matches, false, false, nil, 10, 1)
+	shownBigPreamble, _ := fit(matches, false, false, nil, 1200, 1)
 	if len(shownBigPreamble) >= len(shownSmallPreamble) {
 		t.Fatalf("expected a larger preamble to leave room for fewer results before the byte backstop: small=%d big=%d",
 			len(shownSmallPreamble), len(shownBigPreamble))
 	}
 }
 
-// TestFit_Offset (directive 032): offset skips already-ranked entries
-// before the budget is applied, and the remainder shrinks by the same
-// amount — paging is a plain slice of the existing ranking, not a
-// second search with its own truncation count.
-func TestFit_Offset(t *testing.T) {
+// TestFit_Page (directive 072, after 032's offset): page 2 begins at
+// the entry after page 1's last, and the remainder shrinks by exactly
+// what page 1 showed — paging is a walk over the existing ranking, not
+// a second search with its own truncation count.
+func TestFit_Page(t *testing.T) {
 	var matches []entry.Entry
 	for i := 0; i < 20; i++ {
-		matches = append(matches, entry.Entry{Path: "a.go", Name: "X", Kind: "func", Exported: true})
+		matches = append(matches, entry.Entry{Path: "a.go", Name: "X", Kind: "func", Exported: true, Line: i + 1})
 	}
-	shownNoOffset, remainderNoOffset := fit(matches, false, false, nil, 10, 0)
-	shownOffset, remainderOffset := fit(matches, false, false, nil, 10, 8)
-	if len(shownOffset) != len(shownNoOffset) {
-		t.Fatalf("expected offset 8 to still fill a full page (%d entries remain): got %d, want %d",
-			len(matches)-8, len(shownOffset), len(shownNoOffset))
+	shown1, remainder1 := fit(matches, false, false, nil, 10, 1)
+	shown2, remainder2 := fit(matches, false, false, nil, 10, 2)
+	if len(shown1) != PageSize || len(shown2) != PageSize {
+		t.Fatalf("short lines: want full pages of %d, got %d and %d", PageSize, len(shown1), len(shown2))
 	}
-	if shownOffset[0].Path != matches[8].Path || shownOffset[0].Line != matches[8].Line {
-		t.Fatalf("expected the first shown entry at offset 8 to be matches[8]")
+	if shown2[0].Line != matches[len(shown1)].Line {
+		t.Fatalf("expected page 2 to start at the entry after page 1's last (%d), got %d", matches[len(shown1)].Line, shown2[0].Line)
 	}
-	if len(remainderOffset) != len(remainderNoOffset)-8 {
-		t.Fatalf("expected the remainder to shrink by exactly the offset: got %d, want %d",
-			len(remainderOffset), len(remainderNoOffset)-8)
+	if len(remainder2) != len(remainder1)-len(shown2) {
+		t.Fatalf("expected the remainder to shrink by what page 2 shows: got %d, want %d", len(remainder2), len(remainder1)-len(shown2))
 	}
 }
 
-// TestFit_OffsetPastEnd (directive 032): an offset beyond the ranked set
-// is not an error — it means there is nothing further to page to.
-func TestFit_OffsetPastEnd(t *testing.T) {
+// TestFit_PageBeyondEnd (directive 032): a page beyond the ranked set is
+// not an error — it means there is nothing further to page to.
+func TestFit_PageBeyondEnd(t *testing.T) {
 	matches := []entry.Entry{{Path: "a.go", Name: "X", Kind: "func", Exported: true}}
 	shown, remainder := fit(matches, false, false, nil, 10, 5)
 	if shown != nil || remainder != nil {
@@ -371,16 +369,36 @@ func TestFit_OffsetPastEnd(t *testing.T) {
 	}
 }
 
-// TestPageCount (directive 033): pages are sized by PageSize (8),
-// rounded up, zero total giving zero pages rather than a stray "page 1
-// of 0".
-func TestPageCount(t *testing.T) {
-	tests := []struct{ total, want int }{
-		{0, 0}, {1, 1}, {8, 1}, {9, 2}, {16, 2}, {17, 3},
+// TestFit_EveryResultOnExactlyOnePage (directive 072): when the byte
+// budget fits fewer than PageSize results on a page, the next page
+// starts where it stopped. Before, page N began at entry (N-1)*PageSize
+// regardless, and the entries between the budget's cut and that point
+// were on no page: on kubernetes `giraffe find prefix` showed two
+// results on page 1, one on page 2, and five in between never.
+func TestFit_EveryResultOnExactlyOnePage(t *testing.T) {
+	var matches []entry.Entry
+	for i := 0; i < 20; i++ {
+		matches = append(matches, entry.Entry{Path: strings.Repeat("p", 600) + ".go", Name: fmt.Sprintf("Sym%d", i), Kind: "func", Exported: true, Line: i + 1})
 	}
-	for _, tt := range tests {
-		if got := pageCount(tt.total); got != tt.want {
-			t.Errorf("pageCount(%d) = %d, want %d", tt.total, got, tt.want)
+	seen := make(map[int]int)
+	for page := 1; ; page++ {
+		shown, _ := fit(matches, false, false, nil, 10, page)
+		if len(shown) == 0 {
+			break
+		}
+		if len(shown) >= PageSize {
+			t.Fatalf("page %d: lines of 600 bytes should fit fewer than %d results in %d bytes, got %d", page, PageSize, byteBudget, len(shown))
+		}
+		for _, e := range shown {
+			seen[e.Line]++
+		}
+		if page > 20 {
+			t.Fatal("paging does not end")
+		}
+	}
+	for _, e := range matches {
+		if seen[e.Line] != 1 {
+			t.Errorf("entry %d is on %d pages, want 1", e.Line, seen[e.Line])
 		}
 	}
 }
@@ -404,8 +422,8 @@ func TestFormatFrom_Page(t *testing.T) {
 	if !strings.Contains(page1, "name:Sym0") || strings.Contains(page1, "name:Sym8") {
 		t.Fatalf("expected page 1 (Format's default) to hold the first 8 results only:\n%s", page1)
 	}
-	if !strings.Contains(page1, "page 1 of 2, 2 more: giraffe --page 2 find") {
-		t.Fatalf("expected ## truncated to state page 1 of 2:\n%s", page1)
+	if !strings.Contains(page1, "page 1, 2 more: giraffe --page 2 find") {
+		t.Fatalf("expected ## truncated to state page 1 and the count left:\n%s", page1)
 	}
 
 	page2 := FormatFrom(s, entries, 2)
@@ -683,7 +701,7 @@ func TestTruncated_PrintsPasteableCommands(t *testing.T) {
 	s.Call = Call{Query: "kind:func path:core", Words: []string{"usages", "mailbox overflow"}}
 	out := Format(s, entries)
 	for _, want := range []string{
-		"\n## truncated\npage 1 of 2, 4 more: giraffe --query 'kind:func path:core' --page 2 find usages 'mailbox overflow'\n",
+		"\n## truncated\npage 1, 4 more: giraffe --query 'kind:func path:core' --page 2 find usages 'mailbox overflow'\n",
 		" in internal/core: giraffe --query 'kind:func path:internal/core' find usages 'mailbox overflow'\n",
 	} {
 		if !strings.Contains(out, want) {

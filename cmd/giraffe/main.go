@@ -450,14 +450,17 @@ func runFind(words []string, opts options, st searchState) int {
 }
 
 // withCallers attaches where each result's name is called (directive
-// 050) to the entries page will print — output.PageSize of them from
-// the page's offset — and no other: a broad word ranks thousands, the
-// page shows eight, and a callers list is a store read each (see
-// query.Entries.Callers). The same enrichment-for-display exactSources
-// does with a declaration's text, one step earlier.
+// 050) to the entries page can print — the first page*output.PageSize
+// of them, since a page holds at most PageSize and starts where the
+// one before it ended (directive 072; output.fitShare) — and no other:
+// a broad word ranks thousands, a page shows eight, and a callers list
+// is a store read each (see query.Entries.Callers). Enriching every
+// entry up to this page, not only this page's window, is what lets the
+// pages before it be fitted again exactly as they printed. The same
+// enrichment-for-display exactSources does with a declaration's text,
+// one step earlier.
 func withCallers(matches []entry.Entry, page int, src query.Entries) {
-	first := (page - 1) * output.PageSize
-	for i := first; i < len(matches) && i < first+output.PageSize; i++ {
+	for i := 0; i < len(matches) && i < page*output.PageSize; i++ {
 		matches[i] = query.WithCallers(matches[i], src)
 	}
 }
