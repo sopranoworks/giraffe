@@ -7,7 +7,7 @@
 #
 #   A  no giraffe: the binary is not in the container.
 #   B  giraffe at /usr/local/bin/giraffe, on PATH, and one line in the
-#      corpus's CLAUDE.md saying so.
+#      corpus's CLAUDE.md saying so (appended: a corpus that has its own CLAUDE.md keeps it).
 #   C  B, and <home-dir> is a home built with --with-giraffe-skill.
 #      The script does not check which home it was given; the run
 #      record's contextSkills says what the listing held.
@@ -55,7 +55,7 @@ if [[ "$CONFIG" != "A" ]]; then
   mkdir -p "$SCRATCH/bin"
   (cd "$REPO_ROOT" && go build -o "$SCRATCH/bin/giraffe" ./cmd/giraffe)
   GIRAFFE_ARGS=(-v "$SCRATCH/bin/giraffe":/usr/local/bin/giraffe:ro)
-  echo 'The `giraffe` command is installed (`/usr/local/bin/giraffe`, on PATH); it searches this codebase.' > "$CORPUS/CLAUDE.md"
+  echo 'The `giraffe` command is installed (`/usr/local/bin/giraffe`, on PATH); it searches this codebase.' >> "$CORPUS/CLAUDE.md"
 fi
 
 # Debian's GOROOT (/usr/lib/go-1.26) is half symlinks into
