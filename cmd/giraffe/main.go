@@ -491,7 +491,7 @@ func runFind(words []string, opts options, st searchState) int {
 // one step earlier.
 func withCallers(matches []entry.Entry, page int, src query.Entries) {
 	for i := 0; i < len(matches) && i < page*output.PageSize; i++ {
-		matches[i] = query.WithCallers(matches[i], src)
+		matches[i] = query.WithCalls(query.WithCallers(matches[i], src), src)
 	}
 }
 
@@ -851,9 +851,9 @@ methods, fields, consts, vars) and files, tests included.
 Options go before find; every argument after find is a word.
 line:A-B on a result is the declaration's extent: sed -n 'A,Bp' <path>
 prints it. Under each: its source line, the doc line matched,
-callers: its own sites, rest a count; uses: where a constant or
-variable is used. --query takes the attributes result lines print:
-path: and callers: match a substring, the rest exactly. Bodies are
+callers: its own sites; uses: a constant's or variable's; calls: what
+its body calls. --query takes the attributes result lines print:
+path:, callers:, calls: match a substring, the rest exactly. Bodies are
 not indexed.
 `
 

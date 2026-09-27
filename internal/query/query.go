@@ -41,6 +41,11 @@ type Entries interface {
 	All() iter.Seq[entry.Entry]
 	Candidates(word string) iter.Seq[entry.Entry]
 	Callers(name string) []entry.Call
+	// CallsIn is every call site recorded in the file at path, in line
+	// order — a file's own calls, which calleesOf reads for the sites
+	// inside one declaration (directive 073). Nil when the file calls
+	// nothing or is not indexed.
+	CallsIn(path string) []entry.Call
 }
 
 // Slice wraps a plain []entry.Entry as an Entries source with no
@@ -79,6 +84,20 @@ func (s sliceEntries) Callers(name string) []entry.Call {
 	return nil
 }
 
+// CallsIn of a literal entry set is every site any entry carries that
+// lies in path, in the order the entries hold them.
+func (s sliceEntries) CallsIn(path string) []entry.Call {
+	var out []entry.Call
+	for _, e := range s {
+		for _, c := range e.Callers {
+			if c.Path == path {
+				out = append(out, c)
+			}
+		}
+	}
+	return out
+}
+
 // Concat presents several Entries sources as one — the shape a multi-
 // root search needs (specifications/giraffe.md §20 §2: one store per
 // root, merged only after each is independently refreshed).
@@ -98,6 +117,17 @@ func (c concatEntries) All() iter.Seq[entry.Entry] {
 			}
 		}
 	}
+}
+
+// CallsIn is whichever source holds the file's calls — a path lies in
+// one root.
+func (c concatEntries) CallsIn(path string) []entry.Call {
+	for _, src := range c {
+		if calls := src.CallsIn(path); len(calls) > 0 {
+			return calls
+		}
+	}
+	return nil
 }
 
 // Callers merges every source's list, in path then line order across
@@ -171,7 +201,7 @@ func ValidAttributes(src Entries) map[string]bool {
 		"scope": true, "lang": true, "ext": true,
 		"size": true, "declarations": true, "line": true,
 		"test":    true,
-		"callers": true,
+		"callers": true, "calls": true,
 	}
 	for e := range src.All() {
 		for _, p := range e.Position {
@@ -316,6 +346,16 @@ func matchesAny(name string, e entry.Entry, values []string) bool {
 			// is not there. A file entry has no line and matches neither.
 			if e.Line > 0 && (e.LineRange() == v || strconv.Itoa(e.Line) == v) {
 				return true
+			}
+		case "calls":
+			// A callee as the calls: block prints it (directive 073):
+			// its name, or its place, by substring like callers: —
+			// calls:Validate keeps every declaration whose body calls a
+			// name containing Validate.
+			for _, c := range e.Calls {
+				if strings.Contains(c.Name, v) || strings.Contains(c.Path+":"+c.Line, v) {
+					return true
+				}
 			}
 		case "callers":
 			// A site as the callers: line prints it (entry.Call.Place,
@@ -488,6 +528,10 @@ func (f foreignEntries) Candidates(word string) iter.Seq[entry.Entry] {
 
 func (f foreignEntries) Callers(name string) []entry.Call {
 	return f.src.Callers(name)
+}
+
+func (f foreignEntries) CallsIn(path string) []entry.Call {
+	return f.src.CallsIn(path)
 }
 
 func markForeign(seq iter.Seq[entry.Entry]) iter.Seq[entry.Entry] {
@@ -803,7 +847,8 @@ func Browse(src Entries, filter Filter) []entry.Entry {
 // only when the filter will look at it.
 func (f Filter) constrainsCallers() bool {
 	_, ok := f["callers"]
-	return ok
+	_, ok2 := f["calls"]
+	return ok || ok2
 }
 
 // span is how many lines a declaration covers: 1 for a one-line
@@ -954,6 +999,112 @@ func callsOnly(calls []entry.Call) []entry.Call {
 		}
 	}
 	return out
+}
+
+// WithCalls returns e carrying what its body calls (directive 073,
+// query.calleesOf): attached to the results a page prints, not by
+// WithCallers, which members and used-from call for many entries.
+func WithCalls(e entry.Entry, src Entries) entry.Entry {
+	e.Calls, e.CallsMore = calleesOf(e, src)
+	return e
+}
+
+// maxCallees is how many callees a page lists under calls:; the rest
+// are a count (Entry.CallsMore), and no more than twice this many names
+// are looked up for one entry, so a long body costs a page a bounded
+// number of index reads.
+const maxCallees = 5
+
+// calleesOf resolves the names e's body calls to the declarations they
+// reach (directive 073). A call site says which declaration it lies in
+// (Call.In: the function, or Type.Method), so the body's calls are the
+// file's sites inside e, in line order, each distinct name once, e's
+// own name skipped (a recursive call leads nowhere new). A name is
+// placed the way attributeCallers attributes a site, read the other
+// way (declarationOf): when the index declares it once, that
+// declaration; when more than once, the one the call's qualifier
+// names, else the one declared beside the caller; otherwise the name is
+// counted, not placed — a wrong place is worse than none.
+func calleesOf(e entry.Entry, src Entries) ([]entry.Callee, int) {
+	if e.Kind == entry.KindFile || e.Path == "" {
+		return nil, 0
+	}
+	in := e.Name
+	for _, p := range e.Position {
+		if p.Name == "receiver" && p.Value != "" {
+			in = p.Value + "." + e.Name
+		}
+	}
+	type called struct{ name, via string }
+	var names []called
+	seen := map[string]bool{e.Name: true}
+	for _, c := range src.CallsIn(e.Path) {
+		if c.In != in || seen[c.Name] {
+			continue
+		}
+		seen[c.Name] = true
+		names = append(names, called{c.Name, c.Via})
+	}
+	var out []entry.Callee
+	more := 0
+	for i, n := range names {
+		if len(out) == maxCallees || i == 2*maxCallees {
+			more += len(names) - i
+			break
+		}
+		d, ok := declarationOf(src, n.name, n.via, e)
+		if !ok {
+			more++
+			continue
+		}
+		out = append(out, entry.Callee{Name: n.name, Path: d.Path, Line: d.LineRange()})
+	}
+	return out, more
+}
+
+// declarationOf is the declaration a call of name through via reaches,
+// seen from caller (calleesOf), and whether one could be told: the only
+// declaration of the name; else the only one via names (a receiver
+// type, a package); else, when via names none, the only one declared
+// in the caller's directory.
+func declarationOf(src Entries, name, via string, caller entry.Entry) (entry.Entry, bool) {
+	if len(name) < 3 {
+		return entry.Entry{}, false
+	}
+	// Declarations are told apart by place, not dedupKey: three
+	// methods named alike in one file (an interface's implementations)
+	// are three places a call could reach, not one.
+	var found []entry.Entry
+	seen := make(map[string]bool)
+	for d := range src.Candidates(name) {
+		key := dedupKey(d) + "\x00" + d.LineRange()
+		if d.Kind == entry.KindFile || d.Name != name || seen[key] {
+			continue
+		}
+		seen[key] = true
+		found = append(found, d)
+	}
+	if len(found) == 1 {
+		return found[0], true
+	}
+	dir := path.Dir(caller.Path)
+	var byVia, byDir []entry.Entry
+	for _, d := range found {
+		ddir := path.Dir(d.Path)
+		switch {
+		case via != "" && (namesPosition(d, via) || (ddir != "." && strings.EqualFold(via, path.Base(ddir)))):
+			byVia = append(byVia, d)
+		case ddir == dir:
+			byDir = append(byDir, d)
+		}
+	}
+	switch {
+	case len(byVia) == 1:
+		return byVia[0], true
+	case len(byVia) == 0 && len(byDir) == 1:
+		return byDir[0], true
+	}
+	return entry.Entry{}, false
 }
 
 // attributeCallers picks, from every site of the name, the ones that are

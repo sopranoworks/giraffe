@@ -121,6 +121,7 @@ func sourceSection(sources []Source, words []string) string {
 		if c := callersLine(e.Callers, e.CallersElsewhere); c != "" { // where the name is called is part of the answer to a name typed exactly (directive 050)
 			b.WriteString(c)
 		}
+		b.WriteString(callsLine(e))
 		room := sourceBudget - b.Len()
 		if textLen(src.Lines) <= room {
 			for _, l := range src.Lines {
@@ -1020,6 +1021,13 @@ func resultLine(e entry.Entry, words []string, showProject, showLang bool, extVa
 	if c := callersLine(e.Callers, e.CallersElsewhere); c != "" {
 		line.WriteString(c)
 	}
+	// What the body calls (directive 073), after who calls it: the
+	// declarations the call sites inside this one reach, each as the
+	// result line that finds it, so the next step of a thread is on
+	// the page in the shape find and --query take, before the body is
+	// opened — 073's runs opened the body, grepped for the names in it
+	// and asked for them in a further call, on every question alike.
+	line.WriteString(callsLine(e))
 	return line.String()
 }
 
@@ -1070,6 +1078,29 @@ func membersLine(members []entry.Entry, file bool) string {
 		line += fmt.Sprintf(" | +%d more", more)
 	}
 	return line + "\n"
+}
+
+// callsLine renders calls: as a small block — one callee a line as
+// name:X path:P line:A-B, at most maxCallees of them (query.calleesOf),
+// then a count of the names not placed; "" when the body calls nothing
+// the index can place.
+func callsLine(e entry.Entry) string {
+	if len(e.Calls) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("  calls:\n")
+	for _, c := range e.Calls {
+		fmt.Fprintf(&b, "    name:%s path:%s", quote(c.Name), quote(c.Path))
+		if c.Line != "" {
+			fmt.Fprintf(&b, " line:%s", c.Line)
+		}
+		b.WriteByte('\n')
+	}
+	if e.CallsMore > 0 {
+		fmt.Fprintf(&b, "    +%d more names\n", e.CallsMore)
+	}
+	return b.String()
 }
 
 // callersLine renders callers: as a small block, one site a line —

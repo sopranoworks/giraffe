@@ -532,6 +532,13 @@ func callersPrefix(name string) []byte {
 	return []byte(name + "\x00")
 }
 
+// CallsIn is the call sites recorded in the file at path, in line
+// order (query.Entries; directive 073): one key read, decoded on demand
+// for the entries a page prints, the way Callers is.
+func (s *Store) CallsIn(path string) []entry.Call {
+	return s.callsOf(path)
+}
+
 // callsOf returns the call sites recorded for path — a file's own
 // calls, carried forward with its entries when its content is unchanged
 // but its record must be rewritten (carryForward), the way entriesByID

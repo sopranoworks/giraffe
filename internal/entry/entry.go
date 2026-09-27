@@ -150,6 +150,21 @@ type Entry struct {
 	// its file to see. Display only, attached at query time like
 	// Callers (query.WithMembers); nil when nothing names it.
 	Members []Entry
+	// Calls holds the declarations this entry's body calls (directive
+	// 073): each name the body calls that the index declares, resolved
+	// to the declaration the call reaches (query.calleesOf), in the
+	// order the body first calls them, a bounded few. It is the next
+	// step a reader took after a page had named the function — open
+	// the body, grep for where each name in it is declared, ask for
+	// those names — put on the page before the body is opened.
+	// Attached at query time from the file's own call sites (Call.In),
+	// like Callers; nil for a file entry, or a body that calls nothing
+	// the index can place.
+	Calls []Callee
+	// CallsMore counts the names the body calls that Calls does not
+	// show: past its cap, or declared in more places than the call can
+	// be told among.
+	CallsMore int
 	// Foreign marks an entry from a root other than the invocation's own
 	// (directive 072; query.Foreign stamps it): the one place §21 C-6's
 	// hiding of unexported declarations still applies. Within the home
@@ -198,6 +213,16 @@ type Call struct {
 	// field's are its uses, and where a name is both, a page lists
 	// calls under callers: and uses under uses:.
 	Use bool
+}
+
+// Callee is a declaration a body calls, as Entry.Calls lists it: the
+// name as called and where the index declares it — Line as the
+// declaration's result line prints it (LineRange), so the line a page
+// shows is one a reader can paste after --query or open with sed.
+type Callee struct {
+	Name string
+	Path string
+	Line string
 }
 
 // Place is the site as a result line prints it and --query callers:

@@ -39,8 +39,13 @@ line`, up to five and a count of the rest; sites of the same name under
 other declarations are only counted; a call from a test file comes
 after the code's. A variable or constant carries `uses:` the same way —
 where its value is checked, read or set; a field's or a type's uses are
-not listed. A result
-named exactly one of the words also prints its text, under ## source.
+not listed. A function or method also carries `calls:` — the
+declarations its body calls that the index can place, each as the
+result line that finds it (`name:X path:P line:A-B`), up to five and a
+count of the rest: the next step of a thread, before the body is
+opened. `--query calls:X` narrows to the declarations whose body calls
+X. A result named exactly one of the words also prints its text, under
+## source.
 
 An answer with no results says `none:` — no name, doc comment or path in
 the index contains the word — and under it `text:`, where the word

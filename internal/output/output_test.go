@@ -877,3 +877,16 @@ func TestFormatWords_FileSection(t *testing.T) {
 		t.Fatalf("## file on page 2:\n%s", out2)
 	}
 }
+
+// Directive 073: calls: lists the body's callees as result lines, then
+// a count of the names not placed; nothing when none is placed.
+func TestCallsLine(t *testing.T) {
+	e := entry.Entry{Name: "Do", Calls: []entry.Callee{{Name: "Helper", Path: "pkg/a/util.go", Line: "12-20"}, {Name: "Run", Path: "pkg/b/run.go", Line: "8"}}, CallsMore: 3}
+	want := "  calls:\n    name:Helper path:pkg/a/util.go line:12-20\n    name:Run path:pkg/b/run.go line:8\n    +3 more names\n"
+	if got := callsLine(e); got != want {
+		t.Errorf("callsLine = %q\nwant %q", got, want)
+	}
+	if got := callsLine(entry.Entry{Name: "Do", CallsMore: 4}); got != "" {
+		t.Errorf("callsLine with nothing placed = %q, want empty", got)
+	}
+}

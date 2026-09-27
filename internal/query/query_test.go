@@ -1162,3 +1162,52 @@ func TestWithCallers_UsesOnlyUnderConstantsAndVariables(t *testing.T) {
 		}
 	}
 }
+
+// Directive 073: calls: — the declarations a body calls, placed the way
+// a site is attributed. Sites lie in Do (Call.In); Helper is declared
+// once, Run twice and the call's qualifier names package b, Parse
+// twice with nothing to tell them apart, Do's own recursive call is
+// skipped, and a site in another declaration is not Do's.
+func TestWithCallers_CallsPlacesTheBodysCallees(t *testing.T) {
+	sites := []entry.Call{
+		{Path: "pkg/a/a.go", Name: "Helper", Line: 3, In: "Do"},
+		{Path: "pkg/a/a.go", Name: "Run", Line: 4, Via: "b", In: "Do"},
+		{Path: "pkg/a/a.go", Name: "Parse", Line: 5, In: "Do"},
+		{Path: "pkg/a/a.go", Name: "Do", Line: 6, In: "Do"},
+		{Path: "pkg/a/a.go", Name: "Helper", Line: 7, In: "Do"},
+		{Path: "pkg/a/a.go", Name: "Other", Line: 20, In: "Elsewhere"},
+	}
+	src := Slice([]entry.Entry{
+		{Name: "Do", Kind: "func", Path: "pkg/a/a.go", Line: 1, EndLine: 10, Callers: sites},
+		{Name: "Helper", Kind: "func", Path: "pkg/a/util.go", Line: 12, EndLine: 20},
+		{Name: "Run", Kind: "func", Path: "pkg/b/run.go", Line: 8, EndLine: 30},
+		{Name: "Run", Kind: "func", Path: "pkg/c/run.go", Line: 8, EndLine: 30},
+		{Name: "Parse", Kind: "func", Path: "pkg/x/p.go", Line: 1},
+		{Name: "Parse", Kind: "func", Path: "pkg/y/p.go", Line: 1},
+		{Name: "Other", Kind: "func", Path: "pkg/a/o.go", Line: 1},
+	})
+	got := WithCalls(entry.Entry{Name: "Do", Kind: "func", Path: "pkg/a/a.go", Line: 1, EndLine: 10}, src)
+	want := []entry.Callee{{Name: "Helper", Path: "pkg/a/util.go", Line: "12-20"}, {Name: "Run", Path: "pkg/b/run.go", Line: "8-30"}}
+	if len(got.Calls) != len(want) || got.CallsMore != 1 {
+		t.Fatalf("got calls %+v more %d, want %+v more 1", got.Calls, got.CallsMore, want)
+	}
+	for i := range want {
+		if got.Calls[i] != want[i] {
+			t.Errorf("callee %d = %+v, want %+v", i, got.Calls[i], want[i])
+		}
+	}
+	// A method's sites lie in Type.Method.
+	msites := []entry.Call{{Path: "pkg/m/m.go", Name: "Helper", Line: 3, In: "Box.Open"}}
+	msrc := Slice([]entry.Entry{
+		{Name: "Open", Kind: "method", Path: "pkg/m/m.go", Position: []entry.Position{{Name: "receiver", Value: "Box"}}, Callers: msites},
+		{Name: "Helper", Kind: "func", Path: "pkg/a/util.go", Line: 12},
+	})
+	m := WithCalls(entry.Entry{Name: "Open", Kind: "method", Path: "pkg/m/m.go", Position: []entry.Position{{Name: "receiver", Value: "Box"}}}, msrc)
+	if len(m.Calls) != 1 || m.Calls[0].Name != "Helper" {
+		t.Errorf("method: got calls %+v, want Helper", m.Calls)
+	}
+	// --query calls: narrows by a callee's name or place.
+	if !(Filter{"calls": {"Help"}}).Match(got) || (Filter{"calls": {"Nope"}}).Match(got) {
+		t.Errorf("calls: filter did not match by callee name")
+	}
+}
