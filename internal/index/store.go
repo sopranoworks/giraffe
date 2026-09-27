@@ -46,7 +46,7 @@ const storeFilename = "store.bolt"
 // A change in what an encoded field means is a change of shape too: an
 // index that decoded fine but held ranges computed the old way would
 // keep them for every file that has not changed since.
-const schemaVersion = "10" // 3: EndLine joined the entry encoding (directive 042); 4: Line starts at the doc comment (043); 5: DocText joined it (065); 6: Test joined it (065, g42); 7: the calls and callers buckets (050, ported in 065 g47); 8: Call.Text and Call.In (065, g48); 9: callers keyed by name and path (067); 10: Call.Use (072)
+const schemaVersion = "12" // 3: EndLine joined the entry encoding (directive 042); 4: Line starts at the doc comment (043); 5: DocText joined it (065); 6: Test joined it (065, g42); 7: the calls and callers buckets (050, ported in 065 g47); 8: Call.Text and Call.In (065, g48); 9: callers keyed by name and path (067); 10: Call.Use (072); 12: uses kept only under constants and variables (073), its own store beside 10 and 11
 
 var (
 	bucketMeta         = []byte("meta")

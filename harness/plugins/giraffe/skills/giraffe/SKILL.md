@@ -37,9 +37,9 @@ qualified by its type or package; every site when the name is declared
 once), one site a line as `file:line in Declaration: the call's own
 line`, up to five and a count of the rest; sites of the same name under
 other declarations are only counted; a call from a test file comes
-after the code's. A field, variable or constant carries `uses:` the same
-way — where its name is read, set, checked or its address taken without
-a call; a name that is both called and used carries both. A result
+after the code's. A variable or constant carries `uses:` the same way —
+where its value is checked, read or set; a field's or a type's uses are
+not listed. A result
 named exactly one of the words also prints its text, under ## source.
 
 An answer with no results says `none:` — no name, doc comment or path in

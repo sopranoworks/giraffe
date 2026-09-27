@@ -924,8 +924,36 @@ func WithCallers(e entry.Entry, src Entries) entry.Entry {
 	if e.Kind == entry.KindFile {
 		return e
 	}
-	e.Callers, e.CallersElsewhere = attributeCallers(e, src.Callers(e.Name), declarationsNamed(src, e.Name))
+	sites := src.Callers(e.Name)
+	if !holdsValue(e.Kind) {
+		sites = callsOnly(sites)
+	}
+	e.Callers, e.CallersElsewhere = attributeCallers(e, sites, declarationsNamed(src, e.Name))
 	return e
+}
+
+// holdsValue reports whether a declaration of kind k names a value that
+// a site refers to without calling it: a constant or a variable
+// (directive 073). Such a declaration's sites are its uses — where the
+// value is checked, read or set — and a function's are its calls. A
+// field's, a method's and a type's uses are not listed: a field is
+// read in every method of its type, and listing those told a reader
+// where the type lives, not what the name means (directive 073 on
+// gekka), while a constant's uses are the places its value decides
+// something, which is what a reader who found the constant looks for.
+func holdsValue(kind string) bool {
+	return kind == "const" || kind == "var"
+}
+
+// callsOnly is the sites among calls that are calls, in their order.
+func callsOnly(calls []entry.Call) []entry.Call {
+	var out []entry.Call
+	for _, c := range calls {
+		if !c.Use {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // attributeCallers picks, from every site of the name, the ones that are

@@ -660,7 +660,7 @@ const helpText = `giraffe: an index of this repository's declarations (Go: types
 methods, fields, consts, vars) and files, tests included.
 
   giraffe find <word>...           entries whose name, doc or path
-                                   contains <word>, closest first;
+                                   has <word>, closest first;
                                    several: two or more first
   giraffe --query 'attr:value ...' find <word>...  the same, narrowed
   giraffe --query 'attr:value ...' find  browse a place, in file order
@@ -670,10 +670,11 @@ methods, fields, consts, vars) and files, tests included.
 
 Options go before find; every argument after find is a word.
 line:A-B on a result is the declaration's extent: sed -n 'A,Bp' <path>
-prints it. Under each: its source line, the doc line with the words,
-callers: its own sites, rest a count; uses: where it is read or
-set. --query takes the attributes result lines print: path: and
-callers: match a substring, the rest exactly. Bodies are not indexed.
+prints it. Under each: its source line, the doc line matched,
+callers: its own sites, rest a count; uses: where a constant or
+variable is used. --query takes the attributes result lines print:
+path: and callers: match a substring, the rest exactly. Bodies are
+not indexed.
 `
 
 // runPrepare implements `giraffe prepare` (§4, §24 C-21; directives

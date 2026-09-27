@@ -1146,3 +1146,19 @@ func TestSearch_LargerDeclarationFirst(t *testing.T) {
 		t.Fatalf("order: %v", got)
 	}
 }
+
+// Directive 073: a use — a site that refers to the name without calling
+// it — is listed only under a constant or a variable; a field of the
+// same name gets the calls alone, and the use is not counted elsewhere.
+func TestWithCallers_UsesOnlyUnderConstantsAndVariables(t *testing.T) {
+	sites := []entry.Call{{Path: "pkg/a/a.go", Line: 1, Via: "a", Use: true}, {Path: "pkg/a/a.go", Line: 2, Via: "a"}}
+	src := Slice([]entry.Entry{{Name: "Limit", Kind: "field", Path: "pkg/a/a.go", Callers: sites}})
+	if got := WithCallers(entry.Entry{Name: "Limit", Kind: "field", Path: "pkg/a/a.go"}, src); len(got.Callers) != 1 || got.Callers[0].Use || got.CallersElsewhere != 0 {
+		t.Errorf("field: got callers %+v elsewhere %d, want the call alone", got.Callers, got.CallersElsewhere)
+	}
+	for _, kind := range []string{"const", "var"} {
+		if got := WithCallers(entry.Entry{Name: "Limit", Kind: kind, Path: "pkg/a/a.go"}, src); len(got.Callers) != 2 {
+			t.Errorf("%s: got callers %+v, want the use and the call", kind, got.Callers)
+		}
+	}
+}
