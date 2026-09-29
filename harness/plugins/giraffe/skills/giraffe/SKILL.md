@@ -1,6 +1,6 @@
 ---
 name: giraffe
-description: The first step for any question about where something is in this repository or whether it exists — which file handles X, where Y is defined, is there a Z feature. Just run `giraffe find <words>` in Bash (no need to load this skill first), with every word you would try in the one call — `giraffe find cache store registry`: it returns the matching declarations and files with exact line ranges. Use it before find, ls, grep or starting an Explore agent, and in any subagent exploring the code.
+description: An index of this repository's declarations, doc comments, paths and call sites — for any question about where something is or whether it exists: which file handles X, where Y is defined, what calls Z, is there a W feature. Just run `giraffe find <words>` in Bash (no need to load this skill first), with every word you would try in the one call — `giraffe find cache store registry`: it returns the matching declarations and files with exact line ranges, and a function's call sites. It answers each such lookup, not only the first: the next name you are after — a function a result mentions, what calls it, where a value is sent — is another `giraffe find`. Text inside function bodies (string literals, local variables) is not indexed; that is what grep is for. Use it before find, ls, grep or starting an Explore agent, and in any subagent exploring the code.
 ---
 
 # giraffe
