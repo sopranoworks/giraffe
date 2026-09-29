@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"giraffe/internal/entry"
+	"giraffe/internal/query"
 )
 
 // TestParseOptions_Page (directive 033, replacing 032's --offset;
@@ -177,5 +180,22 @@ func TestHelpText_StaysSmall(t *testing.T) {
 		if !strings.Contains(helpText, must) {
 			t.Errorf("helpText does not mention %q", must)
 		}
+	}
+}
+
+// Directive 073: the directory a word of the call names — a segment
+// containing the word — gets its own block; the most populous such
+// directory when several; none when no word names one or the call
+// already narrows by path:.
+func TestWordDir(t *testing.T) {
+	m := []entry.Entry{{Path: "pkg/standby/a.go"}, {Path: "pkg/standby/b.go"}, {Path: "pkg/standby/c.go"}, {Path: "pkg/server/standby.go"}, {Path: "pkg/exec/x.go"}, {Path: "pkg/exec/y.go"}, {Path: "pkg/exec/z.go"}, {Path: "pkg/exec/w.go"}, {Path: "main.go"}}
+	if d, n := wordDir(m, []string{"standby", "idle"}, nil); d != "pkg/standby" || n != 3 {
+		t.Errorf("got %q %d, want pkg/standby 3", d, n)
+	}
+	if d, _ := wordDir(m, []string{"idle", "exit"}, nil); d != "" {
+		t.Errorf("no word names a directory: got %q", d)
+	}
+	if d, _ := wordDir(m, []string{"standby"}, query.Filter{"path": {"pkg"}}); d != "" {
+		t.Errorf("a call already narrowed by path: got %q", d)
 	}
 }

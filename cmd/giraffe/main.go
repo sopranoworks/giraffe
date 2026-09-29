@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -426,6 +427,21 @@ func runFind(words []string, opts options, st searchState) int {
 	if len(words) > 1 {
 		matches, counts := query.Ranked(st.entries, words, filter)
 		answers = append(answers, output.WordAnswer{Word: strings.Join(words, " "), Words: words, Counts: counts, Matches: matches})
+		// Directive 073: a word of the call that names a directory —
+		// a package named for its subject — is where a reader narrows
+		// to next, and 073's runs did in their second call. That
+		// directory's block follows the several-words block, as
+		// --query path: to it would print it, showing what the wider
+		// block did not.
+		if dir, n := wordDir(matches, words, filter); n >= wordDirMin {
+			near := query.Filter{}
+			for k, v := range filter {
+				near[k] = v
+			}
+			near["path"] = []string{dir}
+			inDir, _ := query.Ranked(st.entries, words, near)
+			answers = append(answers, output.WordAnswer{Word: "in " + dir, Words: words, Matches: inDir})
+		}
 	}
 	for _, word := range words {
 		a := output.WordAnswer{Word: word, Words: []string{word}, Matches: query.Search(st.entries, word, filter)}
@@ -673,4 +689,51 @@ func commitHash(ctx context.Context, root string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// wordDirMin is how many of the several-words results must lie in a
+// directory a word names for its block to follow the several-words block.
+const wordDirMin = 3
+
+// wordDir is the directory a word of the call names, among the
+// directories the several-words results lie in (directive 073): one of
+// its path segments contains the word, case aside, and it holds the most
+// results of the directories that do. "" when no word names one, when
+// the call already narrows by path:, or when the results are files at
+// the root.
+func wordDir(matches []entry.Entry, words []string, filter query.Filter) (string, int) {
+	if _, narrowed := filter["path"]; narrowed {
+		return "", 0
+	}
+	counts := make(map[string]int)
+	for _, e := range matches {
+		if d := path.Dir(e.Path); d != "." {
+			counts[d]++
+		}
+	}
+	best, n := "", 0
+	for d, c := range counts {
+		if c < wordDirMin || (c < n) || (c == n && d > best) {
+			continue
+		}
+		if segmentNamed(d, words) {
+			best, n = d, c
+		}
+	}
+	return best, n
+}
+
+// segmentNamed reports whether a segment of dir contains one of words,
+// case aside — pkg/standby for "standby", pkg/workloadlearning for
+// "workload".
+func segmentNamed(dir string, words []string) bool {
+	for _, seg := range strings.Split(dir, "/") {
+		lower := strings.ToLower(seg)
+		for _, w := range words {
+			if w != "" && strings.Contains(lower, strings.ToLower(w)) {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -15,6 +15,12 @@ argument after `find` is a word, as typed. Several words first list the
 entries that carry two or more of them (more, and rarer, words first;
 with how many entries each word matches), then answer each word.
 
+When a word of the call names a directory the results lie in (a
+segment of its path contains the word), that directory's own block
+follows on the same page (`## results: 'in pkg/x'`), as `--query
+path:pkg/x` would list it, so there is no need to narrow to it in a
+second call.
+
 Test files are indexed too; a result from one carries `test:true`.
 
 Each result is one line:
