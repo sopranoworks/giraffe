@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -445,6 +446,9 @@ func runFind(words []string, opts options, st searchState) int {
 	}
 	for _, word := range words {
 		a := output.WordAnswer{Word: word, Words: []string{word}, Matches: query.Search(st.entries, word, filter)}
+		if len(a.Matches) == 0 && len(filter) == 0 {
+			a.Text, a.TextFiles, a.TextSearched = st.textSites(word)
+		}
 		if len(a.Matches) == 0 {
 			if len(filter) > 0 {
 				a.TryNext = append(a.TryNext, query.DiagnoseFilter(st.entries, filter)...)
@@ -539,6 +543,53 @@ func (st searchState) exactSources(words []string, answers []output.WordAnswer) 
 		}
 	}
 	return out
+}
+
+// maxTextSites bounds how many sites a none: word's text: lines name,
+// one per file.
+const maxTextSites = 5
+
+// textSites reads every file the index holds, under its root, for word
+// as a case-insensitive substring of its text (directive 073): a word no
+// name, doc comment or path contains may still be in a function body or
+// a string, and the answer says so, or says it is nowhere, instead of
+// leaving that search to grep. It returns the first site of each of the
+// first maxTextSites files that hold it, how many files hold it, and
+// how many were read.
+func (st searchState) textSites(word string) (sites []string, files, searched int) {
+	needle := []byte(strings.ToLower(word))
+	for _, r := range st.roots {
+		for e := range r.src.All() {
+			if e.Kind != entry.KindFile {
+				continue
+			}
+			content, err := os.ReadFile(filepath.Join(r.dir, filepath.FromSlash(e.Path)))
+			if err != nil {
+				continue
+			}
+			searched++
+			lower := bytes.ToLower(content)
+			i := bytes.Index(lower, needle)
+			if i < 0 {
+				continue
+			}
+			files++
+			if len(sites) < maxTextSites {
+				line := 1 + bytes.Count(content[:i], []byte("\n"))
+				start := bytes.LastIndexByte(content[:i], '\n') + 1
+				end := bytes.IndexByte(content[i:], '\n')
+				if end < 0 {
+					end = len(content) - i
+				}
+				text := strings.TrimSpace(string(content[start : i+end]))
+				if len(text) > 160 {
+					text = text[:160]
+				}
+				sites = append(sites, fmt.Sprintf("%s:%d: %s", e.Path, line, text))
+			}
+		}
+	}
+	return sites, files, searched
 }
 
 // declarationLines returns e's range from its file, under whichever

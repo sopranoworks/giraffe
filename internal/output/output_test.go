@@ -773,3 +773,37 @@ func TestFormat_CallersElsewhere(t *testing.T) {
 		t.Errorf("a result with only unattributed sites lacks the count line:\n%s", out)
 	}
 }
+
+// Directive 073: every word's answer is the one call, so its next page
+// and narrowings are the same commands; a page prints each once.
+func TestFormatWords_CommandPrintedOnce(t *testing.T) {
+	var many []entry.Entry
+	for i := 0; i < 40; i++ {
+		many = append(many, entry.Entry{Path: fmt.Sprintf("pkg/a/f%d.go", i), Name: fmt.Sprintf("N%d", i), Kind: "func", Line: 1})
+	}
+	s := Summary{Commit: "abc1234", Symbols: 40, Call: Call{Words: []string{"x", "y"}}}
+	out := FormatWords(s, []WordAnswer{
+		{Word: "x", Words: []string{"x"}, Matches: many},
+		{Word: "y", Words: []string{"y"}, Matches: many[20:]},
+	}, 1)
+	if n := strings.Count(out, "giraffe --page 2 find x y"); n != 1 {
+		t.Fatalf("next-page command printed %d times, want 1:\n%s", n, out)
+	}
+	if !strings.Contains(out, "more: as above") {
+		t.Fatalf("second truncation should point at the command above:\n%s", out)
+	}
+}
+
+// Directive 073: a none: word whose files' text was searched says what
+// that search found — nowhere, or where — instead of leaving it to grep.
+func TestFormatWords_NoneWithText(t *testing.T) {
+	s := Summary{Commit: "abc1234", Symbols: 10, Call: Call{Words: []string{"smtp"}}}
+	out := FormatWords(s, []WordAnswer{{Word: "smtp", Words: []string{"smtp"}, TextSearched: 7}}, 1)
+	if !strings.Contains(out, "none: no name, doc comment or path among the index's 10 entries contains smtp\ntext: nor is it in the text of any of the 7 files indexed\n") {
+		t.Fatalf("none with an empty text search:\n%s", out)
+	}
+	out = FormatWords(s, []WordAnswer{{Word: "smtp", Words: []string{"smtp"}, TextSearched: 7, TextFiles: 2, Text: []string{"a.go:3: x := \"smtp\""}}}, 1)
+	if !strings.Contains(out, "text: in the text of 2 of the 7 files indexed:\n    a.go:3: x := \"smtp\"\n    +1 more files\n") {
+		t.Fatalf("none with text sites:\n%s", out)
+	}
+}

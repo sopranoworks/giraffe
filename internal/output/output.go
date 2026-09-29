@@ -440,6 +440,14 @@ type WordAnswer struct {
 	// that carries most of Words.
 	Words  []string
 	Counts []int
+	// Text is, for a word no name, doc comment or path contains, where
+	// it occurs in the text of the index's files (directive 073): the
+	// search the none: answer used to leave to grep. TextFiles counts
+	// the files, TextSearched how many were read; Text holds the first
+	// sites, file:line: the line.
+	Text         []string
+	TextFiles    int
+	TextSearched int
 }
 
 // FormatWords renders one find call's answer for every word it was
@@ -524,6 +532,10 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 			b.WriteString(resultsHeader)
 			b.WriteString(countsLine(a.Words, a.Counts))
 			fmt.Fprintf(&b, "none: no name, doc comment or path among the index's %d entries contains two of these words (text inside bodies is not indexed)\n", s.Symbols)
+		case a.Word != "" && len(a.Matches) == 0 && a.TextSearched > 0:
+			b.WriteString(resultsHeader)
+			fmt.Fprintf(&b, "none: no name, doc comment or path among the index's %d entries contains %s\n", s.Symbols, quote(a.Word))
+			b.WriteString(textLines(a))
 		case a.Word != "" && len(a.Matches) == 0:
 			b.WriteString(resultsHeader)
 			fmt.Fprintf(&b, "none: no name, doc comment or path among the index's %d entries contains %s (text inside bodies is not indexed)\n", s.Symbols, quote(a.Word))
@@ -569,6 +581,24 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 		}
 	}
 
+	return b.String()
+}
+
+// textLines renders where a none: word occurs in the files' text: that
+// it occurs in none of them, or the files it is in and its first
+// sites.
+func textLines(a WordAnswer) string {
+	if a.TextFiles == 0 {
+		return fmt.Sprintf("text: nor is it in the text of any of the %d files indexed\n", a.TextSearched)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "text: in the text of %d of the %d files indexed:\n", a.TextFiles, a.TextSearched)
+	for _, t := range a.Text {
+		fmt.Fprintf(&b, "    %s\n", t)
+	}
+	if more := a.TextFiles - len(a.Text); more > 0 {
+		fmt.Fprintf(&b, "    +%d more files\n", more)
+	}
 	return b.String()
 }
 
