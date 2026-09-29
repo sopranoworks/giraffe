@@ -144,6 +144,12 @@ type Entry struct {
 	// nothing about the declaration under them. Display only, like
 	// Callers; 0 when every site is this declaration's own.
 	CallersElsewhere int
+	// Members are the declarations whose language position names this
+	// one as their owner, in its own directory (directive 073): a type's
+	// methods and fields, which a reader handed the type otherwise opens
+	// its file to see. Display only, attached at query time like
+	// Callers (query.WithMembers); nil when nothing names it.
+	Members []Entry
 	// Foreign marks an entry from a root other than the invocation's own
 	// (directive 072; query.Foreign stamps it): the one place §21 C-6's
 	// hiding of unexported declarations still applies. Within the home

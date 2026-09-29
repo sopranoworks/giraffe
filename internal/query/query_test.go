@@ -1073,3 +1073,25 @@ func TestWithCallers_AttributesAmongSeveralDeclarations(t *testing.T) {
 		t.Errorf("got callers %+v elsewhere %d, want a.go:1 and 1 elsewhere", got.Callers, got.CallersElsewhere)
 	}
 }
+
+// Directive 073: a type carries the declarations whose owning position
+// names it, in its own directory, in source order; a member of another
+// directory's type of the same name does not count.
+func TestWithMembers(t *testing.T) {
+	pkg := entry.Position{Name: "package", Value: "m"}
+	src := Slice([]entry.Entry{
+		{Path: "m/t.go", Name: "T", Kind: "type", Line: 3, EndLine: 9, Position: []entry.Position{pkg}, Exported: true},
+		{Path: "m/t.go", Name: "Get", Kind: "method", Line: 20, EndLine: 24, Position: []entry.Position{pkg, {Name: "receiver", Value: "T"}}, Exported: true},
+		{Path: "m/t.go", Name: "n", Kind: "field", Line: 4, Position: []entry.Position{pkg, {Name: "type", Value: "T"}}, Exported: true},
+		{Path: "o/t.go", Name: "Other", Kind: "method", Line: 5, EndLine: 6, Position: []entry.Position{{Name: "package", Value: "o"}, {Name: "receiver", Value: "T"}}, Exported: true},
+	})
+	target := entry.Entry{Path: "m/t.go", Name: "T", Kind: "type", Line: 3, EndLine: 9, Position: []entry.Position{pkg}}
+	WithMembers([]*entry.Entry{&target}, src)
+	var got []string
+	for _, m := range target.Members {
+		got = append(got, m.Name)
+	}
+	if strings.Join(got, ",") != "n,Get" {
+		t.Fatalf("members = %v, want [n Get]", got)
+	}
+}

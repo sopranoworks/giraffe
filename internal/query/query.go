@@ -798,6 +798,44 @@ func (f Filter) constrainsCallers() bool {
 	return ok
 }
 
+// WithMembers attaches to each entry of targets its members: the
+// entries in its own directory whose owning position (the second
+// position pair, which a method or field carries after the file's
+// shared one, §28 C-38) has its name (directive 073). One pass over
+// src for every target of the call, ordered by path and line. A file
+// entry, and an entry that is itself a member, has none.
+func WithMembers(targets []*entry.Entry, src Entries) {
+	want := make(map[string][]*entry.Entry)
+	for _, t := range targets {
+		if t.Kind == entry.KindFile || len(t.Position) > 1 {
+			continue
+		}
+		k := path.Dir(t.Path) + "\x00" + t.Name
+		want[k] = append(want[k], t)
+	}
+	if len(want) == 0 {
+		return
+	}
+	for e := range src.All() {
+		if len(e.Position) < 2 || e.Kind == entry.KindFile || !visible(e) {
+			continue
+		}
+		for _, t := range want[path.Dir(e.Path)+"\x00"+e.Position[1].Value] {
+			t.Members = append(t.Members, e)
+		}
+	}
+	for _, ts := range want {
+		for _, t := range ts {
+			sort.SliceStable(t.Members, func(i, j int) bool {
+				if t.Members[i].Path != t.Members[j].Path {
+					return t.Members[i].Path < t.Members[j].Path
+				}
+				return t.Members[i].Line < t.Members[j].Line
+			})
+		}
+	}
+}
+
 // WithCallers returns e carrying where its name is called (directive
 // 050), ordered for a reader who will see a bounded prefix of the list
 // (orderCallers). One key read; the caller decides which entries are

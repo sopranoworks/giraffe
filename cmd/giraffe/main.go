@@ -460,6 +460,7 @@ func runFind(words []string, opts options, st searchState) int {
 	for _, a := range answers {
 		withCallers(a.Matches, page, st.entries)
 	}
+	withMembers(answers, page, st.entries)
 	summary.Sources = st.exactSources(words, answers)
 	fmt.Print(output.FormatWords(summary, answers, page))
 	return 0
@@ -479,6 +480,19 @@ func withCallers(matches []entry.Entry, page int, src query.Entries) {
 	for i := 0; i < len(matches) && i < page*output.PageSize; i++ {
 		matches[i] = query.WithCallers(matches[i], src)
 	}
+}
+
+// withMembers attaches a type's members (directive 073) to the entries
+// page can print, in every answer, with one pass over the index; the
+// same window withCallers enriches.
+func withMembers(answers []output.WordAnswer, page int, src query.Entries) {
+	var targets []*entry.Entry
+	for _, a := range answers {
+		for i := 0; i < len(a.Matches) && i < page*output.PageSize; i++ {
+			targets = append(targets, &a.Matches[i])
+		}
+	}
+	query.WithMembers(targets, src)
 }
 
 // maxSources caps how many exact matches ## source reads from disk: the
