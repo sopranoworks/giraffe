@@ -12,9 +12,9 @@
 //   so the skill listing is whatever that copy holds — skills: 'all';
 // - the prompt is the task text and nothing else. How the agent learns
 //   giraffe exists is the thing tested, so this script says nothing
-//   about it: configuration B puts one line in the corpus's CLAUDE.md,
-//   C also installs the skill in the curated home, A does neither and
-//   has no binary (docker-run-faithful.sh does all three).
+//   about it: configuration B puts the binary on PATH, C also installs
+//   the skill in the curated home, A does neither (docker-run-faithful.sh
+//   does all three). No configuration touches the corpus's CLAUDE.md.
 //
 // MCP stays closed: strictMcpConfig with no mcpServers, as 029 wanted,
 // which no longer needs settingSources [] to hold.
