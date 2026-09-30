@@ -882,6 +882,26 @@ func WithMembers(targets []*entry.Entry, src Entries) {
 	for _, ts := range files {
 		want["\x00file\x00"+ts[0].Path] = ts
 	}
+	// A type's member called from outside the type's directory carries
+	// those call sites (directive 073): where the rest of the code uses
+	// the type, which a reader handed it looked for next.
+	for k, ts := range want {
+		if strings.HasPrefix(k, "\x00file\x00") {
+			continue
+		}
+		for _, t := range ts {
+			dir := path.Dir(t.Path)
+			for i, m := range t.Members {
+				var outside []entry.Call
+				for _, c := range WithCallers(m, src).Callers {
+					if !c.Test && path.Dir(c.Path) != dir {
+						outside = append(outside, c)
+					}
+				}
+				t.Members[i].Callers = outside
+			}
+		}
+	}
 	for _, ts := range want {
 		for _, t := range ts {
 			sort.SliceStable(t.Members, func(i, j int) bool {

@@ -816,6 +816,9 @@ func resultLine(e entry.Entry, words []string, showProject, showLang bool, extVa
 // line names; the rest are a count.
 const maxMembers = 20
 
+// maxMemberSites bounds how many outside call sites a member carries.
+const maxMemberSites = 2
+
 // membersLine renders a declaration's members (directive 073) on one
 // line, name and range each, in source order: what the reader would
 // open the file for to see the shape of a type before reading any of
@@ -833,6 +836,19 @@ func membersLine(members []entry.Entry, file bool) string {
 	parts := make([]string, len(shown))
 	for i, m := range shown {
 		parts[i] = m.Name + " " + m.LineRange()
+		// A member's call sites outside its type's directory, up to
+		// maxMemberSites (directive 073).
+		if len(m.Callers) > 0 && !file {
+			var sites []string
+			for j, c := range m.Callers {
+				if j == maxMemberSites {
+					sites = append(sites, fmt.Sprintf("+%d", len(m.Callers)-j))
+					break
+				}
+				sites = append(sites, c.Place())
+			}
+			parts[i] += " ← " + strings.Join(sites, ", ")
+		}
 	}
 	label := "members"
 	if file {
