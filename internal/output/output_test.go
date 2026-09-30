@@ -799,11 +799,11 @@ func TestFormatWords_CommandPrintedOnce(t *testing.T) {
 func TestFormatWords_NoneWithText(t *testing.T) {
 	s := Summary{Commit: "abc1234", Symbols: 10, Call: Call{Words: []string{"smtp"}}}
 	out := FormatWords(s, []WordAnswer{{Word: "smtp", Words: []string{"smtp"}, TextSearched: 7}}, 1)
-	if !strings.Contains(out, "none: no name, doc comment or path among the index's 10 entries contains smtp\ntext: nor is it in the text of any of the 7 files indexed\n") {
+	if !strings.Contains(out, "none: no name, doc comment or path among the index's 10 entries contains smtp\ntext: nor is it in the text of any of the 7 source files indexed\n") {
 		t.Fatalf("none with an empty text search:\n%s", out)
 	}
 	out = FormatWords(s, []WordAnswer{{Word: "smtp", Words: []string{"smtp"}, TextSearched: 7, TextFiles: 2, Text: []string{"a.go:3: x := \"smtp\""}}}, 1)
-	if !strings.Contains(out, "text: in the text of 2 of the 7 files indexed:\n    a.go:3: x := \"smtp\"\n    +1 more files\n") {
+	if !strings.Contains(out, "text: in the text of 2 of the 7 source files indexed:\n    a.go:3: x := \"smtp\"\n    +1 more files\n") {
 		t.Fatalf("none with text sites:\n%s", out)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"giraffe/internal/entry"
 	"giraffe/internal/index"
@@ -446,7 +447,7 @@ func runFind(words []string, opts options, st searchState) int {
 	}
 	for _, word := range words {
 		a := output.WordAnswer{Word: word, Words: []string{word}, Matches: query.Search(st.entries, word, filter)}
-		if len(a.Matches) == 0 && len(filter) == 0 {
+		if (len(a.Matches) == 0 || !nameLike(word)) && len(filter) == 0 {
 			a.Text, a.TextFiles, a.TextSearched = st.textSites(word)
 		}
 		if len(a.Matches) == 0 {
@@ -548,22 +549,39 @@ func (st searchState) exactSources(words []string, answers []output.WordAnswer) 
 	return out
 }
 
-// maxTextSites bounds how many sites a none: word's text: lines name,
-// one per file.
-const maxTextSites = 5
+// nameLike reports whether word could be a declaration's name: letters,
+// digits and underscores only. A word with anything else in it — a
+// hyphen, a quote, a dot — is text a name cannot hold (a string, a
+// message, a key), so its answer also says where it is in the files'
+// text, whatever names or doc comments it matched (directive 073).
+func nameLike(word string) bool {
+	for _, r := range word {
+		if !(r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)) {
+			return false
+		}
+	}
+	return true
+}
 
-// textSites reads every file the index holds, under its root, for word
-// as a case-insensitive substring of its text (directive 073): a word no
-// name, doc comment or path contains may still be in a function body or
-// a string, and the answer says so, or says it is nowhere, instead of
-// leaving that search to grep. It returns the first site of each of the
-// first maxTextSites files that hold it, how many files hold it, and
-// how many were read.
+// maxTextSites bounds how many sites a word's text: lines name, one
+// per file.
+const maxTextSites = 8
+
+// textSites reads the source files the index holds — those with a
+// language — under their root, for word as a case-insensitive
+// substring of their text (directive 073): a word no name, doc comment
+// or path contains may still be in a function body or a string, and
+// the answer says so, or says it is nowhere, instead of leaving that
+// search to grep. Files with no language (documentation, data) are not
+// read. Code files come before test files. It returns the first site
+// of each of the first maxTextSites files that hold it, how many files
+// hold it, and how many were read.
 func (st searchState) textSites(word string) (sites []string, files, searched int) {
 	needle := []byte(strings.ToLower(word))
+	var testSites []string
 	for _, r := range st.roots {
 		for e := range r.src.All() {
-			if e.Kind != entry.KindFile {
+			if e.Kind != entry.KindFile || e.Lang == "" {
 				continue
 			}
 			content, err := os.ReadFile(filepath.Join(r.dir, filepath.FromSlash(e.Path)))
@@ -571,26 +589,34 @@ func (st searchState) textSites(word string) (sites []string, files, searched in
 				continue
 			}
 			searched++
-			lower := bytes.ToLower(content)
-			i := bytes.Index(lower, needle)
+			i := bytes.Index(bytes.ToLower(content), needle)
 			if i < 0 {
 				continue
 			}
 			files++
-			if len(sites) < maxTextSites {
-				line := 1 + bytes.Count(content[:i], []byte("\n"))
-				start := bytes.LastIndexByte(content[:i], '\n') + 1
-				end := bytes.IndexByte(content[i:], '\n')
-				if end < 0 {
-					end = len(content) - i
-				}
-				text := strings.TrimSpace(string(content[start : i+end]))
-				if len(text) > 160 {
-					text = text[:160]
-				}
-				sites = append(sites, fmt.Sprintf("%s:%d: %s", e.Path, line, text))
+			line := 1 + bytes.Count(content[:i], []byte("\n"))
+			start := bytes.LastIndexByte(content[:i], '\n') + 1
+			end := bytes.IndexByte(content[i:], '\n')
+			if end < 0 {
+				end = len(content) - i
+			}
+			text := strings.TrimSpace(string(content[start : i+end]))
+			if len(text) > 160 {
+				text = text[:160]
+			}
+			site := fmt.Sprintf("%s:%d: %s", e.Path, line, text)
+			if e.Test {
+				testSites = append(testSites, site)
+			} else if len(sites) < maxTextSites {
+				sites = append(sites, site)
 			}
 		}
+	}
+	for _, t := range testSites {
+		if len(sites) == maxTextSites {
+			break
+		}
+		sites = append(sites, t)
 	}
 	return sites, files, searched
 }

@@ -199,3 +199,13 @@ func TestWordDir(t *testing.T) {
 		t.Errorf("a call already narrowed by path: got %q", d)
 	}
 }
+
+// Directive 073: a word only text can hold is looked for in the files'
+// text whatever it matched; a word that could be a name is not.
+func TestNameLike(t *testing.T) {
+	for w, want := range map[string]bool{"Tell": true, "mailbox_full": true, "mailbox-full": false, `"x"`: false, "a.b": false} {
+		if got := nameLike(w); got != want {
+			t.Errorf("nameLike(%q) = %v, want %v", w, got, want)
+		}
+	}
+}

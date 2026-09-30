@@ -528,6 +528,9 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 				shownBefore[entryKey(e)] = true
 				b.WriteString(resultLine(e, a.Words, s.ShowProject, s.ShowLang, s.ExtVaries))
 			}
+			if a.TextSearched > 0 {
+				b.WriteString(textLines(a))
+			}
 		case a.Word != "" && len(a.Matches) == 0 && len(a.Counts) > 0:
 			b.WriteString(resultsHeader)
 			b.WriteString(countsLine(a.Words, a.Counts))
@@ -588,11 +591,14 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 // it occurs in none of them, or the files it is in and its first
 // sites.
 func textLines(a WordAnswer) string {
+	if a.TextFiles == 0 && len(a.Matches) == 0 {
+		return fmt.Sprintf("text: nor is it in the text of any of the %d source files indexed\n", a.TextSearched)
+	}
 	if a.TextFiles == 0 {
-		return fmt.Sprintf("text: nor is it in the text of any of the %d files indexed\n", a.TextSearched)
+		return fmt.Sprintf("text: in the text of none of the %d source files indexed\n", a.TextSearched)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "text: in the text of %d of the %d files indexed:\n", a.TextFiles, a.TextSearched)
+	fmt.Fprintf(&b, "text: in the text of %d of the %d source files indexed:\n", a.TextFiles, a.TextSearched)
 	for _, t := range a.Text {
 		fmt.Fprintf(&b, "    %s\n", t)
 	}
