@@ -863,3 +863,17 @@ func TestCallersLine_TestsCounted(t *testing.T) {
 		t.Fatalf("tests only:\n%s", got)
 	}
 }
+
+// Directive 073: a page carries its top result's file whole, numbered,
+// under ## file, on page 1 only.
+func TestFormatWords_FileSection(t *testing.T) {
+	s := Summary{Commit: "abc1234", Symbols: 1, Call: Call{Words: []string{"x"}}, File: &FileText{Path: "a/b.go", Lines: []string{"package b", "func X() {}"}}}
+	ms := []entry.Entry{{Path: "a/b.go", Name: "b", Kind: entry.KindFile, Exported: true}}
+	out := FormatWords(s, []WordAnswer{{Word: "x", Words: []string{"x"}, Matches: ms}}, 1)
+	if !strings.Contains(out, "\n## file: a/b.go\n   1  package b\n   2  func X() {}\n") {
+		t.Fatalf("no ## file section:\n%s", out)
+	}
+	if out2 := FormatWords(s, []WordAnswer{{Word: "x", Words: []string{"x"}, Matches: ms}}, 2); strings.Contains(out2, "## file") {
+		t.Fatalf("## file on page 2:\n%s", out2)
+	}
+}

@@ -470,6 +470,9 @@ func runFind(words []string, opts options, st searchState) int {
 	}
 	withMembers(answers, page, st.entries)
 	summary.Sources = st.exactSources(words, answers)
+	if page == 1 {
+		summary.File = st.topFile(answers)
+	}
 	fmt.Print(output.FormatWords(summary, answers, page))
 	return 0
 }
@@ -501,6 +504,30 @@ func withMembers(answers []output.WordAnswer, page int, src query.Entries) {
 		}
 	}
 	query.WithMembers(targets, src)
+}
+
+// topFileBudget is the largest file a page carries whole.
+const topFileBudget = 4096
+
+// topFile is the first answer's top result, read whole, when that result
+// is a file no larger than topFileBudget (directive 073): the words
+// matched a file best, and a small file is shown rather than named.
+func (st searchState) topFile(answers []output.WordAnswer) *output.FileText {
+	if len(answers) == 0 || len(answers[0].Matches) == 0 {
+		return nil
+	}
+	e := answers[0].Matches[0]
+	if e.Kind != entry.KindFile || e.Size > topFileBudget {
+		return nil
+	}
+	for _, r := range st.roots {
+		content, err := os.ReadFile(filepath.Join(r.dir, filepath.FromSlash(e.Path)))
+		if err != nil || len(content) > topFileBudget {
+			continue
+		}
+		return &output.FileText{Path: e.Path, Lines: strings.Split(strings.TrimSuffix(string(content), "\n"), "\n")}
+	}
+	return nil
 }
 
 // maxSources caps how many exact matches ## source reads from disk: the

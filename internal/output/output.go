@@ -59,6 +59,13 @@ type Source struct {
 	Lines []string
 }
 
+// FileText is a whole file a page carries under ## file (directive
+// 073): its repo-relative path and its lines.
+type FileText struct {
+	Path  string
+	Lines []string
+}
+
 // sourceBudget bounds ## source the way byteBudget bounds a page.
 const sourceBudget = 2000
 
@@ -219,6 +226,10 @@ type Summary struct {
 	// source): printed under ## source after the answers, within
 	// sourceBudget.
 	Sources []Source
+	// File is the answer's top result when that result is a small file
+	// (directive 073), whole: a file is the one result whose text the
+	// page otherwise only names. Page 1 only; nil otherwise.
+	File *FileText
 	// Languages and ByExt are the two ## index breakdowns (§25 C-24):
 	// what turns "0 symbols" into "go 0 | unknown 181099" for a
 	// repository giraffe cannot extract from at all, plus the raw
@@ -633,6 +644,13 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 	if len(s.Sources) > 0 && page == 1 {
 		b.WriteString("\n## source\n")
 		b.WriteString(sourceSection(s.Sources, s.Call.Words))
+	}
+
+	if s.File != nil && page == 1 {
+		fmt.Fprintf(&b, "\n## file: %s\n", s.File.Path)
+		for i, l := range s.File.Lines {
+			fmt.Fprintf(&b, "%4d  %s\n", i+1, l)
+		}
 	}
 
 	if len(s.Warnings) > 0 || len(s.Notices) > 0 || len(s.Exclusions) > 0 {
