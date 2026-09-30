@@ -828,3 +828,16 @@ func TestFormatWords_LayoutOnNowhere(t *testing.T) {
 		t.Fatalf("layout on a page with every word found:\n%s", found)
 	}
 }
+
+// Directive 073: a declaration the code calls lists the code's sites
+// and counts the tests'; one only tests call lists the tests'.
+func TestCallersLine_TestsCounted(t *testing.T) {
+	code := entry.Call{Path: "a/a.go", Line: 3, In: "F", Text: "X()"}
+	test := entry.Call{Path: "a/a_test.go", Line: 9, In: "TestF", Text: "X()", Test: true}
+	if got := callersLine([]entry.Call{code, test, test}, 0); !strings.Contains(got, "a/a.go:3 in F: X()\n    +2 in tests\n") || strings.Contains(got, "a_test.go") {
+		t.Fatalf("code and tests:\n%s", got)
+	}
+	if got := callersLine([]entry.Call{test}, 0); !strings.Contains(got, "a/a_test.go:9 in TestF") {
+		t.Fatalf("tests only:\n%s", got)
+	}
+}

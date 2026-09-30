@@ -597,7 +597,14 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 
 		if len(remainder) > 0 {
 			b.WriteString(header("truncated"))
-			b.WriteString(truncatedLines(remainder, page, s.Call, printed))
+			if len(answers) > 1 && len(a.Words) == 1 && a.Word == a.Words[0] {
+				// A single word's block among several: its next page is
+				// the call's, and narrowing is the several-word block's
+				// to offer (directive 073).
+				b.WriteString(nextPageLine(remainder, page, s.Call, printed))
+			} else {
+				b.WriteString(truncatedLines(remainder, page, s.Call, printed))
+			}
 		}
 
 		// §22: `## truncated` already tells a caller how to narrow the
@@ -673,6 +680,17 @@ func textLines(a WordAnswer) string {
 		fmt.Fprintf(&b, "    +%d more files\n", more)
 	}
 	return b.String()
+}
+
+// nextPageLine is truncatedLines' first line alone: the page, the count
+// left, and the next page's command, once per page like every command.
+func nextPageLine(remainder []entry.Entry, page int, call Call, printed map[string]bool) string {
+	c := call.Command(call.Query, page+1)
+	if printed[c] {
+		c = "as above"
+	}
+	printed[c] = true
+	return fmt.Sprintf("page %d, %d more: %s\n", page, len(remainder), c)
 }
 
 // entryKey identifies an entry across the words of one answer.
@@ -849,6 +867,23 @@ func callersLine(calls []entry.Call, elsewhere int) string {
 		fmt.Fprintf(&b, "  callers: none of its own; %d of the name elsewhere\n", elsewhere)
 		return b.String()
 	}
+	// A call from a test file is counted, not listed, when the code
+	// calls the declaration too (directive 073): the code's sites are
+	// where it is used, and a test's line repeats one of them.
+	var code []entry.Call
+	tests := 0
+	for _, c := range calls {
+		if c.Test {
+			tests++
+			continue
+		}
+		code = append(code, c)
+	}
+	if len(code) > 0 {
+		calls = code
+	} else {
+		tests = 0
+	}
 	b.WriteString("  callers:\n")
 	for i, c := range calls {
 		if i == maxCallers {
@@ -860,6 +895,9 @@ func callersLine(calls []entry.Call, elsewhere int) string {
 			continue
 		}
 		fmt.Fprintf(&b, "    %s: %s\n", c.Place(), c.Text)
+	}
+	if tests > 0 {
+		fmt.Fprintf(&b, "    +%d in tests\n", tests)
 	}
 	if elsewhere > 0 {
 		fmt.Fprintf(&b, "    +%d of the name elsewhere\n", elsewhere)
