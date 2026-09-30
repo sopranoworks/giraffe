@@ -807,3 +807,24 @@ func TestFormatWords_NoneWithText(t *testing.T) {
 		t.Fatalf("none with text sites:\n%s", out)
 	}
 }
+
+// Directive 073: a page where a word was found nowhere says what the
+// repository is made of — its top-level directories, each with its doc
+// line — and a page where every word was found does not.
+func TestFormatWords_LayoutOnNowhere(t *testing.T) {
+	entries := []entry.Entry{
+		{Path: "actor/a.go", Name: "a", Kind: entry.KindFile, Doc: "Package actor runs actors."},
+		{Path: "actor/x.go", Name: "X", Kind: "func", Line: 1},
+		{Path: "cluster/c.go", Name: "C", Kind: "func", Line: 1},
+	}
+	s := Summarize(slices.Values(entries), "abc1234", 0, nil, nil, nil, nil)
+	s.Call = Call{Words: []string{"smtp"}}
+	out := FormatWords(s, []WordAnswer{{Word: "smtp", Words: []string{"smtp"}, TextSearched: 3}}, 1)
+	if !strings.Contains(out, "\n## layout\nactor/ 2 — Package actor runs actors.\ncluster/ 1\n") {
+		t.Fatalf("no layout:\n%s", out)
+	}
+	found := FormatWords(s, []WordAnswer{{Word: "x", Words: []string{"x"}, Matches: entries[1:2]}}, 1)
+	if strings.Contains(found, "## layout") {
+		t.Fatalf("layout on a page with every word found:\n%s", found)
+	}
+}

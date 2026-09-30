@@ -111,6 +111,9 @@ func Extract(f scanner.File, project string, assignments map[string]string) (ent
 
 	decls := []entry.Entry{entry.FileEntry(f.Path, project, langName)}
 	decls[0].Test = test
+	// A file's own doc is its package clause's (directive 073): what the
+	// package is for, said once by its author.
+	decls[0].Doc = firstLine(file.Doc)
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:

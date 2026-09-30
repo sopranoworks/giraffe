@@ -226,8 +226,13 @@ type Summary struct {
 	// unlike the guess an extension-to-language table would encode.
 	// Pre-rendered here, not left as raw counts, so Format stays a pure
 	// renderer.
-	Languages  string
-	ByExt      string
+	Languages string
+	ByExt     string
+	// Layout is the repository's top-level directories, most entries
+	// first, each with the doc line of its shallowest code file that has
+	// one (directive 073): what the repository is made of, printed under
+	// ## layout on a page where a word was found nowhere.
+	Layout     []string
 	Warnings   []string // parse failures; rendered "unparsed: ..."
 	Notices    []string // other non-fatal cautions (e.g. an unignored local cache); rendered as-is
 	Exclusions []string
@@ -261,6 +266,9 @@ func Summarize(entries iter.Seq[entry.Entry], commit string, dispatched int, war
 		langCounts[l] = 0 // seeded so a known language with no matches still reads as "0", not absent
 	}
 	extCounts := make(map[string]int)
+	dirCounts := make(map[string]int)
+	dirDoc := make(map[string]string)
+	dirDocDepth := make(map[string]int)
 	// One pass over the whole entry set computes every whole-index total
 	// §7/§11 wants on the ## index line (§30 C-46: entries stream lazily
 	// from the store here — this still visits every entry, since these
@@ -281,6 +289,16 @@ func Summarize(entries iter.Seq[entry.Entry], commit string, dispatched int, war
 			extLabel = noExt
 		}
 		extCounts[extLabel]++
+		if i := strings.IndexByte(e.Path, '/'); i > 0 {
+			top := e.Path[:i]
+			dirCounts[top]++
+			if e.Kind == entry.KindFile && !e.Test && e.Doc != "" {
+				depth := strings.Count(e.Path, "/")
+				if d, ok := dirDocDepth[top]; !ok || depth < d || depth == d && e.Path < dirDoc[top+"\x00path"] {
+					dirDoc[top], dirDocDepth[top], dirDoc[top+"\x00path"] = e.Doc, depth, e.Path
+				}
+			}
+		}
 		if e.Lang != "" {
 			languages[e.Lang] = true
 			if extsByLang[e.Lang] == nil {
@@ -331,10 +349,40 @@ func Summarize(entries iter.Seq[entry.Entry], commit string, dispatched int, war
 		ExtVaries:            extVaries,
 		Languages:            languagesLine,
 		ByExt:                byExtLine,
+		Layout:               layoutLines(dirCounts, dirDoc),
 		Warnings:             warnings,
 		Notices:              notices,
 		Exclusions:           exclusions,
 	}
+}
+
+// maxLayout caps how many directories ## layout names.
+const maxLayout = 16
+
+// layoutLines renders ## layout: each top-level directory with its
+// entry count and, when it has one, its doc line, most entries first.
+func layoutLines(counts map[string]int, docs map[string]string) []string {
+	dirs := make([]string, 0, len(counts))
+	for d := range counts {
+		dirs = append(dirs, d)
+	}
+	sort.Slice(dirs, func(i, j int) bool {
+		if counts[dirs[i]] != counts[dirs[j]] {
+			return counts[dirs[i]] > counts[dirs[j]]
+		}
+		return dirs[i] < dirs[j]
+	})
+	if len(dirs) > maxLayout {
+		dirs = dirs[:maxLayout]
+	}
+	lines := make([]string, len(dirs))
+	for i, d := range dirs {
+		lines[i] = fmt.Sprintf("%s/ %d", d, counts[d])
+		if doc := docs[d]; doc != "" {
+			lines[i] += " — " + doc
+		}
+	}
+	return lines
 }
 
 // maxBreakdownShown caps how many buckets ## index names outright in
@@ -566,6 +614,13 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 		}
 	}
 
+	if len(s.Layout) > 0 && page == 1 && anyNowhere(answers) {
+		b.WriteString("\n## layout\n")
+		for _, l := range s.Layout {
+			fmt.Fprintf(&b, "%s\n", l)
+		}
+	}
+
 	if len(s.Sources) > 0 && page == 1 {
 		b.WriteString("\n## source\n")
 		b.WriteString(sourceSection(s.Sources, s.Call.Words))
@@ -585,6 +640,18 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 	}
 
 	return b.String()
+}
+
+// anyNowhere reports whether a word of the call was found nowhere: in
+// no name, doc comment or path, and, where its text was searched, in no
+// file's text either.
+func anyNowhere(answers []WordAnswer) bool {
+	for _, a := range answers {
+		if a.Word != "" && len(a.Counts) == 0 && len(a.Matches) == 0 && a.TextFiles == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // textLines renders where a none: word occurs in the files' text: that
