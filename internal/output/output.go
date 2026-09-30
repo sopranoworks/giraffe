@@ -504,7 +504,13 @@ type WordAnswer struct {
 	// search the none: answer used to leave to grep. TextFiles counts
 	// the files, TextSearched how many were read; Text holds the first
 	// sites, file:line: the line.
-	Text         []string
+	Text []string
+	// UsedFrom is, for the block of a directory a word names, where the
+	// code outside that directory calls into it (directive 073): each
+	// calling directory with its count of call sites, most first. Nil
+	// when not computed; empty when nothing outside calls in.
+	UsedFrom     []string
+	UsedFromDone bool
 	TextFiles    int
 	TextSearched int
 }
@@ -598,6 +604,13 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 			}
 			if a.TextSearched > 0 {
 				b.WriteString(textLines(a))
+			}
+			if a.UsedFromDone {
+				if len(a.UsedFrom) == 0 {
+					fmt.Fprintf(&b, "used from outside %s: nowhere — every call into it is from inside it\n", strings.TrimPrefix(a.Word, "in "))
+				} else {
+					fmt.Fprintf(&b, "used from outside %s: %s\n", strings.TrimPrefix(a.Word, "in "), strings.Join(a.UsedFrom, " | "))
+				}
 			}
 		case a.Word != "" && len(a.Matches) == 0 && len(a.Counts) > 0:
 			b.WriteString(resultsHeader)

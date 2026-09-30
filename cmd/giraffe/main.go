@@ -442,7 +442,8 @@ func runFind(words []string, opts options, st searchState) int {
 			}
 			near["path"] = []string{dir}
 			inDir, _ := query.Ranked(st.entries, words, near)
-			answers = append(answers, output.WordAnswer{Word: "in " + dir, Words: words, Matches: inDir})
+			usedFrom := st.usedFrom(dir)
+			answers = append(answers, output.WordAnswer{Word: "in " + dir, Words: words, Matches: inDir, UsedFrom: usedFrom, UsedFromDone: true})
 		}
 	}
 	for _, word := range words {
@@ -538,6 +539,58 @@ func (st searchState) topFile(answers []output.WordAnswer) *output.FileText {
 		return &output.FileText{Path: e.Path, Lines: strings.Split(strings.TrimSuffix(string(content), "\n"), "\n")}
 	}
 	return nil
+}
+
+// maxUsedFrom bounds how many calling directories a used-from line
+// names; usedFromScan bounds how many of the directory's declarations
+// are looked up for their callers.
+const (
+	maxUsedFrom  = 6
+	usedFromScan = 400
+)
+
+// usedFrom is where the code outside dir calls its declarations
+// (directive 073): each calling directory and its number of call
+// sites, most first, from the callers the index already holds —
+// what a reader who found a package greps for next (who uses it?).
+// Test files are not counted.
+func (st searchState) usedFrom(dir string) []string {
+	counts := make(map[string]int)
+	n := 0
+	for _, e := range query.Browse(st.entries, query.Filter{"path": []string{dir}}) {
+		if e.Kind == entry.KindFile || e.Test {
+			continue
+		}
+		if n == usedFromScan {
+			break
+		}
+		n++
+		for _, c := range query.WithCallers(e, st.entries).Callers {
+			if c.Test || strings.HasPrefix(c.Path, dir+"/") {
+				continue
+			}
+			counts[path.Dir(c.Path)]++
+		}
+	}
+	dirs := make([]string, 0, len(counts))
+	for d := range counts {
+		dirs = append(dirs, d)
+	}
+	sort.Slice(dirs, func(i, j int) bool {
+		if counts[dirs[i]] != counts[dirs[j]] {
+			return counts[dirs[i]] > counts[dirs[j]]
+		}
+		return dirs[i] < dirs[j]
+	})
+	out := make([]string, 0, maxUsedFrom+1)
+	for i, d := range dirs {
+		if i == maxUsedFrom {
+			out = append(out, fmt.Sprintf("+%d more", len(dirs)-i))
+			break
+		}
+		out = append(out, fmt.Sprintf("%s %d", d, counts[d]))
+	}
+	return out
 }
 
 // maxSources caps how many exact matches ## source reads from disk: the
