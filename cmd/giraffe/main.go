@@ -461,6 +461,9 @@ func runFind(words []string, opts options, st searchState) int {
 	// 065 g47) is attached to the entries a page will print, and no
 	// other: a broad word ranks thousands, the page shows eight, and a
 	// callers list is a store read each.
+	for i := range answers {
+		answers[i].Matches = query.CodeFirst(answers[i].Matches)
+	}
 	for _, a := range answers {
 		withCallers(a.Matches, page, st.entries)
 	}

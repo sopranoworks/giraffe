@@ -798,6 +798,26 @@ func (f Filter) constrainsCallers() bool {
 	return ok
 }
 
+// CodeFirst orders es with every result from a test file after every
+// result that is not, each side keeping its own order (directive 073):
+// a test's name carries the words of what it tests and more, so it
+// outranks the code it tests, and a reader looking for where something
+// is wants the code first. Tests stay results; they come after.
+func CodeFirst(es []entry.Entry) []entry.Entry {
+	out := make([]entry.Entry, 0, len(es))
+	for _, e := range es {
+		if !e.Test {
+			out = append(out, e)
+		}
+	}
+	for _, e := range es {
+		if e.Test {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // WithMembers attaches to each entry of targets its members: the
 // entries in its own directory whose owning position (the second
 // position pair, which a method or field carries after the file's

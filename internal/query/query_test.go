@@ -1095,3 +1095,16 @@ func TestWithMembers(t *testing.T) {
 		t.Fatalf("members = %v, want [n Get]", got)
 	}
 }
+
+// Directive 073: results from test files follow the code's, each side
+// in its own order.
+func TestCodeFirst(t *testing.T) {
+	in := []entry.Entry{{Name: "T1", Test: true}, {Name: "A"}, {Name: "T2", Test: true}, {Name: "B"}}
+	var got []string
+	for _, e := range CodeFirst(in) {
+		got = append(got, e.Name)
+	}
+	if strings.Join(got, ",") != "A,B,T1,T2" {
+		t.Fatalf("CodeFirst = %v", got)
+	}
+}
