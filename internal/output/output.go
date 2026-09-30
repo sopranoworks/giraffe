@@ -480,6 +480,7 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 	// budget, the shared preamble counted against every one of them.
 	preamble := b.Len()
 	shownBefore := make(map[string]bool)
+	printed := make(map[string]bool) // commands already on this page
 	for _, a := range answers {
 		named := len(answers) > 1
 		header := func(section string) string {
@@ -533,7 +534,7 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 
 		if len(remainder) > 0 {
 			b.WriteString(header("truncated"))
-			b.WriteString(truncatedLines(remainder, page, s.Call))
+			b.WriteString(truncatedLines(remainder, page, s.Call, printed))
 		}
 
 		// §22: `## truncated` already tells a caller how to narrow the
@@ -926,7 +927,12 @@ func ShellWord(s string) string {
 // constraint: the distribution axis is not what this measures).
 // Files at the root have no directory to narrow to, so "." is not
 // offered.
-func truncatedLines(remainder []entry.Entry, page int, call Call) string {
+//
+// A command already printed on the page (every word's answer is the one
+// call, so its next page and its narrowings are the same commands) is
+// not printed again: the line keeps its count and says the command is
+// above.
+func truncatedLines(remainder []entry.Entry, page int, call Call, printed map[string]bool) string {
 	counts := make(map[string]int)
 	for _, e := range remainder {
 		if d := path.Dir(e.Path); d != "." {
@@ -948,9 +954,16 @@ func truncatedLines(remainder []entry.Entry, page int, call Call) string {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "page %d, %d more: %s\n", page, len(remainder), call.Command(call.Query, page+1))
+	command := func(c string) string {
+		if printed[c] {
+			return "as above"
+		}
+		printed[c] = true
+		return c
+	}
+	fmt.Fprintf(&b, "page %d, %d more: %s\n", page, len(remainder), command(call.Command(call.Query, page+1)))
 	for _, d := range dirs {
-		fmt.Fprintf(&b, "%d in %s: %s\n", counts[d], d, call.Command(call.narrowed(d), 1))
+		fmt.Fprintf(&b, "%d in %s: %s\n", counts[d], d, command(call.Command(call.narrowed(d), 1)))
 	}
 	return b.String()
 }
