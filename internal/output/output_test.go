@@ -823,6 +823,9 @@ func TestFormatWords_LayoutOnNowhere(t *testing.T) {
 	if !strings.Contains(out, "\n## layout\nactor/ 2 — Package actor runs actors.\ncluster/ 1\n") {
 		t.Fatalf("no layout:\n%s", out)
 	}
+	if strings.Index(out, "## layout") > strings.Index(out, "## results") {
+		t.Fatalf("layout after the answers:\n%s", out)
+	}
 	found := FormatWords(s, []WordAnswer{{Word: "x", Words: []string{"x"}, Matches: entries[1:2]}}, 1)
 	if strings.Contains(found, "## layout") {
 		t.Fatalf("layout on a page with every word found:\n%s", found)

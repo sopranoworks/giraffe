@@ -526,6 +526,15 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 	if s.ByExt != "" {
 		fmt.Fprintf(&b, "by ext:    %s\n", s.ByExt)
 	}
+	// ## layout follows the index block, ahead of the answers
+	// (directive 073): a reader who cuts the page short (head -100) still
+	// has what the repository is made of when a word was found nowhere.
+	if len(s.Layout) > 0 && page == 1 && anyNowhere(answers) {
+		b.WriteString("\n## layout\n")
+		for _, l := range s.Layout {
+			fmt.Fprintf(&b, "%s\n", l)
+		}
+	}
 
 	// §26 C-30: the byte budget is a safety limit, and a safety limit
 	// with exceptions is not one. Everything printed ahead of ## results
@@ -618,13 +627,6 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 			for _, line := range a.TryNext {
 				fmt.Fprintf(&b, "%s\n", line)
 			}
-		}
-	}
-
-	if len(s.Layout) > 0 && page == 1 && anyNowhere(answers) {
-		b.WriteString("\n## layout\n")
-		for _, l := range s.Layout {
-			fmt.Fprintf(&b, "%s\n", l)
 		}
 	}
 
