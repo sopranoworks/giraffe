@@ -1108,3 +1108,25 @@ func TestCodeFirst(t *testing.T) {
 		t.Fatalf("CodeFirst = %v", got)
 	}
 }
+
+// Directive 073: a file carries its outline — the declarations in it
+// that are not members, in source order.
+func TestWithMembers_FileOutline(t *testing.T) {
+	pkg := entry.Position{Name: "package", Value: "m"}
+	src := Slice([]entry.Entry{
+		{Path: "m/t.go", Name: "t", Kind: entry.KindFile, Exported: true},
+		{Path: "m/t.go", Name: "New", Kind: "func", Line: 12, EndLine: 14, Position: []entry.Position{pkg}, Exported: true},
+		{Path: "m/t.go", Name: "T", Kind: "type", Line: 3, EndLine: 9, Position: []entry.Position{pkg}, Exported: true},
+		{Path: "m/t.go", Name: "n", Kind: "field", Line: 4, Position: []entry.Position{pkg, {Name: "type", Value: "T"}}, Exported: true},
+		{Path: "m/u.go", Name: "U", Kind: "type", Line: 1, EndLine: 2, Position: []entry.Position{pkg}, Exported: true},
+	})
+	file := entry.Entry{Path: "m/t.go", Name: "t", Kind: entry.KindFile}
+	WithMembers([]*entry.Entry{&file}, src)
+	var got []string
+	for _, m := range file.Members {
+		got = append(got, m.Name)
+	}
+	if strings.Join(got, ",") != "T,New" {
+		t.Fatalf("outline = %v, want [T New]", got)
+	}
+}

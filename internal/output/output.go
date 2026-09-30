@@ -710,7 +710,7 @@ func resultLine(e entry.Entry, words []string, showProject, showLang bool, extVa
 	// 051 §1 added each site's own line (Text) and, since test files are
 	// indexed too, the sites this now lists include the tests: what the
 	// grep in 14 of round 9's 20 runs went to get.
-	if m := membersLine(e.Members); m != "" {
+	if m := membersLine(e.Members, e.Kind == entry.KindFile); m != "" {
 		line.WriteString(m)
 	}
 	if c := callersLine(e.Callers, e.CallersElsewhere); c != "" {
@@ -727,7 +727,9 @@ const maxMembers = 20
 // line, name and range each, in source order: what the reader would
 // open the file for to see the shape of a type before reading any of
 // it, with the range to read one member alone. "" when it has none.
-func membersLine(members []entry.Entry) string {
+//
+// A file's members are its outline, labelled so.
+func membersLine(members []entry.Entry, file bool) string {
 	if len(members) == 0 {
 		return ""
 	}
@@ -739,7 +741,11 @@ func membersLine(members []entry.Entry) string {
 	for i, m := range shown {
 		parts[i] = m.Name + " " + m.LineRange()
 	}
-	line := "  members: " + strings.Join(parts, " | ")
+	label := "members"
+	if file {
+		label = "outline"
+	}
+	line := "  " + label + ": " + strings.Join(parts, " | ")
 	if more := len(members) - len(shown); more > 0 {
 		line += fmt.Sprintf(" | +%d more", more)
 	}

@@ -824,25 +824,43 @@ func CodeFirst(es []entry.Entry) []entry.Entry {
 // shared one, §28 C-38) has its name (directive 073). One pass over
 // src for every target of the call, ordered by path and line. A file
 // entry, and an entry that is itself a member, has none.
+//
+// A file entry's members are its outline (directive 073): the
+// declarations in it that are not themselves members, in source order —
+// what a reader handed a file opens it to see first.
 func WithMembers(targets []*entry.Entry, src Entries) {
 	want := make(map[string][]*entry.Entry)
+	files := make(map[string][]*entry.Entry)
 	for _, t := range targets {
-		if t.Kind == entry.KindFile || len(t.Position) > 1 {
+		if t.Kind == entry.KindFile {
+			files[t.Path] = append(files[t.Path], t)
+			continue
+		}
+		if len(t.Position) > 1 {
 			continue
 		}
 		k := path.Dir(t.Path) + "\x00" + t.Name
 		want[k] = append(want[k], t)
 	}
-	if len(want) == 0 {
+	if len(want) == 0 && len(files) == 0 {
 		return
 	}
 	for e := range src.All() {
-		if len(e.Position) < 2 || e.Kind == entry.KindFile || !visible(e) {
+		if e.Kind == entry.KindFile || !visible(e) {
+			continue
+		}
+		if len(e.Position) < 2 {
+			for _, t := range files[e.Path] {
+				t.Members = append(t.Members, e)
+			}
 			continue
 		}
 		for _, t := range want[path.Dir(e.Path)+"\x00"+e.Position[1].Value] {
 			t.Members = append(t.Members, e)
 		}
+	}
+	for _, ts := range files {
+		want["\x00file\x00"+ts[0].Path] = ts
 	}
 	for _, ts := range want {
 		for _, t := range ts {
