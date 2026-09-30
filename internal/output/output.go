@@ -66,8 +66,11 @@ type FileText struct {
 	Lines []string
 }
 
-// sourceBudget bounds ## source the way byteBudget bounds a page.
-const sourceBudget = 2000
+// sourceBudget bounds ## source the way byteBudget bounds a page. Directive
+// 073: 6000, so a declaration typed exactly — a hundred-line method —
+// prints whole rather than cut at its head, where the reader then
+// opened the file for the rest.
+const sourceBudget = 6000
 
 // sourceSection renders ## source: each source's name, path and range,
 // paste-ready like a result line, then its lines verbatim, until

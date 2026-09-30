@@ -742,7 +742,7 @@ func TestTruncated_PrintsPasteableCommands(t *testing.T) {
 func TestFormat_SourceLongerThanItsRoomShowsTheLinesCarryingTheWords(t *testing.T) {
 	lines := make([]string, 200)
 	for i := range lines {
-		lines[i] = fmt.Sprintf("\tstatement%03d := compute(%d)", i, i)
+		lines[i] = fmt.Sprintf("\tstatement%03d := compute(%d) // longer than the source budget over two hundred lines", i, i)
 	}
 	lines[0] = "func printPod(pod *Pod) {"
 	lines[150] = "\trow.Cells = append(row.Cells, pod.Name, reason)"
@@ -768,7 +768,7 @@ func TestFormat_SourceLongerThanItsRoomShowsTheLinesCarryingTheWords(t *testing.
 	// Short enough to fit: verbatim, unnumbered, as before.
 	short := Summary{Commit: "abc", Call: Call{Words: []string{"x", "y"}}, Sources: []Source{{Entry: e, Lines: lines[:3]}}}
 	got = FormatWords(short, nil, 1)
-	if strings.Contains(got, "968:") || !strings.Contains(got, "\tstatement001 := compute(1)\n") {
+	if strings.Contains(got, "968:") || !strings.Contains(got, "\tstatement001 := compute(1) // longer than the source budget over two hundred lines\n") {
 		t.Errorf("a source that fits should print verbatim:\n%s", got)
 	}
 }
