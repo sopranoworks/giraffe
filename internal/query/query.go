@@ -629,6 +629,14 @@ func Search(src Entries, word string, filter Filter) []entry.Entry {
 		if ri.e.Name != rj.e.Name {
 			return ri.e.Name < rj.e.Name
 		}
+		// A name declared on several owners ties on everything above;
+		// the declaration with the larger body comes before its path
+		// decides (directive 073): the short ones of a name are most
+		// often the ones that forward to it, and the page's share for
+		// the word may hold two.
+		if si, sj := span(ri.e), span(rj.e); si != sj {
+			return si > sj
+		}
 		return ri.e.Path < rj.e.Path
 	})
 	matches := make([]entry.Entry, len(ranked))
@@ -796,6 +804,18 @@ func Browse(src Entries, filter Filter) []entry.Entry {
 func (f Filter) constrainsCallers() bool {
 	_, ok := f["callers"]
 	return ok
+}
+
+// span is how many lines a declaration covers: 1 for a one-line
+// declaration, 0 for an entry with no line (a file).
+func span(e entry.Entry) int {
+	if e.Line == 0 {
+		return 0
+	}
+	if e.EndLine < e.Line {
+		return 1
+	}
+	return e.EndLine - e.Line + 1
 }
 
 // CodeFirst orders es with every result from a test file after every

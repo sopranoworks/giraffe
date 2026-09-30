@@ -1130,3 +1130,19 @@ func TestWithMembers_FileOutline(t *testing.T) {
 		t.Fatalf("outline = %v, want [T New]", got)
 	}
 }
+
+// Directive 073: same-named declarations that tie on every rank come
+// larger body first, before the path decides.
+func TestSearch_LargerDeclarationFirst(t *testing.T) {
+	pos := func(owner string) []entry.Position {
+		return []entry.Position{{Name: "package", Value: "p"}, {Name: "receiver", Value: owner}}
+	}
+	src := Slice([]entry.Entry{
+		{Path: "a/a.go", Name: "Tell", Kind: "method", Line: 10, EndLine: 12, Position: pos("A"), Exported: true},
+		{Path: "b/b.go", Name: "Tell", Kind: "method", Line: 10, EndLine: 90, Position: pos("B"), Exported: true},
+	})
+	got := Search(src, "Tell", nil)
+	if len(got) != 2 || got[0].Path != "b/b.go" {
+		t.Fatalf("order: %v", got)
+	}
+}
