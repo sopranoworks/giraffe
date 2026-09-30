@@ -565,14 +565,28 @@ func (st searchState) exactSources(words []string, answers []output.WordAnswer) 
 		}
 	}
 	sort.SliceStable(own, func(i, j int) bool { return len(own[i].Matches) < len(own[j].Matches) })
-	for _, a := range own {
+	// Each word's exact declarations, in its answer's order; then one of
+	// each word per round (directive 073): a word declared three times
+	// must not take every slot from the next word's one declaration.
+	exact := make([][]entry.Entry, len(own))
+	for i, a := range own {
 		for _, e := range a.Matches {
+			if e.Kind != entry.KindFile && e.EndLine != 0 && strings.EqualFold(e.Name, a.Word) {
+				exact[i] = append(exact[i], e)
+			}
+		}
+	}
+	for round := 0; ; round++ {
+		more := false
+		for i := range own {
+			if round >= len(exact[i]) {
+				continue
+			}
+			more = true
 			if len(out) == maxSources {
 				return out
 			}
-			if e.Kind == entry.KindFile || e.EndLine == 0 || !strings.EqualFold(e.Name, a.Word) {
-				continue
-			}
+			e := exact[i][round]
 			k := e.Path + "\x00" + strconv.Itoa(e.Line)
 			if seen[k] {
 				continue
@@ -582,8 +596,10 @@ func (st searchState) exactSources(words []string, answers []output.WordAnswer) 
 				out = append(out, output.Source{Entry: query.WithCallers(e, st.entries), Lines: lines})
 			}
 		}
+		if !more || len(out) == maxSources {
+			return out
+		}
 	}
-	return out
 }
 
 // nameLike reports whether word could be a declaration's name: letters,
