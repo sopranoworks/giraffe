@@ -509,14 +509,24 @@ func withMembers(answers []output.WordAnswer, page int, src query.Entries) {
 // topFileBudget is the largest file a page carries whole.
 const topFileBudget = 4096
 
-// topFile is the first answer's top result, read whole, when that result
-// is a file no larger than topFileBudget (directive 073): the words
-// matched a file best, and a small file is shown rather than named.
+// topFile is the first file among the first answer's first page of
+// results, read whole, when it is no larger than topFileBudget
+// (directive 073): the words matched that file, and a small file is
+// shown rather than named.
 func (st searchState) topFile(answers []output.WordAnswer) *output.FileText {
-	if len(answers) == 0 || len(answers[0].Matches) == 0 {
+	if len(answers) == 0 {
 		return nil
 	}
-	e := answers[0].Matches[0]
+	var e entry.Entry
+	for i, m := range answers[0].Matches {
+		if i == output.PageSize {
+			return nil
+		}
+		if m.Kind == entry.KindFile {
+			e = m
+			break
+		}
+	}
 	if e.Kind != entry.KindFile || e.Size > topFileBudget {
 		return nil
 	}
