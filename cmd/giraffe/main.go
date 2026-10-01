@@ -593,6 +593,28 @@ func (st searchState) usedFrom(dir string) []string {
 	return out
 }
 
+// speaksTo reports whether e, a declaration named exactly word, carries
+// another of the call's words in its name, doc or path (directive 073):
+// a name typed alone is typed to see its declaration, but among other
+// words an exact match that none of them touches — Start, a plugin's
+// method, for "pod name prefix start time" — is a word that happens to
+// be a name, and its text would fill ## source with something unasked.
+func speaksTo(e entry.Entry, word string, words []string) bool {
+	if len(words) < 2 {
+		return true
+	}
+	text := strings.ToLower(e.Name + " " + e.DocText + " " + e.Doc + " " + e.Path)
+	for _, w := range words {
+		if strings.EqualFold(w, word) {
+			continue
+		}
+		if strings.Contains(text, strings.ToLower(w)) {
+			return true
+		}
+	}
+	return false
+}
+
 // maxSources caps how many exact matches ## source reads from disk: the
 // section's byte budget bounds what prints, this bounds what is opened
 // for it - a word that names a method on forty types should not cost
@@ -624,7 +646,7 @@ func (st searchState) exactSources(words []string, answers []output.WordAnswer) 
 	exact := make([][]entry.Entry, len(own))
 	for i, a := range own {
 		for _, e := range a.Matches {
-			if e.Kind != entry.KindFile && e.EndLine != 0 && strings.EqualFold(e.Name, a.Word) {
+			if e.Kind != entry.KindFile && e.EndLine != 0 && strings.EqualFold(e.Name, a.Word) && speaksTo(e, a.Word, words) {
 				exact[i] = append(exact[i], e)
 			}
 		}
