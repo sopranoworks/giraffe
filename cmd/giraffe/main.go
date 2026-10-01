@@ -545,13 +545,26 @@ func (st searchState) topFile(answers []output.WordAnswer) *output.FileText {
 	if len(answers) == 0 {
 		return nil
 	}
+	// The several-word block's first page, then the block of the
+	// directory a word names, which the page prints next (directive
+	// 073): a file that holds the words may rank there when a word of
+	// the call names its directory.
+	blocks := []output.WordAnswer{answers[0]}
+	if len(answers) > 1 && strings.HasPrefix(answers[1].Word, "in ") {
+		blocks = append(blocks, answers[1])
+	}
 	var e entry.Entry
-	for i, m := range answers[0].Matches {
-		if i == output.PageSize {
-			return nil
+	for _, blk := range blocks {
+		for i, m := range blk.Matches {
+			if i == output.PageSize {
+				break
+			}
+			if m.Kind == entry.KindFile && m.Size <= topFileBudget {
+				e = m
+				break
+			}
 		}
-		if m.Kind == entry.KindFile {
-			e = m
+		if e.Kind == entry.KindFile {
 			break
 		}
 	}
