@@ -598,7 +598,14 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 	preamble := b.Len()
 	shownBefore := make(map[string]bool)
 	printed := make(map[string]bool) // commands already on this page
+	type span struct {
+		start, end int
+		word       string
+		droppable  bool
+	}
+	var spans []span
 	for _, a := range answers {
+		blockStart := b.Len()
 		named := len(answers) > 1
 		header := func(section string) string {
 			if named {
@@ -687,6 +694,10 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 				fmt.Fprintf(&b, "%s\n", line)
 			}
 		}
+		// A single word's own block among several, with results, is
+		// what gives way when the page is over pageBudget.
+		single := len(answers) > 1 && len(a.Words) == 1 && a.Word == a.Words[0] && len(a.Matches) > 0
+		spans = append(spans, span{blockStart, b.Len(), a.Word, single})
 	}
 
 	if len(s.Sources) > 0 && page == 1 {
@@ -718,6 +729,60 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 		}
 	}
 
+	return withinPageBudget(b.String(), func() (cut [][2]int, words []string) {
+		for i := len(spans) - 1; i >= 0; i-- {
+			if spans[i].droppable {
+				cut = append(cut, [2]int{spans[i].start, spans[i].end})
+				words = append(words, spans[i].word)
+			}
+		}
+		return cut, words
+	}, s.Call)
+}
+
+// pageBudget bounds a whole page (directive 073): past it, the single
+// words' own blocks give way, the last word first, to what the words
+// found together, the directory block, ## file, ## outline and ##
+// source. On kubernetes a page of common words reached 17 KB.
+const pageBudget = 10000
+
+// withinPageBudget drops the droppable blocks of page, last first, until
+// it is within pageBudget, and says where the dropped words' blocks went.
+func withinPageBudget(page string, droppable func() ([][2]int, []string), call Call) string {
+	if len(page) <= pageBudget {
+		return page
+	}
+	cuts, words := droppable()
+	removed := 0
+	var gone []string
+	at := -1
+	for i, c := range cuts {
+		if len(page)-removed <= pageBudget {
+			break
+		}
+		removed += c[1] - c[0]
+		gone = append(gone, words[i])
+		at = i
+	}
+	if at < 0 {
+		return page
+	}
+	cut := cuts[:at+1]
+	var b strings.Builder
+	prev := 0
+	// cuts run last block first; walk them in page order.
+	for i := len(cut) - 1; i >= 0; i-- {
+		b.WriteString(page[prev:cut[i][0]])
+		prev = cut[i][1]
+		if i == len(cut)-1 {
+			names := make([]string, len(gone))
+			for j := range gone {
+				names[j] = quote(gone[len(gone)-1-j])
+			}
+			fmt.Fprintf(&b, "\n## not shown: %s\nthe page is full; one word alone: %s\n", strings.Join(names, ", "), Call{Query: call.Query, Words: []string{gone[len(gone)-1]}}.Command(call.Query, 1))
+		}
+	}
+	b.WriteString(page[prev:])
 	return b.String()
 }
 
