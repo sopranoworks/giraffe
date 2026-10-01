@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"giraffe/internal/entry"
 )
@@ -637,6 +638,9 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 		switch {
 		case len(shown) > 0:
 			b.WriteString(resultsHeader)
+			if n := narrowerLine(a, s.Symbols); n != "" {
+				b.WriteString(n)
+			}
 			if len(a.Counts) > 0 {
 				b.WriteString(countsLine(a.Words, a.Counts))
 			}
@@ -828,6 +832,78 @@ func nextPageLine(remainder []entry.Entry, page int, call Call, printed map[stri
 	}
 	printed[c] = true
 	return fmt.Sprintf("page %d, %d more: %s\n", page, len(remainder), c)
+}
+
+// narrowerShare is the share of the index, in percent, past which a
+// word's block names the narrower words that carry it.
+const narrowerShare = 1
+
+// narrowerLine names, for a word of one's own answer that matches more
+// than narrowerShare percent of the index, the longer name parts that
+// begin with it, most entries first, with how many entries each names
+// (directive 073): "actor" on gekka is in 2,542 entries, "actors" in
+// 258 of them, and a run that typed the one went on to type the other.
+// "" for a rarer word, or one no longer part carries.
+func narrowerLine(a WordAnswer, symbols int) string {
+	if len(a.Words) != 1 || a.Word != a.Words[0] || symbols == 0 || len(a.Matches)*100 <= symbols*narrowerShare {
+		return ""
+	}
+	w := strings.ToLower(a.Word)
+	counts := make(map[string]int)
+	for _, e := range a.Matches {
+		seen := make(map[string]bool)
+		for _, part := range nameParts(e.Name) {
+			lp := strings.ToLower(part)
+			if lp != w && strings.HasPrefix(lp, w) && !seen[lp] {
+				seen[lp] = true
+				counts[lp]++
+			}
+		}
+	}
+	type kv struct {
+		k string
+		v int
+	}
+	var list []kv
+	for k, v := range counts {
+		if v >= 2 {
+			list = append(list, kv{k, v})
+		}
+	}
+	if len(list) == 0 {
+		return ""
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].v != list[j].v {
+			return list[i].v > list[j].v
+		}
+		return list[i].k < list[j].k
+	})
+	if len(list) > 6 {
+		list = list[:6]
+	}
+	parts := make([]string, len(list))
+	for i, x := range list {
+		parts[i] = fmt.Sprintf("%s %d", x.k, x.v)
+	}
+	return fmt.Sprintf("narrower: %s\n", strings.Join(parts, " | "))
+}
+
+// nameParts splits a name into its parts at underscores and at the
+// joins of camelCase (ActorRef -> Actor, Ref; actorsMu -> actors, Mu).
+func nameParts(name string) []string {
+	var parts []string
+	start := 0
+	rs := []rune(name)
+	for i := 1; i <= len(rs); i++ {
+		if i == len(rs) || rs[i] == '_' || (unicode.IsUpper(rs[i]) && !unicode.IsUpper(rs[i-1])) {
+			if p := strings.Trim(string(rs[start:i]), "_"); p != "" {
+				parts = append(parts, p)
+			}
+			start = i
+		}
+	}
+	return parts
 }
 
 // entryKey identifies an entry across the words of one answer.
