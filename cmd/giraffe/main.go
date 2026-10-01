@@ -631,6 +631,18 @@ const maxSources = 3
 func (st searchState) exactSources(words []string, answers []output.WordAnswer) []output.Source {
 	var out []output.Source
 	seen := make(map[string]bool)
+	// The several-word block's top result, when it is a declaration
+	// (directive 073): the best match for all the words is the one a
+	// reader opens first — q2's runs read the scheduler around it.
+	if len(answers) > 0 && len(answers[0].Counts) > 0 && len(answers[0].Matches) > 0 {
+		e := answers[0].Matches[0]
+		if e.Kind != entry.KindFile && e.EndLine > e.Line {
+			if lines, ok := st.declarationLines(e); ok {
+				seen[e.Path+"\x00"+strconv.Itoa(e.Line)] = true
+				out = append(out, output.Source{Entry: query.WithCallers(e, st.entries), Lines: lines})
+			}
+		}
+	}
 	// Rarer words first: a word that is the name of one declaration
 	// among a few says more about what was asked than one on thousands.
 	own := make([]output.WordAnswer, 0, len(answers))
