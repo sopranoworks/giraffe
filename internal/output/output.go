@@ -66,6 +66,33 @@ type FileText struct {
 	Lines []string
 }
 
+// Outline is a file's declarations, for ## outline.
+type Outline struct {
+	Path  string
+	Decls []entry.Entry
+}
+
+// maxOutline caps how many declarations ## outline names.
+const maxOutline = 40
+
+// outlineSection renders ## outline: the file's declarations, name and
+// range each, in source order, then a count of the rest.
+func outlineSection(o *Outline) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n## outline: %s\n", o.Path)
+	parts := make([]string, 0, len(o.Decls))
+	for i, d := range o.Decls {
+		if i == maxOutline {
+			parts = append(parts, fmt.Sprintf("+%d more", len(o.Decls)-i))
+			break
+		}
+		parts = append(parts, d.Name+" "+d.LineRange())
+	}
+	b.WriteString(strings.Join(parts, " | "))
+	b.WriteByte('\n')
+	return b.String()
+}
+
 // sourceBudget bounds ## source the way byteBudget bounds a page. Directive
 // 073: 6000, so a declaration typed exactly — a hundred-line method —
 // prints whole rather than cut at its head, where the reader then
@@ -233,6 +260,11 @@ type Summary struct {
 	// (directive 073), whole: a file is the one result whose text the
 	// page otherwise only names. Page 1 only; nil otherwise.
 	File *FileText
+	// TopOutline is the declarations of the file the several-word
+	// block's top result lies in, every one with its range, in source
+	// order (directive 073): where a reader goes next in that file.
+	// Page 1 only; nil when there is none.
+	TopOutline *Outline
 	// Languages and ByExt are the two ## index breakdowns (§25 C-24):
 	// what turns "0 symbols" into "go 0 | unknown 181099" for a
 	// repository giraffe cannot extract from at all, plus the raw
@@ -660,6 +692,10 @@ func FormatWords(s Summary, answers []WordAnswer, page int) string {
 	if len(s.Sources) > 0 && page == 1 {
 		b.WriteString("\n## source\n")
 		b.WriteString(sourceSection(s.Sources, s.Call.Words))
+	}
+
+	if s.TopOutline != nil && page == 1 {
+		b.WriteString(outlineSection(s.TopOutline))
 	}
 
 	if s.File != nil && page == 1 {

@@ -473,6 +473,7 @@ func runFind(words []string, opts options, st searchState) int {
 	summary.Sources = st.exactSources(words, answers)
 	if page == 1 {
 		summary.File = st.topFile(answers)
+		summary.TopOutline = st.topOutline(answers)
 	}
 	fmt.Print(output.FormatWords(summary, answers, page))
 	return 0
@@ -505,6 +506,32 @@ func withMembers(answers []output.WordAnswer, page int, src query.Entries) {
 		}
 	}
 	query.WithMembers(targets, src)
+}
+
+// topOutline is the declarations of the file the several-word block's
+// top result lies in (directive 073): q2's runs read that file in
+// windows of 150-250 lines and grepped it for the methods they went to
+// next; the outline names each with its range. nil when the block has
+// no declaration on top.
+func (st searchState) topOutline(answers []output.WordAnswer) *output.Outline {
+	if len(answers) == 0 || len(answers[0].Counts) == 0 || len(answers[0].Matches) == 0 {
+		return nil
+	}
+	top := answers[0].Matches[0]
+	if top.Kind == entry.KindFile {
+		return nil
+	}
+	var decls []entry.Entry
+	for _, e := range query.Browse(st.entries, query.Filter{"path": []string{top.Path}}) {
+		if e.Path == top.Path && e.Kind != entry.KindFile && e.EndLine > e.Line {
+			decls = append(decls, e)
+		}
+	}
+	if len(decls) < 2 {
+		return nil
+	}
+	sort.SliceStable(decls, func(i, j int) bool { return decls[i].Line < decls[j].Line })
+	return &output.Outline{Path: top.Path, Decls: decls}
 }
 
 // topFileBudget is the largest file a page carries whole.
