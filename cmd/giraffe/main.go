@@ -655,6 +655,24 @@ func speaksTo(e entry.Entry, word string, words []string) bool {
 	return false
 }
 
+// textSpeaksTo is speaksTo over the declaration's own text (directive
+// 073): a struct whose fields carry the other words (Standby's
+// MaxIdleSeconds for "standby idle exit") speaks to them though its
+// name and doc do not.
+func (st searchState) textSpeaksTo(e entry.Entry, word string, words []string) bool {
+	lines, ok := st.declarationLines(e)
+	if !ok {
+		return false
+	}
+	text := strings.ToLower(strings.Join(lines, "\n"))
+	for _, w := range words {
+		if !strings.EqualFold(w, word) && strings.Contains(text, strings.ToLower(w)) {
+			return true
+		}
+	}
+	return false
+}
+
 // maxSources caps how many exact matches ## source reads from disk: the
 // section's byte budget bounds what prints, this bounds what is opened
 // for it - a word that names a method on forty types should not cost
@@ -698,7 +716,7 @@ func (st searchState) exactSources(words []string, answers []output.WordAnswer) 
 	exact := make([][]entry.Entry, len(own))
 	for i, a := range own {
 		for _, e := range a.Matches {
-			if e.Kind != entry.KindFile && e.EndLine != 0 && strings.EqualFold(e.Name, a.Word) && speaksTo(e, a.Word, words) {
+			if e.Kind != entry.KindFile && e.EndLine != 0 && strings.EqualFold(e.Name, a.Word) && (speaksTo(e, a.Word, words) || st.textSpeaksTo(e, a.Word, words)) {
 				exact[i] = append(exact[i], e)
 			}
 		}
