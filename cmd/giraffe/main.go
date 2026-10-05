@@ -706,6 +706,13 @@ func (st searchState) exactSources(words []string, answers []output.WordAnswer) 
 			if e.Kind == entry.KindFile || e.EndLine <= e.Line {
 				continue
 			}
+			// The second only beside the first, in its file (directive
+			// 073): the reader is in that file's region already; t1's
+			// second lay in another file and its runs read that file
+			// whole anyway.
+			if i > 0 && e.Path != answers[0].Matches[0].Path {
+				continue
+			}
 			if lines, ok := st.declarationLines(e); ok {
 				seen[e.Path+"\x00"+strconv.Itoa(e.Line)] = true
 				out = append(out, output.Source{Entry: query.WithCallers(e, st.entries), Lines: lines})
