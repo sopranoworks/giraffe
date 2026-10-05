@@ -1057,9 +1057,26 @@ func calleesOf(e entry.Entry, src Entries) ([]entry.Callee, int) {
 			more++
 			continue
 		}
+		// A type, a constant, a variable or a field reached through call
+		// syntax is a conversion or a value, not the next step of the
+		// thread (directive 073): q2's page listed SubtaskState and Task
+		// before the function the body calls.
+		if !callable(d) {
+			continue
+		}
 		out = append(out, entry.Callee{Name: n.name, Path: d.Path, Line: d.LineRange()})
 	}
 	return out, more
+}
+
+// callable reports whether d is a declaration a body calls into: not a
+// type, a constant, a variable or a field.
+func callable(d entry.Entry) bool {
+	switch d.Kind {
+	case "type", "const", "var", "field", entry.KindFile:
+		return false
+	}
+	return true
 }
 
 // declarationOf is the declaration a call of name through via reaches,
