@@ -673,6 +673,10 @@ func (st searchState) textSpeaksTo(e entry.Entry, word string, words []string) b
 	return false
 }
 
+// topSources is how many of the several-word block's first results ##
+// source prints.
+const topSources = 2
+
 // maxSources caps how many exact matches ## source reads from disk: the
 // section's byte budget bounds what prints, this bounds what is opened
 // for it - a word that names a method on forty types should not cost
@@ -692,9 +696,16 @@ func (st searchState) exactSources(words []string, answers []output.WordAnswer) 
 	// The several-word block's top result, when it is a declaration
 	// (directive 073): the best match for all the words is the one a
 	// reader opens first — q2's runs read the scheduler around it.
-	if len(answers) > 0 && len(answers[0].Counts) > 0 && len(answers[0].Matches) > 0 {
-		e := answers[0].Matches[0]
-		if e.Kind != entry.KindFile && e.EndLine > e.Line {
+	// Its first two (directive 073): q2's runs read the scheduler in
+	// windows that held both of the block's top functions.
+	if len(answers) > 0 && len(answers[0].Counts) > 0 {
+		for i, e := range answers[0].Matches {
+			if i == topSources {
+				break
+			}
+			if e.Kind == entry.KindFile || e.EndLine <= e.Line {
+				continue
+			}
 			if lines, ok := st.declarationLines(e); ok {
 				seen[e.Path+"\x00"+strconv.Itoa(e.Line)] = true
 				out = append(out, output.Source{Entry: query.WithCallers(e, st.entries), Lines: lines})
