@@ -1,9 +1,6 @@
 package scanner
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 func TestMarkerDirs_FindsMarkerAtRootAndNested(t *testing.T) {
 	dirs := MarkerDirs([]string{"go.mod", "services/api/go.mod"})
@@ -75,35 +72,24 @@ func TestProjectFor_UsesFallbackWhenNoMarkerOwnsTheFile(t *testing.T) {
 		t.Errorf("ProjectFor = %q, want fallback %q", got, "myrepo")
 	}
 	got = ProjectFor("services/api/handler.go", dirs, names, "myrepo")
-	if got != "api" {
-		t.Errorf("ProjectFor = %q, want %q (nested marker dir's own basename)", got, "api")
+	if got != "services/api" {
+		t.Errorf("ProjectFor = %q, want %q (nested marker dir's own path)", got, "services/api")
 	}
 }
 
-func TestCheckNameCollisions_NoCollision(t *testing.T) {
-	names := map[string]string{"services/a/util": "a-util", "services/b/util": "b-util"}
-	if err := CheckNameCollisions(names); err != nil {
-		t.Fatalf("unexpected error for distinct names: %v", err)
+// Directive 077: two nested directories with the same basename are two
+// projects, each named by its path — what 003 made an error.
+func TestProjectNames_SameBasenameTwoProjects(t *testing.T) {
+	dirs := MarkerDirs([]string{"gcp/observability/go.mod", "interop/observability/go.mod", "client/pkg/go.mod", "pkg/go.mod", "go.mod"})
+	names := ProjectNames(dirs, "grpc-go")
+	want := map[string]string{"gcp/observability": "gcp/observability", "interop/observability": "interop/observability", "client/pkg": "client/pkg", "pkg": "pkg", ".": "grpc-go"}
+	for d, w := range want {
+		if names[d] != w {
+			t.Errorf("ProjectNames[%q] = %q, want %q", d, names[d], w)
+		}
 	}
-}
-
-func TestCheckNameCollisions_TwoDirsSharingAName(t *testing.T) {
-	names := map[string]string{"services/a/util": "util", "services/b/util": "util"}
-	err := CheckNameCollisions(names)
-	if err == nil {
-		t.Fatal("expected an error for two dirs sharing the name \"util\"")
-	}
-	if !strings.Contains(err.Error(), "services/a/util") || !strings.Contains(err.Error(), "services/b/util") {
-		t.Errorf("error = %v, want it to name both paths", err)
-	}
-	if !strings.Contains(err.Error(), `"util"`) {
-		t.Errorf("error = %v, want it to name the colliding name", err)
-	}
-}
-
-func TestCheckNameCollisions_Empty(t *testing.T) {
-	if err := CheckNameCollisions(nil); err != nil {
-		t.Fatalf("unexpected error for an empty map: %v", err)
+	if got := ProjectFor("gcp/observability/x.go", dirs, names, "grpc-go"); got != "gcp/observability" {
+		t.Errorf("ProjectFor = %q, want gcp/observability", got)
 	}
 }
 

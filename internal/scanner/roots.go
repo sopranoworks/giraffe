@@ -1,7 +1,6 @@
 package scanner
 
 import (
-	"fmt"
 	"path"
 	"sort"
 	"strings"
@@ -66,15 +65,19 @@ func OwningDir(relPath string, markerDirs []string) string {
 }
 
 // ProjectNames maps each marker directory to the project name it
-// contributes: the directory's own basename, or rootBase for a marker at
-// the scan root itself (path.Base(".") is not useful).
+// contributes: the directory's path relative to the scan root, or
+// rootBase for a marker at the scan root itself (path.Base(".") is not
+// useful). A path is unique where a basename is not: gcp/observability
+// and interop/observability, client/pkg and pkg are two projects each,
+// as a multi-module repository has them (directive 077; 003 made two
+// basenames alike an error, and no index was built at all). A caller
+// still types the last element alone — --query 'project:util' selects
+// every project whose name ends in util (query.Filter.Match).
 //
 // Chosen over the marker's own declared name (e.g. go.mod's module path)
 // for uniformity: every marker type would otherwise need its own
-// name-extraction rule, and the directory basename is already what a
-// caller types into --query 'project:...' naturally. The Go module path
-// is not lost — it still feeds the "module" position attribute, per file,
-// exactly as before.
+// name-extraction rule. The Go module path is not lost — it still feeds
+// the "module" position attribute, per file, exactly as before.
 func ProjectNames(markerDirs []string, rootBase string) map[string]string {
 	names := make(map[string]string, len(markerDirs))
 	for _, d := range markerDirs {
@@ -82,7 +85,7 @@ func ProjectNames(markerDirs []string, rootBase string) map[string]string {
 			names[d] = rootBase
 			continue
 		}
-		names[d] = path.Base(d)
+		names[d] = d
 	}
 	return names
 }
@@ -95,48 +98,4 @@ func ProjectFor(relPath string, markerDirs []string, names map[string]string, fa
 		return fallback
 	}
 	return names[dir]
-}
-
-// CollisionError is returned by CheckNameCollisions. It is its own type,
-// not a plain error, so a caller can tell a name collision — a
-// configuration problem with one clear fix — apart from a runtime
-// failure (I/O, git) and exit accordingly (§21 C-8: consistent
-// treatment means the same exit behaviour, not just the same message
-// shape).
-type CollisionError struct {
-	Name         string // the project name both paths would produce
-	PathA, PathB string
-}
-
-func (e *CollisionError) Error() string {
-	return fmt.Sprintf("two project roots share the name %q: %s and %s", e.Name, e.PathA, e.PathB)
-}
-
-// CheckNameCollisions errors, naming both paths, if two different
-// directories in names would produce the same project name (§21 C-8).
-//
-// A project-name collision is a hard error wherever it occurs: two
-// nested marker directories within one tree (names here is
-// ProjectNames's output) or two configured roots across repositories
-// (names here is one root path -> its own project name). Before §21
-// C-8 only the cross-root case was checked; a same-name intra-tree
-// collision merged silently under one project: value, which is the
-// same "filter applied without being stated" failure §5 rules out —
-// just reached a different way. One detection now covers both.
-func CheckNameCollisions(names map[string]string) error {
-	dirs := make([]string, 0, len(names))
-	for d := range names {
-		dirs = append(dirs, d)
-	}
-	sort.Strings(dirs) // deterministic regardless of map iteration order (§3 C5)
-
-	byName := make(map[string]string, len(names))
-	for _, d := range dirs {
-		name := names[d]
-		if prev, ok := byName[name]; ok {
-			return &CollisionError{Name: name, PathA: prev, PathB: d}
-		}
-		byName[name] = d
-	}
-	return nil
 }

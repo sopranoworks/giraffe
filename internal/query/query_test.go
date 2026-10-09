@@ -358,7 +358,7 @@ func TestBrowse_HidesUnexportedOutsideItsOwnRoot(t *testing.T) {
 	if got := Browse(Slice(entries), Filter{"path": {"internal/x"}}); len(got) != 1 {
 		t.Fatalf("expected the package-scope entry visible from its own root, got %d", len(got))
 	}
-	if got := Browse(Foreign(Slice(entries)), Filter{"path": {"internal/x"}}); len(got) != 0 {
+	if got := Browse(Foreign(Slice(entries), "giraffe", "giraffe"), Filter{"path": {"internal/x"}}); len(got) != 0 {
 		t.Fatalf("expected the package-scope entry hidden from another root, got %d", len(got))
 	}
 }
@@ -474,7 +474,7 @@ func TestSuggest_ReportsMatchesHiddenInAnotherRoot(t *testing.T) {
 	entries := []entry.Entry{
 		{Name: "readLines", Project: "giraffe", Exported: false},
 	}
-	got := Suggest(Foreign(Slice(entries)), "readLines")
+	got := Suggest(Foreign(Slice(entries), "giraffe", "giraffe"), "readLines")
 	if len(got) != 1 {
 		t.Fatalf("expected one hint, got %v", got)
 	}
@@ -733,7 +733,7 @@ func TestSearch_PackageScopeHiddenOutsideItsOwnRoot(t *testing.T) {
 	if got := Search(Slice(entries), "readLines", nil); len(got) != 1 {
 		t.Fatalf("expected the package-scope entry visible from its own root, got %d: %v", len(got), got)
 	}
-	if got := Search(Foreign(Slice(entries)), "readLines", nil); len(got) != 0 {
+	if got := Search(Foreign(Slice(entries), "giraffe", "giraffe"), "readLines", nil); len(got) != 0 {
 		t.Fatalf("expected the package-scope entry hidden from another root, got %d: %v", len(got), got)
 	}
 	// Directive 072: another project in the same root is not another root.
@@ -1209,5 +1209,42 @@ func TestWithCallers_CallsPlacesTheBodysCallees(t *testing.T) {
 	// --query calls: narrows by a callee's name or place.
 	if !(Filter{"calls": {"Help"}}).Match(got) || (Filter{"calls": {"Nope"}}).Match(got) {
 		t.Errorf("calls: filter did not match by callee name")
+	}
+}
+
+// Directive 077: a nested project is named by its path; project: takes
+// the whole path, or its last element for every project ending in it.
+func TestFilter_ProjectByPathOrLastElement(t *testing.T) {
+	a := entry.Entry{Name: "A", Project: "services/a/util"}
+	b := entry.Entry{Name: "B", Project: "services/b/util"}
+	r := entry.Entry{Name: "R", Project: "repo"}
+	for _, c := range []struct {
+		v    string
+		want []bool
+	}{
+		{"util", []bool{true, true, false}},
+		{"services/a/util", []bool{true, false, false}},
+		{"repo", []bool{false, false, true}},
+		{"a/util", []bool{false, false, false}},
+	} {
+		f := Filter{"project": {c.v}}
+		for i, e := range []entry.Entry{a, b, r} {
+			if got := f.Match(e); got != c.want[i] {
+				t.Errorf("project:%s on %s = %v, want %v", c.v, e.Project, got, c.want[i])
+			}
+		}
+	}
+}
+
+// Directive 077: another root's own project goes by its label, and its
+// nested projects under it, so pkg there is not pkg here.
+func TestForeign_ProjectsUnderTheRootsLabel(t *testing.T) {
+	entries := []entry.Entry{{Name: "X", Project: "util", Exported: true}, {Name: "Y", Project: "pkg", Exported: true}}
+	got := map[string]string{}
+	for e := range Foreign(Slice(entries), "util", "b/util").All() {
+		got[e.Name] = e.Project
+	}
+	if got["X"] != "b/util" || got["Y"] != "b/util/pkg" {
+		t.Errorf("projects = %v, want X b/util, Y b/util/pkg", got)
 	}
 }

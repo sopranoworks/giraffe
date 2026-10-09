@@ -369,17 +369,13 @@ func enumerateAndClassify(ctx context.Context, root string, scope scanner.Scope,
 // from a partial enumeration — everything here needs enumOut exactly
 // as enumerateAndClassify returned it, complete.
 //
-// §21 C-8: nested marker directories sharing a name is the same
-// failure as two configured roots sharing one, checked here over the
-// marker directories this call found — a hard error, returned rather
-// than silently merged under one project name.
+// Nested marker directories are named by their path (scanner.ProjectNames,
+// directive 077), so two of them never share a name and nothing here can
+// fail: §21 C-8's error for two basenames alike is gone.
 func resolvePipelineContext(root string, ro *Store, enumOut enumerateOutcome, assignments map[string]string, fallbackProject string) (fc fileContext, enumChanged bool, rootProject string, err error) {
 	markerDirs := scanner.MarkerDirs(enumOut.markerPaths)
 	markersByDir := buildMarkersByDir(enumOut.markerPaths)
 	projectNames := scanner.ProjectNames(markerDirs, fallbackProject)
-	if err := scanner.CheckNameCollisions(projectNames); err != nil {
-		return fileContext{}, false, "", err
-	}
 	rootProject = scanner.ProjectFor(".", markerDirs, projectNames, fallbackProject)
 
 	fc = fileContext{

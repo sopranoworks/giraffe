@@ -277,7 +277,9 @@ func sortedKeys(m map[string]bool) []string {
 // nor 036's real failing query named a repository-root prefix; a value
 // carrying "/" still behaves like a prefix in practice, since that is
 // what a substring of a path with a directory separator in it is);
-// project matches exactly.
+// project matches exactly, or by its last element alone (directive 077:
+// a nested project is named by its path, services/a/util, and
+// project:util selects it and services/b/util both).
 func (f Filter) Match(e entry.Entry) bool {
 	for name, values := range f {
 		if !matchesAny(name, e, values) {
@@ -295,7 +297,7 @@ func matchesAny(name string, e entry.Entry, values []string) bool {
 				return true
 			}
 		case "project":
-			if e.Project == v {
+			if e.Project == v || path.Base(e.Project) == v {
 				return true
 			}
 		case "kind":
@@ -512,18 +514,28 @@ func visible(e entry.Entry) bool {
 // Foreign presents another root's store as Entries whose every entry is
 // marked Foreign (directive 072), so visible hides what that root does
 // not export. Callers pass through: a call site is a fact about a name.
-func Foreign(src Entries) Entries {
-	return foreignEntries{src}
+//
+// label is the name that root goes by in this invocation (directive
+// 077): its own project, rootProject, is shown as label, and each of its
+// nested projects as label/<path>, so a project of another root never
+// shares a name with one of the invocation's own (pkg here, other/pkg
+// there). label == rootProject with no nested projects is the name the
+// root had before.
+func Foreign(src Entries, rootProject, label string) Entries {
+	return foreignEntries{src, rootProject, label}
 }
 
-type foreignEntries struct{ src Entries }
+type foreignEntries struct {
+	src                Entries
+	rootProject, label string
+}
 
 func (f foreignEntries) All() iter.Seq[entry.Entry] {
-	return markForeign(f.src.All())
+	return f.mark(f.src.All())
 }
 
 func (f foreignEntries) Candidates(word string) iter.Seq[entry.Entry] {
-	return markForeign(f.src.Candidates(word))
+	return f.mark(f.src.Candidates(word))
 }
 
 func (f foreignEntries) Callers(name string) []entry.Call {
@@ -534,10 +546,15 @@ func (f foreignEntries) CallsIn(path string) []entry.Call {
 	return f.src.CallsIn(path)
 }
 
-func markForeign(seq iter.Seq[entry.Entry]) iter.Seq[entry.Entry] {
+func (f foreignEntries) mark(seq iter.Seq[entry.Entry]) iter.Seq[entry.Entry] {
 	return func(yield func(entry.Entry) bool) {
 		for e := range seq {
 			e.Foreign = true
+			if e.Project == f.rootProject {
+				e.Project = f.label
+			} else if e.Project != "" {
+				e.Project = f.label + "/" + e.Project
+			}
 			if !yield(e) {
 				return
 			}

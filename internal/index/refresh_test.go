@@ -553,8 +553,8 @@ func TestRefresh_NestedMarkerAssignsDistinctProjects(t *testing.T) {
 	if projects["Main"] != rootBase {
 		t.Errorf("Main's project = %q, want the repo root's own basename %q", projects["Main"], rootBase)
 	}
-	if projects["Handle"] != "api" {
-		t.Errorf("Handle's project = %q, want %q (nearest enclosing marker dir)", projects["Handle"], "api")
+	if projects["Handle"] != "services/api" {
+		t.Errorf("Handle's project = %q, want %q (nearest enclosing marker dir, by its path)", projects["Handle"], "services/api")
 	}
 }
 
@@ -591,30 +591,27 @@ func TestRefresh_ProjectCorrectEvenWhenMarkerSortsAfterItsOwnFile(t *testing.T) 
 	}
 }
 
-func TestRefresh_NestedMarkerCollisionIsHardError(t *testing.T) {
-	// §21 C-8: before this directive, two nested marker directories
-	// sharing a basename merged silently under one project: value — the
-	// same failure the cross-root case (main.checkNameCollisions) already
-	// treated as a hard error. Two different services/*/util trees is a
-	// realistic way to hit this by accident.
+func TestRefresh_NestedMarkersSharingABasenameAreTwoProjects(t *testing.T) {
+	// Directive 077: two services/*/util trees are an ordinary
+	// multi-module repository. 003 made them a hard error (§21 C-8) and
+	// no index was built; each is now a project named by its path.
 	root := gitRepo(t)
 	writeFile(t, root, "go.mod", "module outer\n")
 	writeFile(t, root, "services/a/util/go.mod", "module a-util\n")
-	writeFile(t, root, "services/a/util/helper.go", "package util\n\nfunc A() {}\n")
+	writeFile(t, root, "services/a/util/helper.go", "package util\n\nfunc helperA() {}\n")
 	writeFile(t, root, "services/b/util/go.mod", "module b-util\n")
-	writeFile(t, root, "services/b/util/helper.go", "package util\n\nfunc B() {}\n")
+	writeFile(t, root, "services/b/util/helper.go", "package util\n\nfunc helperB() {}\n")
 	gitCommit(t, root, "go.mod", "services/a/util/go.mod", "services/a/util/helper.go",
 		"services/b/util/go.mod", "services/b/util/helper.go")
 
-	_, _, err := Refresh(context.Background(), root, scope(), nil)
-	if err == nil {
-		t.Fatal("expected a hard error for two nested marker dirs sharing the project name \"util\"")
+	s := mustRefresh(t, root)
+	defer closeStore(t, s)
+	projects := make(map[string]string)
+	for e := range s.All() {
+		projects[e.Name] = e.Project
 	}
-	if !strings.Contains(err.Error(), "util") {
-		t.Errorf("error = %v, want it to name the colliding project %q", err, "util")
-	}
-	if !strings.Contains(err.Error(), "services/a/util") || !strings.Contains(err.Error(), "services/b/util") {
-		t.Errorf("error = %v, want it to name both paths", err)
+	if projects["helperA"] != "services/a/util" || projects["helperB"] != "services/b/util" {
+		t.Errorf("projects = helperA %q, helperB %q, want services/a/util and services/b/util", projects["helperA"], projects["helperB"])
 	}
 }
 

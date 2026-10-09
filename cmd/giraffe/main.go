@@ -6,7 +6,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -283,13 +282,6 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "giraffe:", err)
 			closeAll()
-			// §21 C-8: a name collision is a configuration problem with
-			// one clear fix, exit 2 — same treatment as the cross-root
-			// collision below, whichever of the two catches it first.
-			var collErr *scanner.CollisionError
-			if errors.As(err, &collErr) {
-				return searchState{}, 2
-			}
 			return searchState{}, 1
 		}
 		commit, err := commitHash(ctx, r)
@@ -310,11 +302,8 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 		}
 	}
 
-	if err := checkNameCollisions(results); err != nil {
-		fmt.Fprintln(os.Stderr, "giraffe:", err)
-		closeAll()
-		return searchState{}, 2
-	}
+	labels, labelNotices := rootLabels(results)
+	ignoreWarnings = append(ignoreWarnings, labelNotices...)
 
 	var totalDispatched int
 	var warnings []string
@@ -330,7 +319,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 		// 072 to other roots).
 		sources[i] = r.store
 		if i > 0 {
-			sources[i] = query.Foreign(r.store)
+			sources[i] = query.Foreign(r.store, r.stats.RootProject, labels[i])
 		}
 		stores[i] = r.store
 		roots[i] = rootSource{dir: r.root, src: r.store}
@@ -961,22 +950,36 @@ func resolveRootPath(homeRoot, p string) (string, error) {
 	return p, nil
 }
 
-// checkNameCollisions errors, naming both paths, if two configured roots
-// would produce the same project name. Uses the same detection as the
-// intra-tree case in index.Refresh (§21 C-8: same failure, one check) —
-// scanner.CheckNameCollisions over each root's own derived project name
-// (its root marker, or its basename), not just the directory's basename,
-// so this agrees with what a nested-marker root would actually report as
-// its own project.
-func checkNameCollisions(results []rootResult) error {
-	names := make(map[string]string, len(results))
-	for _, r := range results {
-		names[r.root] = r.stats.RootProject
+// rootLabels names each configured root for this invocation (directive
+// 077). 003 made two roots with the same project name an error (§21
+// C-8), and no search ran at all: their projects would have merged under
+// one project: value, so a filter on it would have spanned both without
+// saying so. That still needs guarding, and is guarded without stopping:
+// the home root (results[0]) keeps its own name; another root keeps its
+// own too unless an earlier root already has it, and is then named by as
+// many of its parent directories as make it unique (a/util, b/util),
+// which ## warnings reports beside the other notices. query.Foreign shows a root's nested
+// projects under its label, so they cannot meet the home root's either.
+func rootLabels(results []rootResult) (labels []string, notices []string) {
+	taken := make(map[string]string, len(results))
+	for i, r := range results {
+		label := r.stats.RootProject
+		if i > 0 {
+			parts := strings.Split(filepath.ToSlash(filepath.Clean(r.root)), "/")
+			for n := 1; taken[label] != "" && n < len(parts); n++ {
+				label = strings.Join(parts[len(parts)-1-n:len(parts)-1], "/") + "/" + r.stats.RootProject
+			}
+			if prev := taken[label]; prev != "" {
+				label = r.root
+			}
+			if label != r.stats.RootProject {
+				notices = append(notices, fmt.Sprintf("roots %s and %s share the project name %q: %s is shown as project:%s", taken[r.stats.RootProject], r.root, r.stats.RootProject, r.root, label))
+			}
+		}
+		taken[label] = r.root
+		labels = append(labels, label)
 	}
-	if err := scanner.CheckNameCollisions(names); err != nil {
-		return fmt.Errorf("%w (rename one, or remove it from .giraffe/roots)", err)
-	}
-	return nil
+	return labels, notices
 }
 
 func notIgnored(ctx context.Context, root, relPath string) bool {
