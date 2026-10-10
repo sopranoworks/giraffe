@@ -1,16 +1,16 @@
 ---
 name: giraffe
-description: An index of this repository's declarations, doc comments, paths and call sites — for any question about where something is or whether it exists: which file handles X, where Y is defined, what calls Z, is there a W feature. Just run `giraffe find <words>` in Bash (no need to load this skill first), with every word you would try in the one call — `giraffe find cache store registry`: it returns the matching declarations and files with exact line ranges, and a function's call sites. It answers each such lookup, not only the first: the next name you are after — a function a result mentions, what calls it, where a value is sent — is another `giraffe find`. A word no name, doc comment or path contains is looked for in the text of the files too — string literals, local variables, anything inside a body — and the answer names where it is, or says it is nowhere: a word reported nowhere is in no name, doc comment, path or source file of the whole repository. Use it before find, ls, grep or starting an Explore agent, and in any subagent exploring the code.
+description: An index of this repository's declarations, doc comments, paths and call sites — for any question about where something is or whether it exists: which file handles X, where Y is defined, what calls Z, is there a W feature. Just run `giraffe find <words>` in Bash (no need to load this skill first), with every word you would try in the one call — `giraffe find <word> <word> <word>`: it returns the matching declarations and files with exact line ranges, and a function's call sites. It answers each such lookup, not only the first: the next name you are after — a function a result mentions, what calls it, where a value is sent — is another `giraffe find`. A word no name, doc comment or path contains is looked for in the text of the files too — string literals, local variables, anything inside a body — and the answer names where it is, or says it is nowhere: a word reported nowhere is in no name, doc comment, path or source file of the whole repository. Use it before find, ls, grep or starting an Explore agent, and in any subagent exploring the code. `giraffe --query project:<name> find <words>`.
 ---
 
 # giraffe
 
 `giraffe` is an index of this repository. Run it through Bash:
 
-    giraffe find <words>     e.g.  giraffe find metrics      giraffe find mailbox overflow
+    giraffe find <words>     e.g.  giraffe find <word>      giraffe find <word> <word>
     giraffe prepare          builds or refreshes the index; a search does it itself when needed
 
-Options go before `find` (`giraffe --page 2 find metrics`); every
+Options go before `find` (`giraffe --page 2 find <words>`); every
 argument after `find` is a word, as typed. Several words first list the
 entries that carry two or more of them (more, and rarer, words first;
 with how many entries each word matches), then answer each word.
@@ -25,7 +25,7 @@ Test files are indexed too; a result from one carries `test:true`.
 
 Each result is one line:
 
-    name:NodeMetrics kind:type path:internal/core/metrics.go line:16-60
+    name:<name> kind:<kind> path:<path> line:<A>-<B>
 
 `line:A-B` is the declaration's whole extent — read exactly that with
 `sed -n 'A,Bp' <path>` (or Read with that offset and limit) instead of
