@@ -936,7 +936,10 @@ func resultLine(e entry.Entry, words []string, showProject, showLang bool, extVa
 		fmt.Fprintf(&line, " line:%s", r)
 	}
 	if showProject && e.Project != "" {
-		fmt.Fprintf(&line, " project:%s", quote(e.Project))
+		// A project is held by its path (directive 077) but shown by its
+		// last name only, as before 077 (directive 083): project:util
+		// for services/a/util. --query project: takes either.
+		fmt.Fprintf(&line, " project:%s", quote(path.Base(e.Project)))
 	}
 	if e.Ext != "" && (e.Lang == "" || extVaries[e.Lang]) {
 		fmt.Fprintf(&line, " ext:%s", quote(e.Ext))

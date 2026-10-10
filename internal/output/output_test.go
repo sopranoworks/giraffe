@@ -652,6 +652,20 @@ func TestResultLine_TestOnlyWhenTrue(t *testing.T) {
 	}
 }
 
+// TestResultLine_ProjectByLastName (directive 083): a nested project,
+// held by its path, prints its last name only; a root project prints
+// as it is.
+func TestResultLine_ProjectByLastName(t *testing.T) {
+	e := entry.Entry{Path: "services/a/util/x.go", Name: "X", Kind: "func", Line: 3, Exported: true, Project: "services/a/util"}
+	if got := resultLine(e, nil, true, false, nil); !strings.Contains(got, " project:util") || strings.Contains(got, "services/a/util ") {
+		t.Errorf("nested project not shown by its last name: %q", got)
+	}
+	e.Project = "gekka"
+	if got := resultLine(e, nil, true, false, nil); !strings.Contains(got, " project:gekka") {
+		t.Errorf("root project not shown as it is: %q", got)
+	}
+}
+
 // TestFormat_CallersLine (directive 050, extended by 051 §1 for each
 // site's own text): a result with callers prints them under its doc
 // line, one site a line as path:line: text, at most maxCallers with
