@@ -20,6 +20,7 @@ narrower: x 2 | y 1
 name:A kind:func path:a.go line:1-2
   func A()
 name:A2 kind:func path:a.go line:3-4
+name:a kind:file path:a.go size:9 declarations:2
 
 ## truncated: a
 page 1, 1 more: giraffe --page 2 find a
@@ -36,7 +37,7 @@ unparsed: x.go: boom
 
 func TestAnalyze(t *testing.T) {
 	a := Analyze(page)
-	if len(a.Sections) != 3 || a.Sections[0].N != 0 || a.Sections[1].N != 2 || a.Sections[1].S != "a" || a.Sections[2].N != 0 {
+	if len(a.Sections) != 3 || a.Sections[0].N != 0 || a.Sections[1].N != 3 || a.Sections[1].S != "a" || a.Sections[2].N != 0 {
 		t.Fatalf("sections = %+v", a.Sections)
 	}
 	if strings.Join(a.None, "|") != "a b zz|zz" {

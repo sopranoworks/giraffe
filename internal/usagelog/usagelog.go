@@ -234,7 +234,7 @@ type Answer struct {
 }
 
 // Analyze reads a page as output prints it: sections open at a "## "
-// line; a result is a line "name:… path:… line:…" in a "## results"
+// line; a result is a line "name:… kind:… path:…" (a file has no line:) in a "## results"
 // section; a word answered none: has a "none:" line in its results
 // section; narrowing hints are the "narrower:" lines and the lines
 // under "## try next"; "## warnings" lines are the warnings.
@@ -262,7 +262,7 @@ func Analyze(page string) Answer {
 		switch section {
 		case "results":
 			switch {
-			case strings.HasPrefix(line, "name:") && strings.Contains(line, " path:") && strings.Contains(line, " line:"):
+			case strings.HasPrefix(line, "name:") && strings.Contains(line, " kind:") && strings.Contains(line, " path:"):
 				a.Sections[cur].N++
 			case strings.HasPrefix(line, "none:"):
 				a.None = append(a.None, strings.Trim(title, "'"))
