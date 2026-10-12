@@ -30,6 +30,7 @@ SCRATCH="${2:?usage: docker-run-arrival-round.sh <pairs> <scratch-root> [corpus-
 CORPUS_URL="${3:-https://github.com/kubernetes/kubernetes.git}"
 ARMS="${ARMS:-unaided aided}"
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"$HARNESS_DIR/sync-skill.sh"  # the skill's one source is skill/SKILL.md (directive 087 §2)
 
 mkdir -p "$SCRATCH/logs"
 for ((i = 1; i <= PAIRS; i++)); do

@@ -28,6 +28,7 @@ ARM="${1:?usage: docker-run-arrival.sh <unaided|aided> <scratch-root> [corpus-gi
 SCRATCH="${2:?usage: docker-run-arrival.sh <unaided|aided> <scratch-root> [corpus-git-url]}"
 CORPUS_URL="${3:-https://github.com/kubernetes/kubernetes.git}"
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"$HARNESS_DIR/sync-skill.sh"  # the skill's one source is skill/SKILL.md (directive 087 §2)
 REPO_ROOT="$(cd "$HARNESS_DIR/.." && pwd)"
 
 if [[ "$ARM" != "unaided" && "$ARM" != "aided" ]]; then

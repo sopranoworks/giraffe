@@ -36,6 +36,7 @@ OUT="${1:?usage: build-faithful-home.sh <out-dir> [--with-giraffe-skill]}"
 WITH_GIRAFFE="${2:-}"
 SRC="$HOME/.claude"
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"$HARNESS_DIR/sync-skill.sh"  # the skill's one source is skill/SKILL.md (directive 087 §2)
 
 if [[ -e "$OUT" ]]; then
   echo "refusing to overwrite $OUT" >&2

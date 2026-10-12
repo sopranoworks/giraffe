@@ -35,6 +35,7 @@ SCRATCH="${2:?usage}"
 HOME_DIR="$(cd "${3:?usage}" && pwd)"
 PRISTINE="$(cd "${4:?usage}" && pwd)"
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"$HARNESS_DIR/sync-skill.sh"  # the skill's one source is skill/SKILL.md (directive 087 §2)
 REPO_ROOT="$(cd "$HARNESS_DIR/.." && pwd)"
 : "${TASK_TEXT:?TASK_TEXT is required}"
 
