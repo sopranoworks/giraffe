@@ -29,6 +29,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/sopranoworks/giraffe/internal/crash"
 	"github.com/sopranoworks/giraffe/internal/entry"
 	"github.com/sopranoworks/giraffe/internal/lang"
 	"github.com/sopranoworks/giraffe/internal/scanner"
@@ -278,6 +279,7 @@ func orderedWork(prodOut produceOutcome, enumChanged bool) []workItem {
 // dispatchAndExtract's overall completion signal for resultCh.
 func extractWorker(fc fileContext, ro *Store, workCh <-chan workItem, resultCh chan<- sequenced, wg *sync.WaitGroup) {
 	defer wg.Done()
+	defer crash.Handle()
 	for it := range workCh {
 		if it.carry != nil {
 			u := it.carry
@@ -345,6 +347,7 @@ func enumerateAndClassify(ctx context.Context, root string, scope scanner.Scope,
 	var enumWG sync.WaitGroup
 	enumWG.Add(1)
 	go func() {
+		defer crash.Handle()
 		defer enumWG.Done()
 		enumerate(ctx, root, scope, assignments, ro, metaCh, &enumOut)
 	}()
@@ -453,6 +456,7 @@ func dispatchAndExtract(fc fileContext, prodOut produceOutcome, enumChanged bool
 	resultCh := make(chan sequenced, extractWorkers)
 
 	go func() {
+		defer crash.Handle()
 		defer close(workCh)
 		for _, it := range work {
 			workCh <- it
@@ -464,6 +468,7 @@ func dispatchAndExtract(fc fileContext, prodOut produceOutcome, enumChanged bool
 		go extractWorker(fc, ro, workCh, resultCh, &wg)
 	}
 	go func() {
+		defer crash.Handle()
 		wg.Wait()
 		close(resultCh)
 	}()

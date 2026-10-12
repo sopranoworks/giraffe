@@ -227,7 +227,9 @@ func Enforce(ctx context.Context, cfg Config) (context.Context, context.CancelFu
 
 // Watch force-exits the process with a timeout message if ctx expires
 // before done is closed. Call it in a goroutine right after Enforce; close
-// done when the real work finishes normally.
+// done when the real work finishes normally. onTimeout, when not nil, is
+// given the message just before the process ends, so it can be recorded
+// (directive 087 §10).
 //
 // A cooperative deadline — checking ctx.Err() in loops — only bounds code
 // that checks. Watch is the backstop for code that does not, or cannot (a
@@ -241,15 +243,19 @@ func Enforce(ctx context.Context, cfg Config) (context.Context, context.CancelFu
 // GOMEMLIMIT (cfg.HeapLimit) as a suspect and reports GCCPUFraction — the
 // fraction of CPU time spent in GC, cheap to read from runtime.MemStats
 // and a direct measure of the pressure that composition depends on.
-func Watch(ctx context.Context, done <-chan struct{}, cfg Config) {
+func Watch(ctx context.Context, done <-chan struct{}, cfg Config, onTimeout func(msg string)) {
 	select {
 	case <-done:
 	case <-ctx.Done():
 		var m runtime.MemStats
 		runtime.ReadMemStats(&m)
-		fmt.Fprintf(os.Stderr,
+		msg := fmt.Sprintf(
 			"giraffe: timed out (suspect: GOMEMLIMIT=%d bytes — a low heap ceiling causes GC thrashing that surfaces as a timeout, not an allocation failure; GC CPU fraction at timeout: %.1f%%, %d collections so far)\n",
 			cfg.HeapLimit, m.GCCPUFraction*100, m.NumGC)
+		fmt.Fprint(os.Stderr, msg)
+		if onTimeout != nil {
+			onTimeout(msg)
+		}
 		os.Exit(1)
 	}
 }

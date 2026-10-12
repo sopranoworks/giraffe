@@ -69,7 +69,7 @@ func helperExceedTimeout() {
 	}
 	defer cancel()
 	done := make(chan struct{})
-	go Watch(ctx, done, cfg) // never closed: simulates work that outlives the timeout
+	go Watch(ctx, done, cfg, nil) // never closed: simulates work that outlives the timeout
 	time.Sleep(5 * time.Second)
 }
 

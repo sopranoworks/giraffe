@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sopranoworks/giraffe/internal/crash"
 	"github.com/sopranoworks/giraffe/internal/scanner"
 )
 
@@ -55,11 +56,13 @@ func enumerate(ctx context.Context, root string, scope scanner.Scope, assignment
 	wg.Add(2)
 	var tracked trackedHalfResult
 	go func() {
+		defer crash.Handle()
 		defer wg.Done()
 		tracked = runTrackedHalf(ctx, root, scope, hasGit, cacheOK, cached, metaCh)
 	}()
 	var walked walkedHalfResult
 	go func() {
+		defer crash.Handle()
 		defer wg.Done()
 		walked = runWalkedHalf(ctx, root, oldWalkCache)
 	}()

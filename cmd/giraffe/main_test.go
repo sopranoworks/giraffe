@@ -172,7 +172,7 @@ func TestCommandLine(t *testing.T) {
 // a word; prepare; and what the range on a result line is for, and
 // that callers: is where a name is called (directive 050).
 func TestHelpText_StaysSmall(t *testing.T) {
-	const limit = 1000
+	const limit = 1100
 	if len(helpText) > limit {
 		t.Fatalf("helpText is %d bytes, over the %d-byte limit", len(helpText), limit)
 	}

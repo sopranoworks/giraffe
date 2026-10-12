@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -11,41 +12,173 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 
+	"github.com/sopranoworks/giraffe/internal/crash"
 	"github.com/sopranoworks/giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/gconfig"
 	"github.com/sopranoworks/giraffe/internal/index"
 	"github.com/sopranoworks/giraffe/internal/lang"
 	"github.com/sopranoworks/giraffe/internal/limits"
 	"github.com/sopranoworks/giraffe/internal/output"
 	"github.com/sopranoworks/giraffe/internal/query"
 	"github.com/sopranoworks/giraffe/internal/scanner"
+	"github.com/sopranoworks/giraffe/internal/skillinst"
+	"github.com/sopranoworks/giraffe/internal/usagelog"
+	"github.com/sopranoworks/giraffe/skill"
 )
 
 func main() {
+	args := os.Args[1:]
+	cfgDir := gconfig.Dir()
+	if gconfig.Load(cfgDir).Log && cfgDir != "" {
+		root, _ := os.Getwd()
+		if r, err := filepath.EvalSymlinks(root); err == nil {
+			root = r
+		}
+		ulog = usagelog.Begin(filepath.Join(cfgDir, "log"), version(), root, args)
+	}
+	crash.SetHandler(died)
+
 	cfg, err := limits.FromEnv()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "giraffe:", err)
-		os.Exit(2)
+		fmt.Fprintln(stderr, "giraffe:", err)
+		finish(2)
 	}
 	// The resource wrapper runs before anything else (§3): a failure from
 	// here on is the command dying, never the host.
 	ctx, cancel, err := limits.Enforce(context.Background(), cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "giraffe:", err)
-		os.Exit(2)
+		fmt.Fprintln(stderr, "giraffe:", err)
+		finish(2)
 	}
 
 	done := make(chan struct{})
-	go limits.Watch(ctx, done, cfg)
+	if interactive(args) {
+		// install and update wait for a person's answer: the timeout is
+		// for a search, not for them.
+		cancel()
+		ctx, cancel = context.WithCancel(context.Background())
+	} else {
+		go limits.Watch(ctx, done, cfg, func(msg string) {
+			ulog.Fail("timeout", strings.TrimSpace(msg))
+			ulog.End(1, stdout.String(), stderr.String())
+		})
+	}
 
-	code := run(ctx, os.Args[1:])
+	code := guarded(ctx, args)
 	close(done)
 	cancel()
+	finish(code)
+}
+
+// guarded runs the command, a panic in it going to died.
+func guarded(ctx context.Context, args []string) int {
+	defer crash.Handle()
+	return run(ctx, args)
+}
+
+// finish writes the end record and ends the process.
+func finish(code int) {
+	ulog.End(code, stdout.String(), stderr.String())
 	os.Exit(code)
+}
+
+// died is what a panic comes to (directive 087 §10): recorded, then the
+// process ends as it did before the log — the panic message and the
+// goroutine's stack on standard error, exit code 2.
+func died(v any, stack []byte) {
+	// Several goroutines can panic at once: the first one ends the
+	// process, the others wait for that.
+	dying.Lock()
+	var text string
+	switch x := v.(type) {
+	case error:
+		text = x.Error()
+	case string:
+		text = x
+	case fmt.Stringer:
+		text = x.String()
+	default:
+		text = fmt.Sprintf("(%T) %v", v, v)
+	}
+	ulog.Fail("panic", text+"\n\n"+string(stack))
+	ulog.End(2, stdout.String(), stderr.String())
+	fmt.Fprintf(os.Stderr, "panic: %s\n\n%s", text, stack)
+	os.Exit(2)
+}
+
+// dying is held, for good, by the first panic.
+var dying sync.Mutex
+
+// interactive is whether the command asks the person questions.
+func interactive(args []string) bool {
+	c := usagelog.Command(args)
+	return c == "install" || c == "update"
+}
+
+// baseVersion is the version of the source tree; a binary built by
+// `go install …@v0.1.0` reports the module version it was built from.
+const baseVersion = "v0.1.0"
+
+func version() string {
+	if bi, ok := debug.ReadBuildInfo(); ok && strings.HasPrefix(bi.Main.Version, "v") && !strings.Contains(bi.Main.Version, "+dirty") {
+		return bi.Main.Version
+	}
+	return baseVersion
+}
+
+// ulog is this invocation's usage log; nil when the log is off.
+var ulog *usagelog.Log
+
+// stdout and stderr are the streams giraffe prints to, each keeping a
+// copy of what went through it for the usage log. They print exactly
+// what was written.
+var (
+	stdout = &recorder{w: os.Stdout}
+	stderr = &recorder{w: os.Stderr}
+)
+
+// recorder passes writes through to w and keeps the first recorderCap
+// bytes of them for the log; n counts all.
+type recorder struct {
+	w   *os.File
+	mu  sync.Mutex
+	buf []byte
+	n   int
+}
+
+const recorderCap = 1 << 20
+
+func (r *recorder) Write(p []byte) (int, error) {
+	n, err := r.w.Write(p)
+	r.mu.Lock()
+	r.n += n
+	if room := recorderCap - len(r.buf); room > 0 {
+		if n < room {
+			room = n
+		}
+		r.buf = append(r.buf, p[:room]...)
+	}
+	r.mu.Unlock()
+	return n, err
+}
+
+func (r *recorder) String() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return string(r.buf)
+}
+
+// fail prints one line to standard error and records its kind.
+func fail(kind string, msg string) {
+	ulog.Fail(kind, msg)
+	fmt.Fprintln(stderr, msg)
 }
 
 // rootResult is one project root's contribution to a `find` call: its own
@@ -159,22 +292,23 @@ func parseOptions(args []string) (options, []string, error) {
 func run(ctx context.Context, args []string) int {
 	opts, rest, err := parseOptions(args)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "giraffe:", err)
+		fail("usage", "giraffe: "+err.Error())
 		return 2
 	}
 	if opts.help || len(args) == 0 {
-		fmt.Print(helpText)
+		fmt.Fprint(stdout, helpText)
+		staleLine()
 		return 0
 	}
 	if len(rest) == 0 {
-		fmt.Fprintln(os.Stderr, "giraffe: nothing after the options; run: "+commandLine(opts, "find", []string{"<word>..."}))
+		fail("usage", "giraffe: nothing after the options; run: "+commandLine(opts, "find", []string{"<word>..."}))
 		return 2
 	}
 	switch rest[0] {
 	case "find":
 		words := rest[1:]
 		if len(words) == 0 && !opts.hasQuery {
-			fmt.Fprintln(os.Stderr, "usage: giraffe [--query 'attr:value ...'] [--page N] find <word>... | giraffe --query 'attr:value ...' [--page N] find; giraffe --help explains")
+			fail("usage", "usage: giraffe [--query 'attr:value ...'] [--page N] find <word>... | giraffe --query 'attr:value ...' [--page N] find; giraffe --help explains")
 			return 2
 		}
 		st, code := buildSearchState(ctx)
@@ -189,13 +323,75 @@ func run(ctx context.Context, args []string) int {
 		return runFind(words, opts, st)
 	case "prepare":
 		if len(rest) > 1 || opts.hasQuery || opts.page != 1 {
-			fmt.Fprintln(os.Stderr, "giraffe: prepare takes no options and no arguments; run: giraffe prepare")
+			fail("usage", "giraffe: prepare takes no options and no arguments; run: giraffe prepare")
 			return 2
 		}
-		return runPrepare(ctx)
+		code := runPrepare(ctx)
+		if code == 0 {
+			staleLine()
+		}
+		return code
+	case "install", "update":
+		if opts.hasQuery || opts.page != 1 {
+			fail("usage", "giraffe: "+rest[0]+" takes no --query or --page; run: giraffe "+rest[0])
+			return 2
+		}
+		env := skillEnv()
+		if rest[0] == "update" {
+			if len(rest) > 1 {
+				fail("usage", "giraffe: update takes no options and no arguments; run: giraffe update")
+				return 2
+			}
+			return skillinst.Update(env)
+		}
+		o, err := skillinst.ParseOptions(rest[1:])
+		if err != nil {
+			fail("usage", "giraffe: "+err.Error())
+			return 2
+		}
+		return skillinst.Install(env, o)
 	}
-	fmt.Fprintln(os.Stderr, "giraffe: no bare search; run: "+commandLine(opts, "find", rest))
+	fail("usage", "giraffe: no bare search; run: "+commandLine(opts, "find", rest))
 	return 2
+}
+
+// skillEnv is what install and update work with: the skill embedded in
+// this binary, the global configuration, and the terminal.
+func skillEnv() *skillinst.Env {
+	home, _ := os.UserHomeDir()
+	return &skillinst.Env{
+		Skill:   skill.Text,
+		CfgDir:  gconfig.Dir(),
+		Home:    home,
+		RepoDir: repoDir,
+		In:      bufio.NewReader(os.Stdin),
+		Out:     stdout,
+		Err:     stderr,
+	}
+}
+
+// repoDir is the root of the git repository the current directory is
+// in, "" outside one.
+func repoDir() string {
+	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// staleLine tells a person, in one line, that an installed skill is not
+// the one this giraffe carries (directive 087 §7). Only the commands a
+// person types call it — a bare giraffe, --help and prepare — never
+// find, whose output an agent reads and pays for.
+func staleLine() {
+	n := skillinst.NotCurrent(gconfig.Dir(), skill.Text)
+	switch {
+	case n == 1:
+		fmt.Fprintln(stdout, "giraffe: 1 installed skill is stale or changed by hand; run: giraffe update")
+	case n > 1:
+		fmt.Fprintf(stdout, "giraffe: %d installed skills are stale or changed by hand; run: giraffe update\n", n)
+	}
 }
 
 // commandLine renders a command in the grammar from the options as
@@ -221,18 +417,18 @@ func commandLine(o options, sub string, rest []string) string {
 func buildSearchState(ctx context.Context) (searchState, int) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "giraffe:", err)
+		fail("index", "giraffe: "+err.Error())
 		return searchState{}, 1
 	}
 	homeRoot, err := scanner.Root(cwd)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "giraffe:", err)
+		fail("index", "giraffe: "+err.Error())
 		return searchState{}, 1
 	}
 
 	rootPaths, err := resolveRoots(homeRoot)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "giraffe:", err)
+		fail("index", "giraffe: "+err.Error())
 		return searchState{}, 1
 	}
 
@@ -255,13 +451,13 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 	for _, r := range rootPaths {
 		exclude, err := index.LoadExclude(r)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "giraffe:", err)
+			fail("index", "giraffe: "+err.Error())
 			closeAll()
 			return searchState{}, 1
 		}
 		assignments, err := index.LoadExtensions(r)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "giraffe:", err)
+			fail("index", "giraffe: "+err.Error())
 			closeAll()
 			return searchState{}, 1
 		}
@@ -280,7 +476,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 
 		store, stats, err := index.Refresh(ctx, r, scope, assignments)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "giraffe:", err)
+			fail("index", "giraffe: "+err.Error())
 			closeAll()
 			return searchState{}, 1
 		}
@@ -349,6 +545,7 @@ func buildSearchState(ctx context.Context) (searchState, int) {
 	}
 	sort.Strings(knownLanguages)
 
+	ulog.Indexed(totalDispatched)
 	return searchState{
 		entries:        query.Concat(sources...),
 		stores:         stores,
@@ -388,7 +585,7 @@ func runFind(words []string, opts options, st searchState) int {
 	if queryRaw != "" {
 		filter, err = query.Parse(queryRaw, query.ValidAttributes(st.entries))
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "giraffe:", err)
+			fail("query", "giraffe: "+err.Error())
 			return 2
 		}
 	}
@@ -404,7 +601,7 @@ func runFind(words []string, opts options, st searchState) int {
 		if len(matches) == 0 {
 			summary.TryNext = query.DiagnoseFilter(st.entries, filter)
 		}
-		fmt.Print(output.FormatFrom(summary, matches, page))
+		fmt.Fprint(stdout, output.FormatFrom(summary, matches, page))
 		return 0
 	}
 
@@ -464,7 +661,7 @@ func runFind(words []string, opts options, st searchState) int {
 		summary.File = st.topFile(answers)
 		summary.TopOutline = st.topOutline(answers)
 	}
-	fmt.Print(output.FormatWords(summary, answers, page))
+	fmt.Fprint(stdout, output.FormatWords(summary, answers, page))
 	return 0
 }
 
@@ -871,6 +1068,7 @@ methods, fields, consts, vars) and files, tests included.
   giraffe --query 'attr:value ...' find  browse a place, in file order
   giraffe --page N find <word>...  the next page
   giraffe prepare  build or refresh the index
+  giraffe install | update  put this skill where agents read it
   giraffe --help  this text
 
 Options go before find; every argument after find is a word.
@@ -903,7 +1101,7 @@ func runPrepare(ctx context.Context) int {
 		return code
 	}
 	summary := output.Summarize(st.entries.All(), st.commitLine, st.dispatched, st.warnings, st.ignoreWarnings, st.exclusions, st.knownLanguages)
-	fmt.Print(output.Format(summary, nil))
+	fmt.Fprint(stdout, output.Format(summary, nil))
 	return 0
 }
 

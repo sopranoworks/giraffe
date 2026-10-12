@@ -2,9 +2,10 @@ package index
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sopranoworks/giraffe/internal/gconfig"
 )
 
 // LoadExtensions reads operator language assignments — the only tier
@@ -49,16 +50,7 @@ func LoadExtensions(root string) (map[string]string, error) {
 // resolved, in which case LoadExtensions simply has no global layer to
 // read (a missing environment is not a fatal condition here: the
 // per-project layer alone is still a complete, working configuration).
-func globalConfigDir() string {
-	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
-		return filepath.Join(v, "giraffe")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".config", "giraffe")
-}
+func globalConfigDir() string { return gconfig.Dir() }
 
 // loadExtensionsFile reads path as a list of assignment lines
 // (readLinesAt — the same blank-line/comment/trim convention LoadRoots
