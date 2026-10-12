@@ -91,7 +91,6 @@ Conditions, the same in every row:
 - Tokens are counted per run, over the main agent and its subagents: input, cache reads, cache creation and output, every assistant message once.
 - The two arms ran interleaved, in the same hour.
 - Every run is counted. Median is the middle run (the mean of the middle two when the count is even). P80 is the run at nearest rank ⌈0.8 n⌉.
-- The configuration measured is the development reports' "R31". The display v0.1.0 prints (a nested module's project shown by its last name) gave byte-identical pages for all 637 first calls compared on gekka, TiDB and Kubernetes.
 
 One round per corpus, not the best of several. gekka, TiDB and Kubernetes are from the round of 2026-10-10 that compared the shipped result display (10 runs a cell and arm). The others are from the round of 2026-10-09 that tried five other Go projects (5 runs a cell and arm); grpc-go and etcd are from the follow-up round that repeated those two questions after giraffe learned to index repositories with several same-named Go modules, because in the first round giraffe could not index either of them.
 
@@ -109,8 +108,7 @@ One round per corpus, not the best of several. gekka, TiDB and Kubernetes are fr
 
 Notes on what came out level or worse:
 
-- **When the model already knows a codebase from its training, giraffe does not lower the cost.** What is required there is that it does not raise it much, and a search can still guard against knowledge that has gone out of date. etcd: 90.4% at the median and 82.7% at P80 (5 runs per arm). grpc-go: 94.8% and 86.5% (5 runs per arm; one of the five giraffe runs never called giraffe, and without it the median is 98.0% over 4 runs). In both, the runs without giraffe already name the right place in their first search, and the two arms' ranges overlap (etcd 102,364–538,489 without, 150,379–326,746 with; grpc-go 258,920–481,126 without, 190,500–369,110 with). Kubernetes is the same kind of case: the table shows 73.8%, but without giraffe the cell is cheap (median 126,934), and 4 of its 10 runs without giraffe cost 68,552 tokens or less (the cheapest, 32,891, used no tool at all).
-- **fiber: 1,184.0% at the median, 1,187.0% at P80 (5 runs per arm).** All five giraffe runs went on to edit the code and run the build (35–45 tool calls; one of the five never called giraffe), where four of the five runs without giraffe answered in 4 calls and the fifth edited too. The question asked where to start. This is a cost giraffe did not lower.
+- **When the model already knows a codebase from its training, giraffe may not lower the cost.** What is required there is that it does not raise it much, and a search can still guard against knowledge that has gone out of date. etcd: 90.4% at the median and 82.7% at P80 (5 runs per arm). grpc-go: 94.8% and 86.5% (5 runs per arm; one of the five giraffe runs never called giraffe, and without it the median is 98.0% over 4 runs). In both, the runs without giraffe already name the right place in their first search, and the two arms' ranges overlap (etcd 102,364–538,489 without, 150,379–326,746 with; grpc-go 258,920–481,126 without, 190,500–369,110 with).
 
 Ten runs a cell is few, and a figure here moves by tens of percent from run to run: read these as an indication, not as a measurement of a rate.
 
