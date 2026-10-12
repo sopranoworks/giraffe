@@ -92,7 +92,7 @@ Conditions, the same in every row:
 - The two arms ran interleaved, in the same hour.
 - Every run is counted. Median is the middle run (the mean of the middle two when the count is even). P80 is the run at nearest rank ⌈0.8 n⌉.
 
-One round per corpus, not the best of several. gekka, TiDB and Kubernetes are from the round of 2026-10-10 that compared the shipped result display (10 runs a cell and arm). The others are from the round of 2026-10-09 that tried five other Go projects (5 runs a cell and arm); grpc-go and etcd are from the follow-up round that repeated those two questions after giraffe learned to index repositories with several same-named Go modules, because in the first round giraffe could not index either of them.
+One round per corpus, not the best of several. gekka, TiDB and Kubernetes are from the round of 2026-10-10 that compared the shipped result display (10 runs a cell and arm). The others are from the round of 2026-10-09 that tried several other Go projects (5 runs a cell and arm); grpc-go and etcd are from the follow-up round that repeated those questions after giraffe learned to index repositories with several same-named Go modules, because in the first round giraffe could not index either of them.
 
 | Corpus | Question, in a few words | Median, giraffe as % of without | P80, giraffe as % of without | Runs per arm |
 |---|---|---:|---:|---:|
