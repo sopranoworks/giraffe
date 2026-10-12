@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"giraffe/internal/scanner"
+	"github.com/sopranoworks/giraffe/internal/scanner"
 )
 
 // Stats summarises one Refresh call — the evidence prior directives'

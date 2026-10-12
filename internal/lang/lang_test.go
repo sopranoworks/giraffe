@@ -3,8 +3,8 @@ package lang
 import (
 	"testing"
 
-	"giraffe/internal/entry"
-	"giraffe/internal/scanner"
+	"github.com/sopranoworks/giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/scanner"
 )
 
 // TestExtract_DispatchesGoToTheGoModule confirms the registration order

@@ -12,7 +12,7 @@ package index
 import (
 	"strings"
 
-	"giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/entry"
 )
 
 // Dir is where giraffe's own files live, at the repository root: hand-

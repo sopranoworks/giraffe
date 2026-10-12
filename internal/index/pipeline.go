@@ -29,9 +29,9 @@ import (
 	"sort"
 	"sync"
 
-	"giraffe/internal/entry"
-	"giraffe/internal/lang"
-	"giraffe/internal/scanner"
+	"github.com/sopranoworks/giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/lang"
+	"github.com/sopranoworks/giraffe/internal/scanner"
 )
 
 // extractWorkers is the extract stage's fixed, small worker count (§3

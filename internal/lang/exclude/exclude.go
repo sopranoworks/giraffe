@@ -16,8 +16,8 @@ package exclude
 import (
 	"path"
 
-	"giraffe/internal/entry"
-	"giraffe/internal/scanner"
+	"github.com/sopranoworks/giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/scanner"
 )
 
 // deniedExtensions are binary, compiled and archive formats excluded

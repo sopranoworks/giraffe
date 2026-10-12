@@ -18,8 +18,8 @@ import (
 	"sort"
 	"strings"
 
-	"giraffe/internal/entry"
-	"giraffe/internal/scanner"
+	"github.com/sopranoworks/giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/scanner"
 )
 
 // Extensions lists the file extensions this module wants from the

@@ -6,8 +6,8 @@ import (
 	"os/exec"
 	"testing"
 
-	"giraffe/internal/entry"
-	"giraffe/internal/scanner"
+	"github.com/sopranoworks/giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/scanner"
 )
 
 // loadEnumCacheForTest opens root's store read-only and decodes its enum

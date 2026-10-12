@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/entry"
 )
 
 func TestParse_ValidAndInvalid(t *testing.T) {

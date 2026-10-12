@@ -9,7 +9,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
-	"giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/entry"
 )
 
 func TestStore_BuildAndQuery_RoundTrip(t *testing.T) {

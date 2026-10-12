@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"giraffe/internal/entry"
-	"giraffe/internal/query"
+	"github.com/sopranoworks/giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/query"
 )
 
 // TestParseOptions_Page (directive 033, replacing 032's --offset;

@@ -16,13 +16,13 @@ import (
 	"strings"
 	"unicode"
 
-	"giraffe/internal/entry"
-	"giraffe/internal/index"
-	"giraffe/internal/lang"
-	"giraffe/internal/limits"
-	"giraffe/internal/output"
-	"giraffe/internal/query"
-	"giraffe/internal/scanner"
+	"github.com/sopranoworks/giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/index"
+	"github.com/sopranoworks/giraffe/internal/lang"
+	"github.com/sopranoworks/giraffe/internal/limits"
+	"github.com/sopranoworks/giraffe/internal/output"
+	"github.com/sopranoworks/giraffe/internal/query"
+	"github.com/sopranoworks/giraffe/internal/scanner"
 )
 
 func main() {

@@ -13,7 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/entry"
 )
 
 // Entries is what Search, Suggest, Browse, and ValidAttributes need from

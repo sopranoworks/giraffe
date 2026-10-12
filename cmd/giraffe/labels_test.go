@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"giraffe/internal/index"
+	"github.com/sopranoworks/giraffe/internal/index"
 )
 
 // Directive 077: two configured roots with the same project name no

@@ -3,7 +3,7 @@ package exclude
 import (
 	"testing"
 
-	"giraffe/internal/scanner"
+	"github.com/sopranoworks/giraffe/internal/scanner"
 )
 
 // TestExtract_ClaimsADeniedExtension (moved from

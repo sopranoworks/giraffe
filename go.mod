@@ -1,4 +1,4 @@
-module giraffe
+module github.com/sopranoworks/giraffe
 
 go 1.25.0
 

@@ -12,8 +12,8 @@ package file
 import (
 	"path"
 
-	"giraffe/internal/entry"
-	"giraffe/internal/scanner"
+	"github.com/sopranoworks/giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/scanner"
 )
 
 // Extract always handles f, and never touches its content: a file this

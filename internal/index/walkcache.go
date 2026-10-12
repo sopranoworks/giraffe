@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"giraffe/internal/scanner"
+	"github.com/sopranoworks/giraffe/internal/scanner"
 )
 
 // encodeWalkCache renders w as one self-contained line per (directory,

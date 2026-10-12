@@ -29,7 +29,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
-	"giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/entry"
 )
 
 // storeFilename replaces the two text files (cache/entries, cache/enum)

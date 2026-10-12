@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode"
 
-	"giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/entry"
 )
 
 const (

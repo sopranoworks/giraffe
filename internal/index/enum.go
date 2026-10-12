@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"giraffe/internal/scanner"
+	"github.com/sopranoworks/giraffe/internal/scanner"
 )
 
 // enumerateOutcome is the enumerate stage's own findings: written once,

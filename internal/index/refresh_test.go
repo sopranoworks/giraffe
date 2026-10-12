@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"giraffe/internal/entry"
-	"giraffe/internal/lang"
-	"giraffe/internal/scanner"
+	"github.com/sopranoworks/giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/lang"
+	"github.com/sopranoworks/giraffe/internal/scanner"
 )
 
 func gitRepo(t *testing.T) string {

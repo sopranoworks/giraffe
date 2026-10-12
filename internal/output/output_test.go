@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/entry"
 )
 
 func TestFormat_IndexLineAlwaysPresent_EmptySectionsOmitted(t *testing.T) {

@@ -10,11 +10,11 @@ package lang
 import (
 	"sort"
 
-	"giraffe/internal/entry"
-	"giraffe/internal/lang/exclude"
-	"giraffe/internal/lang/file"
-	"giraffe/internal/lang/golang"
-	"giraffe/internal/scanner"
+	"github.com/sopranoworks/giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/lang/exclude"
+	"github.com/sopranoworks/giraffe/internal/lang/file"
+	"github.com/sopranoworks/giraffe/internal/lang/golang"
+	"github.com/sopranoworks/giraffe/internal/scanner"
 )
 
 // Extractor is what a language module is: given a scanned file, it

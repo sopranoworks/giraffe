@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"giraffe/internal/entry"
-	"giraffe/internal/scanner"
+	"github.com/sopranoworks/giraffe/internal/entry"
+	"github.com/sopranoworks/giraffe/internal/scanner"
 )
 
 const src = `// Package sample is a fixture for the extractor's own tests.
