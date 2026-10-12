@@ -153,8 +153,16 @@ func openStore(root string, readOnly bool) (s *Store, ok bool, err error) {
 // on a first run.
 func createStore(root string) (*Store, error) {
 	dir := filepath.Join(root, Dir, cacheDir)
+	_, statErr := os.Stat(filepath.Join(root, Dir))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create %s/%s: %w", Dir, cacheDir, err)
+	}
+	if os.IsNotExist(statErr) {
+		// Directive 087 §8: a .giraffe/ giraffe creates ignores itself, so
+		// the cache is never committed and no .gitignore of the
+		// repository's is touched. An existing .giraffe/ is the
+		// operator's, and left as it is.
+		_ = os.WriteFile(filepath.Join(root, Dir, ".gitignore"), []byte("*\n"), 0o644)
 	}
 	path := filepath.Join(dir, storeFilename)
 	_ = os.Remove(path)
